@@ -34,10 +34,10 @@ issued over ACME.
 ## Running handrail-ca against it
 
 ```sh
-make dev-up && make dev-test      # dev-test also writes the root certificate
+make dev-up                       # prints the root fingerprint
 export HANDRAIL_DATA=$PWD/deploy/dev/.secrets/handrail-data
 export HANDRAIL_CA_URL=https://localhost:19000
-export HANDRAIL_CA_ROOT=$PWD/deploy/dev/.secrets/root_ca.crt
+export HANDRAIL_CA_FINGERPRINT=<the fingerprint make dev-up printed>
 go run ./cmd/handrail-ca user add -role operator dev
 go run ./cmd/handrail-ca          # http://127.0.0.1:8080
 ```
@@ -55,7 +55,7 @@ go run ./cmd/handrail-ca          # http://127.0.0.1:8080
   role script.
 - `verify.sh`: the checks behind `make dev-verify`.
 - `test.sh`: runs the Go tests named `TestIntegration...` with the CA's
-  address and root certificate in the environment. Those tests are skipped
+  address and root fingerprint in the environment. Those tests are skipped
   everywhere else.
 
 ## Raising the step-ca version

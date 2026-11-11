@@ -6,14 +6,11 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 
-# The CA's root certificate, copied out of the CA's volume the way an
-# operator copies root_ca.crt from the CA's host. It is not a secret; it
-# sits with the passwords because that directory is this environment's
-# local, uncommitted state.
-root="$(pwd)/.secrets/root_ca.crt"
-docker compose exec -T ca sh -c 'cat "$(step path)/certs/root_ca.crt"' >"$root"
+# The fingerprint of the CA's root certificate, as an operator would read it
+# off the CA's host.
+fingerprint=$(docker compose exec -T ca sh -c 'step certificate fingerprint "$(step path)/certs/root_ca.crt"')
 
 cd ../..
 HANDRAIL_DEV_CA_URL=https://localhost:19000 \
-	HANDRAIL_DEV_CA_ROOT="$root" \
+	HANDRAIL_DEV_CA_FINGERPRINT="$fingerprint" \
 	go test -race -count=1 -v -run '^TestIntegration' ./...

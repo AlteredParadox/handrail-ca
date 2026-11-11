@@ -30,15 +30,11 @@ import (
 // skipped without it; `make dev-test` sets the variables. The site is the
 // usual test site with the real CA client in place of the fake one.
 func TestIntegrationStatusPage(t *testing.T) {
-	caURL, rootFile := os.Getenv("HANDRAIL_DEV_CA_URL"), os.Getenv("HANDRAIL_DEV_CA_ROOT")
-	if caURL == "" || rootFile == "" {
+	caURL, fingerprint := os.Getenv("HANDRAIL_DEV_CA_URL"), os.Getenv("HANDRAIL_DEV_CA_FINGERPRINT")
+	if caURL == "" || fingerprint == "" {
 		t.Skip("no development CA: run `make dev-up` and `make dev-test`")
 	}
-	rootPEM, err := os.ReadFile(rootFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	client, err := ca.New(ca.Config{URL: caURL, RootPEM: rootPEM})
+	client, err := ca.New(ca.Config{URL: caURL, Fingerprint: fingerprint})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -53,7 +49,7 @@ func TestIntegrationStatusPage(t *testing.T) {
 	// provisioners, one of them handrail-ca's with a 90-day cap.
 	wantBody(t, page,
 		">Reachable<", caURL,
-		"Handrail Dev CA Root CA", grouped(ca.Fingerprint(client.TrustedRoots()[0])),
+		"Handrail Dev CA Root CA", grouped(fingerprint), "was fetched from the CA and matched",
 		"Handrail Dev CA Intermediate CA",
 		"No revocation list",
 		"Admin JWK", "5 minutes", "handrail", "90 days", "acme",

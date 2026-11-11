@@ -35,23 +35,28 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{with .HealthProblem}}<p class="problem">The CA did not answer its health check: {{.}}</p>{{end}}
 </section>
 
-{{$rootsProblem := .RootsProblem}}
-{{range .Trusted}}
 <section class="card">
 <div class="card-head">
 <h2>Root certificate</h2>
-{{if .Expired}}<span class="badge bad">Expired</span>{{end}}
+{{if not .Root}}<span class="badge unknown">Not fetched</span>
+{{else if .Root.Expired}}<span class="badge bad">Expired</span>{{end}}
 </div>
 <dl>
+{{with .Root}}
 <dt>Subject</dt><dd>{{.Subject}}</dd>
 <dt>Expires</dt><dd>{{.Expires}}</dd>
-<dt>SHA-256</dt><dd class="mono small">{{.Fingerprint}}</dd>
-</dl>
-<p class="muted">This is the certificate handrail-ca was configured with. Every connection to the CA is verified against it.</p>
-{{if $rootsProblem}}<p class="problem">Whether the CA still publishes this root could not be checked: {{$rootsProblem}}</p>
-{{else if not .Listed}}<p class="problem">The CA does not list this certificate among its roots.</p>{{end}}
-</section>
 {{end}}
+<dt>SHA-256</dt><dd class="mono small">{{.RootFingerprint}}</dd>
+</dl>
+{{if .Root}}
+<p class="muted">This fingerprint is the one handrail-ca was configured with. The root was fetched from the CA and matched against it, and every connection to the CA is verified against that root.</p>
+{{if .RootsProblem}}<p class="problem">Whether the CA still publishes this root could not be checked: {{.RootsProblem}}</p>
+{{else if not .Root.Listed}}<p class="problem">The CA does not list this certificate among its roots.</p>{{end}}
+{{else}}
+<p class="muted">This fingerprint is the one handrail-ca was configured with. Nothing from the CA is trusted until a root with this fingerprint has been fetched from it.</p>
+<p class="problem">The root could not be fetched: {{.RootProblem}}</p>
+{{end}}
+</section>
 
 {{range .Intermediates}}
 <section class="card">

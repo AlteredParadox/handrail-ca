@@ -19,15 +19,8 @@ package main
 import (
 	"bytes"
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
-	"crypto/x509"
-	"crypto/x509/pkix"
-	"encoding/pem"
 	"io"
 	"log/slog"
-	"math/big"
 	"net"
 	"net/http"
 	"os"
@@ -71,40 +64,20 @@ func TestRunBadFlag(t *testing.T) {
 	}
 }
 
-// rootFile writes a CA certificate to a file, to stand for root_ca.crt.
-func rootFile(t *testing.T) string {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatal(err)
-	}
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Test Root CA"},
-		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
-		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	if err != nil {
-		t.Fatal(err)
-	}
-	path := filepath.Join(t.TempDir(), "root_ca.crt")
-	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	return path
-}
+// testFingerprint is a well-formed root fingerprint that is no CA's.
+var testFingerprint = strings.Repeat("ab", 32)
 
 // serverArgs is a complete configuration: a fresh data directory, a CA
-// address nothing listens on, and a root certificate.
+// address nothing listens on, and a root fingerprint.
 func serverArgs(t *testing.T, listen string, more ...string) []string {
 	t.Helper()
 	clearEnv(t)
-	return append([]string{"-listen", listen, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-root", rootFile(t)}, more...)
+	return append([]string{"-listen", listen, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-fingerprint", testFingerprint}, more...)
 }
 
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_ROOT", "HANDRAIL_PUBLIC_URL", "HANDRAIL_TRUSTED_PROXIES"} {
+	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_FINGERPRINT", "HANDRAIL_PUBLIC_URL", "HANDRAIL_TRUSTED_PROXIES"} {
 		t.Setenv(name, "")
 	}
 }
@@ -195,15 +168,7 @@ func waitForHealth(t *testing.T, addr string, log *syncBuffer) {
 }
 
 func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
-	root := rootFile(t)
-	notACert := filepath.Join(t.TempDir(), "junk")
-	if err := os.WriteFile(notACert, []byte("not a certificate"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	huge := filepath.Join(t.TempDir(), "huge")
-	if err := os.WriteFile(huge, bytes.Repeat([]byte("x"), 1<<20+1), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	root := testFingerprint
 	dataIsAFile := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(dataIsAFile, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -216,19 +181,17 @@ func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
 		code int
 		want string
 	}{
-		{"nothing", nil, 2, "not configured: -data (HANDRAIL_DATA), -ca-url (HANDRAIL_CA_URL), -ca-root (HANDRAIL_CA_ROOT)"},
-		{"no CA", []string{"-data", data}, 2, "not configured: -ca-url (HANDRAIL_CA_URL), -ca-root"},
-		{"trusted proxy by name", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-trusted-proxy", "proxy.internal.example"}, 2, "-trusted-proxy: invalid IP address or CIDR range: proxy.internal.example"},
+		{"nothing", nil, 2, "not configured: -data (HANDRAIL_DATA), -ca-url (HANDRAIL_CA_URL), -ca-fingerprint (HANDRAIL_CA_FINGERPRINT)"},
+		{"no CA", []string{"-data", data}, 2, "not configured: -ca-url (HANDRAIL_CA_URL), -ca-fingerprint"},
+		{"trusted proxy by name", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-trusted-proxy", "proxy.internal.example"}, 2, "-trusted-proxy: invalid IP address or CIDR range: proxy.internal.example"},
 		{"stray argument", []string{"-data", data, "serve"}, 2, `unexpected argument "serve"`},
-		{"data directory is a file", []string{"-data", dataIsAFile, "-ca-url", "https://ca.invalid", "-ca-root", root}, 1, "opening the store"},
-		{"no root file", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", filepath.Join(data, "none")}, 1, "reading the CA's root certificate"},
-		{"root file too large", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", huge}, 1, "is larger than"},
-		{"root is not a certificate", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", notACert}, 1, "no PEM certificate"},
-		{"CA over plain HTTP", []string{"-data", data, "-ca-url", "http://ca.invalid", "-ca-root", root}, 1, "must start with https://"},
-		{"bad public URL", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-public-url", "handrail.example"}, 1, "-public-url"},
-		{"plain HTTP public URL beyond this machine", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-public-url", "http://handrail.example"}, 1, "only accepted for a loopback address"},
-		{"beyond loopback without a public URL", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root}, 1, "-public-url (HANDRAIL_PUBLIC_URL) is required"},
-		{"beyond loopback without an account", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-public-url", "https://handrail.example"}, 1, "no accounts yet"},
+		{"data directory is a file", []string{"-data", dataIsAFile, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root}, 1, "opening the store"},
+		{"fingerprint is not one", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", "root_ca.crt"}, 1, "64 hexadecimal characters"},
+		{"CA over plain HTTP", []string{"-data", data, "-ca-url", "http://ca.invalid", "-ca-fingerprint", root}, 1, "must start with https://"},
+		{"bad public URL", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "handrail.example"}, 1, "-public-url"},
+		{"plain HTTP public URL beyond this machine", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "http://handrail.example"}, 1, "only accepted for a loopback address"},
+		{"beyond loopback without a public URL", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root}, 1, "-public-url (HANDRAIL_PUBLIC_URL) is required"},
+		{"beyond loopback without an account", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "https://handrail.example"}, 1, "no accounts yet"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

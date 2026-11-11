@@ -75,13 +75,19 @@ type fakeCA struct {
 	crl         ca.CRL
 	version     string
 
-	healthErr, versionErr, rootsErr, intersErr, provsErr, crlErr error
-	calls                                                        atomic.Int64
+	healthErr, versionErr, rootErr, rootsErr, intersErr, provsErr, crlErr error
+	calls                                                                 atomic.Int64
 }
 
-func (f *fakeCA) URL() string                       { return "https://ca.internal.example:9000" }
-func (f *fakeCA) TrustedRoots() []*x509.Certificate { return []*x509.Certificate{f.root} }
-func (f *fakeCA) Health(context.Context) error      { f.calls.Add(1); return f.healthErr }
+func (f *fakeCA) URL() string             { return "https://ca.internal.example:9000" }
+func (f *fakeCA) RootFingerprint() string { return ca.Fingerprint(f.root) }
+func (f *fakeCA) Root(context.Context) (*x509.Certificate, error) {
+	if f.rootErr != nil {
+		return nil, f.rootErr
+	}
+	return f.root, nil
+}
+func (f *fakeCA) Health(context.Context) error { f.calls.Add(1); return f.healthErr }
 func (f *fakeCA) Version(context.Context) (string, error) {
 	return f.version, f.versionErr
 }
@@ -1126,7 +1132,7 @@ func TestStatusPageShowsWhatItCouldNotLearn(t *testing.T) {
 		"intermediate certificates could not be read: the CA answered 404",
 		"Whether the CA publishes a revocation list could not be determined",
 		"provisioners could not be read",
-		// The configured root is shown whatever the CA says.
+		// The root was fetched before things went wrong, and is still shown.
 		"Example Root CA",
 	)
 	// Text from the CA is escaped, and a failure is never shown as a no.
@@ -1135,6 +1141,31 @@ func TestStatusPageShowsWhatItCouldNotLearn(t *testing.T) {
 	}
 	if strings.Contains(page.Body.String(), "No revocation list") || strings.Contains(page.Body.String(), ">Reachable<") {
 		t.Error("an unknown state is shown as a known one")
+	}
+}
+
+// Until a root with the configured fingerprint has been fetched, the page
+// shows the fingerprint and says so; it does not show a root it has not
+// checked.
+func TestStatusPageBeforeTheRootIsFetched(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	down := errors.New("pinning the CA's root: dial tcp: connection refused")
+	s.ca.rootErr, s.ca.healthErr, s.ca.rootsErr = down, down, down
+
+	page := b.get("/status")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page,
+		"Not fetched", grouped(ca.Fingerprint(s.ca.root)),
+		"Nothing from the CA is trusted until a root with this fingerprint has been fetched",
+		"The root could not be fetched: pinning the CA&#39;s root: dial tcp: connection refused",
+		"Not reachable",
+	)
+	for _, absent := range []string{"Example Root CA", "2035-11-11", "was fetched from the CA and matched"} {
+		if strings.Contains(page.Body.String(), absent) {
+			t.Errorf("the page shows %q for a root that was never fetched", absent)
+		}
 	}
 }
 
