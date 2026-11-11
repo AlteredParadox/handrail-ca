@@ -206,7 +206,10 @@ must chain to the fetched root for the configured host name, so a server
 that only relays the CA's public root is refused. (For a while the
 operator supplied the root as a file instead, which needs no such request;
 the owner chose the fingerprint on 2026-11-11, a string being easier to
-handle than a file.) The root is pinned on first use, so handrail-ca
+handle than a file.) That one request has a file to itself
+(`internal/ca/rootfetch.go`), the exceptions made for it are scoped to
+that file, and a test fails if certificate verification is switched off
+anywhere else in the repository. The root is pinned on first use, so handrail-ca
 starts, and reports it, while the CA is down. Redirects are not followed
 and every answer is size-bounded. `github.com/smallstep/certificates/ca` is not
 imported: it links 491 non-standard-library packages, including two Badger
