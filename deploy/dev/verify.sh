@@ -147,7 +147,20 @@ done
 for t in used_ott provisioners admins acme_accounts; do
 	check "handrail cannot read $t" bash -c "! docker compose exec -T db psql -U handrail -d stepca -At -c 'select count(*) from $t'"
 done
-check "handrail cannot write" bash -c "! docker compose exec -T db psql -U handrail -d stepca -At -c \"delete from x509_certs where nkey = convert_to('0', 'UTF8')\""
+# The grants themselves, asked of the catalog as the owner. The role's
+# sessions are read-only by default, so a failed write proves nothing about
+# what it has been granted: that default can be switched off by the session.
+# Tables are named by oid: several of step-ca's have mixed-case names.
+same "handrail has SELECT on exactly the three tables" \
+	"$(sql "select string_agg(c.relname, ',' order by c.relname) from pg_class c join pg_namespace n on n.oid = c.relnamespace where n.nspname = 'public' and c.relkind = 'r' and has_table_privilege('handrail', c.oid, 'SELECT')")" \
+	"revoked_x509_certs,x509_certs,x509_certs_data"
+same "handrail has no write privilege on any table" \
+	"$(sql "select count(*) from pg_class c join pg_namespace n on n.oid = c.relnamespace cross join (values ('INSERT'), ('UPDATE'), ('DELETE'), ('TRUNCATE'), ('REFERENCES'), ('TRIGGER')) p(priv) where n.nspname = 'public' and c.relkind = 'r' and has_table_privilege('handrail', c.oid, p.priv)")" "0"
+same "handrail cannot create objects in the schema or the database" \
+	"$(sql "select has_schema_privilege('handrail', 'public', 'CREATE') or has_database_privilege('handrail', 'stepca', 'CREATE')")" "f"
+same "handrail is a plain role (no superuser, createdb, createrole, replication, bypassrls)" \
+	"$(sql "select rolsuper or rolcreatedb or rolcreaterole or rolreplication or rolbypassrls from pg_roles where rolname = 'handrail'")" "f"
+same "handrail's sessions are read-only by default" "$(rosql "show default_transaction_read_only")" "on"
 
 echo
 if [[ "$failed" -eq 0 ]]; then
