@@ -110,6 +110,7 @@ type server struct {
 	hashSlots chan struct{} // bounds concurrent password hashing
 	dummyHash string        // checked when the user does not exist
 	status    *statusCache
+	strangers strangerBudget
 
 	// historyBroken is set while the last history write failed; every page
 	// then says that history is not being recorded.

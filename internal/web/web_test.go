@@ -1319,3 +1319,48 @@ func TestParseTrustedProxies(t *testing.T) {
 		}
 	}
 }
+
+// History rows are never deleted, so what a stranger can add to them has to
+// be bounded. Behind a proxy that was not declared there is no limit per
+// visitor, and a made-up user name is counted against nothing: without a
+// cap, anyone who can reach the sign-in page could fill the disk.
+func TestStrangersCannotFillTheHistory(t *testing.T) {
+	s := newSite(t, "https://handrail.internal.example") // an undeclared proxy
+	const attempts = 60
+	for i := range attempts {
+		b := s.browser()
+		if i%2 == 0 {
+			wantStatus(t, b.signIn("not a name", "x"), http.StatusUnauthorized)
+		} else {
+			// Each made-up name is new to the throttle, and costs a hash.
+			wantStatus(t, b.signIn(fmt.Sprintf("made-up-%d", i), "x"), http.StatusUnauthorized)
+		}
+	}
+	if n := len(s.history()); n != strangerRows {
+		t.Fatalf("%d history rows for %d attempts by nobody, want %d", n, attempts, strangerRows)
+	}
+	// Every one of them is in the log all the same.
+	if n := strings.Count(s.log.String(), `msg=audit actor="(unknown user)" action=sign-in outcome=failed`); n != attempts {
+		t.Errorf("%d of %d attempts are in the log", n, attempts)
+	}
+
+	// What happens to real accounts is recorded regardless.
+	wantStatus(t, s.browser().signIn("alice", "wrong"), http.StatusUnauthorized)
+	wantRedirect(t, s.browser().signIn("bob", bobPassword), "/")
+	events := s.history()
+	if len(events) != strangerRows+2 || events[0].Actor != "bob" || events[1].Actor != "alice" || events[1].Outcome != store.OutcomeFailed {
+		t.Fatalf("after two real sign-ins: %d rows, newest %+v", len(events), events[0])
+	}
+
+	// The next hour's first row says how many went unrecorded before it.
+	s.clock.advance(strangerWindow)
+	wantStatus(t, s.browser().signIn("not a name", "x"), http.StatusUnauthorized)
+	last := s.history()[0]
+	if want := fmt.Sprintf("%d more like it since the last one recorded here are in the log only", attempts-strangerRows); last.Actor != unknownActor || !strings.Contains(last.Detail, want) {
+		t.Errorf("the first row of the next hour = %+v, want it to mention %q", last, want)
+	}
+	wantStatus(t, s.browser().signIn("not a name", "x"), http.StatusUnauthorized)
+	if last := s.history()[0]; strings.Contains(last.Detail, "more like it") {
+		t.Errorf("the count was reported twice: %+v", last)
+	}
+}

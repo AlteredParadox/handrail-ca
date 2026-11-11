@@ -272,8 +272,8 @@ func TestUserReportsAnUnusableDataDirectory(t *testing.T) {
 func atTerminal(t *testing.T, answers ...string) *[]string {
 	t.Helper()
 	var asked []string
-	real := newPrompt
-	t.Cleanup(func() { newPrompt = real })
+	saved := newPrompt
+	t.Cleanup(func() { newPrompt = saved })
 	newPrompt = func(context.Context, io.Reader, io.Writer) func(string) (string, error) {
 		return func(question string) (string, error) {
 			asked = append(asked, question)

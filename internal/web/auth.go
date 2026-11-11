@@ -24,6 +24,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"sync"
@@ -382,23 +383,79 @@ const unknownActor = "(unknown user)"
 
 func (s *server) recordSignIn(r *http.Request, username string, ok bool, detail string) {
 	e := store.Event{Actor: username, Action: store.ActionSignIn, Outcome: store.OutcomeFailed, Detail: detail}
-	if username == "" {
-		e.Actor = unknownActor
-	}
 	if ok {
 		e.Outcome = store.OutcomeOK
 	}
-	s.record(r, e)
+	if username != "" {
+		// An account's own sign-ins, good and bad: always in the history.
+		// The throttle bounds how many of them there can be.
+		s.record(r, e)
+		return
+	}
+	// A failed sign-in for a name that is no account. Anyone who can reach
+	// the page can produce these without limit, and history rows are never
+	// deleted, so only so many per hour become rows; all of them are logged.
+	e.Actor = unknownActor
+	write, unrecorded := s.strangers.admit(s.opts.Now())
+	if unrecorded > 0 {
+		e.Detail += fmt.Sprintf("; %d more like it since the last one recorded here are in the log only", unrecorded)
+	}
+	if write {
+		s.record(r, e)
+		return
+	}
+	s.logEvent(r, &e)
+}
+
+// strangerRows failed sign-ins for names that are not accounts are written
+// to the history per strangerWindow; the rest are counted and logged.
+const (
+	strangerRows   = 12
+	strangerWindow = time.Hour
+)
+
+// strangerBudget keeps sign-in attempts by nobody in particular from
+// filling the history, which is append-only and sits on the same disk as
+// the accounts.
+type strangerBudget struct {
+	mu         sync.Mutex
+	start      time.Time
+	written    int
+	unrecorded int
+}
+
+// admit says whether the attempt happening now gets a history row. With a
+// yes it also returns how many attempts were passed over since the last
+// row, for that row to mention.
+func (b *strangerBudget) admit(now time.Time) (write bool, unrecorded int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if now.Sub(b.start) >= strangerWindow {
+		b.start, b.written = now, 0
+	}
+	if b.written >= strangerRows {
+		b.unrecorded++
+		return false, 0
+	}
+	b.written++
+	unrecorded, b.unrecorded = b.unrecorded, 0
+	return true, unrecorded
+}
+
+// logEvent stamps an event with the time and the client's address and
+// writes it to the log.
+func (s *server) logEvent(r *http.Request, e *store.Event) {
+	e.At = s.opts.Now()
+	e.Remote, _ = s.clientAddr(r)
+	s.log.Info("audit", "actor", e.Actor, "action", e.Action, "outcome", e.Outcome,
+		"serial", e.Serial, "subject", e.Subject, "detail", e.Detail, "remote", e.Remote)
 }
 
 // record writes an event to the log and to the history. Per the audit rule
 // a history that cannot be written never blocks the action: the failure is
 // logged and every page says so until a write succeeds again.
 func (s *server) record(r *http.Request, e store.Event) {
-	e.At = s.opts.Now()
-	e.Remote, _ = s.clientAddr(r)
-	s.log.Info("audit", "actor", e.Actor, "action", e.Action, "outcome", e.Outcome,
-		"serial", e.Serial, "subject", e.Subject, "detail", e.Detail, "remote", e.Remote)
+	s.logEvent(r, &e)
 	// Not the request's context: the event is recorded even if the browser
 	// has already gone away.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)

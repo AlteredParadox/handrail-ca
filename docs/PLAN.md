@@ -317,6 +317,14 @@ As built in milestone 1:
   block everyone's sign-in. handrail-ca warns at start in the first case.
 - A sign-in for a name that is not an account is recorded as "(unknown
   user)", never with what was typed: people type passwords into that field.
+- History rows are never deleted, so what someone who is not signed in can
+  add to them is bounded. Failed sign-ins on a real account are always
+  rows, and the throttle caps them at five per account per five minutes.
+  Failed sign-ins for names that are not accounts become rows at most
+  twelve times an hour; the rest are counted, written to the log like every
+  other, and the next row says how many were passed over. Without this,
+  anyone able to reach the sign-in page could grow the store until the
+  disk it shares with the accounts was full.
 - At most two passwords are hashed at once (64 MiB each), and a missing
   account costs the same hash as a wrong password.
 - A session is created only if the account still has the password hash
