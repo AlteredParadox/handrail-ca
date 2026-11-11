@@ -1,0 +1,63 @@
+version: 2
+
+# Every Dependabot PR is gated by the `check`, `vuln` and `image` jobs in
+# ci.yml. The `scan` job in sonarqube.yml is skipped for these PRs —
+# Dependabot events run with a restricted token that cannot read
+# SONAR_TOKEN, so the scan could only fail on auth. `scan` is a required
+# check too; a skipped job satisfies it.
+updates:
+  # Grouping needs an explicit applies-to per kind: a group with no
+  # applies-to covers version updates ONLY, so security updates would arrive
+  # one PR per advisory. Both kinds are grouped here.
+  #
+  # The version-update groups, in every ecosystem below, deliberately cover
+  # minor and patch ONLY. Majors fall outside every group and so arrive as
+  # one PR each — a grouped PR labelled "N updates" hides breaking jumps, and
+  # one major per PR keeps them individually reviewable and revertable.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      go:
+        applies-to: version-updates
+        update-types: ['minor', 'patch']
+        patterns: ['*']
+      go-security:
+        applies-to: security-updates
+        patterns: ['*']
+
+  # github-actions understands the "pinned SHA + # vX.Y.Z" pattern in the
+  # workflows and bumps both together. CAVEAT: it only refreshes a trailing
+  # comment that already carries a FULL version — a bare "# v7" is left
+  # untouched while the SHA advances, so the comment silently starts lying.
+  # After any actions bump, grep `uses: .*@` across .github/workflows/ and
+  # hand-fix mismatches.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        applies-to: version-updates
+        update-types: ['minor', 'patch']
+        patterns: ['*']
+      github-actions-security:
+        applies-to: security-updates
+        patterns: ['*']
+
+  # The Dockerfile pins both base images by digest; this refreshes them the
+  # same way the actions pins are refreshed.
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      docker:
+        applies-to: version-updates
+        update-types: ['minor', 'patch']
+        patterns: ['*']
+      docker-security:
+        applies-to: security-updates
+        patterns: ['*']
