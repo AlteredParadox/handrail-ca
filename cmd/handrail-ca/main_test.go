@@ -40,7 +40,7 @@ func listenLoopback(t *testing.T) net.Listener {
 func TestRunVersion(t *testing.T) {
 	for _, arg := range []string{"version", "--version", "-version"} {
 		var out bytes.Buffer
-		if code := run(context.Background(), []string{arg}, &out, io.Discard); code != 0 {
+		if code := run(context.Background(), []string{arg}, nil, &out, io.Discard); code != 0 {
 			t.Errorf("run(%q) = %d, want 0", arg, code)
 		}
 		if got, want := out.String(), "handrail-ca "+version+"\n"; got != want {
@@ -51,7 +51,7 @@ func TestRunVersion(t *testing.T) {
 
 func TestRunBadFlag(t *testing.T) {
 	var errOut bytes.Buffer
-	if code := run(context.Background(), []string{"-no-such-flag"}, io.Discard, &errOut); code != 2 {
+	if code := run(context.Background(), []string{"-no-such-flag"}, nil, io.Discard, &errOut); code != 2 {
 		t.Errorf("exit code = %d, want 2", code)
 	}
 	if !strings.Contains(errOut.String(), "no-such-flag") {
@@ -64,7 +64,7 @@ func TestRunListenFailure(t *testing.T) {
 	ln := listenLoopback(t)
 	defer ln.Close()
 	var errOut bytes.Buffer
-	code := run(context.Background(), []string{"-listen", ln.Addr().String()}, io.Discard, &errOut)
+	code := run(context.Background(), []string{"-listen", ln.Addr().String()}, nil, io.Discard, &errOut)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
@@ -77,7 +77,7 @@ func TestRunListenFailure(t *testing.T) {
 func TestRunStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if code := run(ctx, []string{"-listen", "127.0.0.1:0"}, io.Discard, io.Discard); code != 0 {
+	if code := run(ctx, []string{"-listen", "127.0.0.1:0"}, nil, io.Discard, io.Discard); code != 0 {
 		t.Errorf("exit code = %d, want 0", code)
 	}
 }
