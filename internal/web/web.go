@@ -77,9 +77,9 @@ type Store interface {
 	AppendHistory(ctx context.Context, e store.Event) error
 }
 
-// Inventory is what the pages need from the certificate inventory
-// (*inventory.Inventory).
-type Inventory interface {
+// Snapshotter is what the pages need from the certificate inventory
+// (*inventory.Inventory): its picture as last read.
+type Snapshotter interface {
 	Snapshot() *inventory.Snapshot
 }
 
@@ -98,7 +98,7 @@ type Options struct {
 	Store Store
 	CA    CA
 	// Inventory is the picture of what the CA has issued.
-	Inventory Inventory
+	Inventory Snapshotter
 	// PublicURL is the address browsers use: scheme://host[:port][/path].
 	// Its host is the only Host header answered, its origin the only one
 	// forms are accepted from, its scheme decides whether cookies are

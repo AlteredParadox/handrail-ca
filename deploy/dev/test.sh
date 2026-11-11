@@ -20,8 +20,19 @@ db_url_file="$(pwd)/.secrets/handrail_db_url"
 	printf 'postgres://handrail:%s@127.0.0.1:15432/stepca?sslmode=disable\n' "$(cat .secrets/handrail_db_password)" >"$db_url_file"
 )
 
+# The same database as it looks from another machine: by the name on its
+# certificate, over TLS that is verified. Nothing on this machine resolves
+# that name, so the tests that use this file map it to the loopback port
+# themselves; the certificate check is the real one.
+db_tls_url_file="$(pwd)/.secrets/handrail_db_tls_url"
+(
+	umask 077
+	printf 'postgres://handrail:%s@db.handrail.test:15432/stepca?sslmode=verify-full\n' "$(cat .secrets/handrail_db_password)" >"$db_tls_url_file"
+)
+
 cd ../..
 HANDRAIL_DEV_CA_URL=https://localhost:19000 \
 	HANDRAIL_DEV_CA_FINGERPRINT="$fingerprint" \
 	HANDRAIL_DEV_DB_URL_FILE="$db_url_file" \
+	HANDRAIL_DEV_DB_TLS_URL_FILE="$db_tls_url_file" \
 	go test -race -count=1 -v -run '^TestIntegration' ./...

@@ -49,7 +49,7 @@ func TestIntegrationStatusPage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	db, err := inventory.OpenPostgres(string(conn))
+	db, err := inventory.OpenPostgres(string(conn), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,10 +73,10 @@ func TestIntegrationStatusPage(t *testing.T) {
 		"No revocation list",
 		"Admin JWK", "5 minutes", "handrail", "90 days", "acme",
 		"Certificate inventory", "Up to date", "PostgreSQL database &#34;stepca&#34; at 127.0.0.1:15432, as &#34;handrail&#34;, read-only",
-		"1 revoked",
 	)
-	if !regexp.MustCompile(`\d+ in all: `).MatchString(page.Body.String()) {
-		t.Error("no certificate count on the page")
+	// Counts, whatever they are by now: at least the seed's one revocation.
+	if !regexp.MustCompile(`\d+ in all: .*[1-9]\d* revoked`).MatchString(page.Body.String()) {
+		t.Error("no certificate counts on the page")
 	}
 	body := page.Body.String()
 	if !regexp.MustCompile(`<dd>\d+\.\d+\.\d+`).MatchString(body) {

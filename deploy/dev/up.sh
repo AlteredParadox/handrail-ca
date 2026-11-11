@@ -20,6 +20,7 @@ done
 docker compose up -d --wait
 docker compose exec -T ca bash /dev-seed.sh
 docker compose exec -T db psql -q -U stepca -d stepca -f /dev-db-role.sql >/dev/null
+./db-tls.sh
 
 fingerprint=$(docker compose exec -T ca sh -c 'step certificate fingerprint "$(step path)/certs/root_ca.crt"')
 cat <<EOF
@@ -27,6 +28,7 @@ cat <<EOF
 The development CA is up.
   CA               https://localhost:19000   (root fingerprint $fingerprint)
   Database         127.0.0.1:15432, database stepca, role handrail
+                   (TLS on request, as db.handrail.test, certificate from this CA)
   Passwords        $(pwd)/.secrets/
   Check it         make dev-verify
   Throw it away    make dev-down

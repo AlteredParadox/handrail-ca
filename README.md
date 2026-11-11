@@ -128,7 +128,10 @@ in read-only sessions, with an account that should be able to do nothing
 else. A database on another machine has to be reached with
 `sslmode=verify-full`, TLS with the database server's certificate
 checked, since the password and the list both cross that connection; on
-the same machine any mode is accepted.
+the same machine any mode is accepted. That takes one certificate, for
+PostgreSQL, from your own CA: handrail-ca checks it against the CA root it
+already has, with nothing more to configure.
+[docs/ca-setup.md](docs/ca-setup.md), section 3, has the steps.
 
 It starts whether or not the CA and its database are up; the CA status
 page says which, and how old its picture of the certificates is.

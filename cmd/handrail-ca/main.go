@@ -98,7 +98,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		log.Error("reading the database connection file", "err", err)
 		return 1
 	}
-	db, err := inventory.OpenPostgres(dbURL)
+	// A database on another machine is checked against the CA's own root,
+	// the one fetched by its fingerprint: the same trust, no second file.
+	db, err := inventory.OpenPostgres(dbURL, client.Root)
 	if err != nil {
 		log.Error("database configuration", "file", cfg.dbURLFile, "err", err)
 		return 1

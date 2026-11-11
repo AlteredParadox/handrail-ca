@@ -18,11 +18,18 @@ package inventory
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // The password must never come back out of this package: not in an error,
@@ -61,7 +68,7 @@ func TestOpenPostgresAcceptsOnlySafeTransport(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p, err := OpenPostgres(tt.conn)
+			p, err := OpenPostgres(tt.conn, nil)
 			if (err == nil) != tt.ok {
 				t.Fatalf("OpenPostgres: %v, want ok=%v", err, tt.ok)
 			}
@@ -91,7 +98,7 @@ func TestOpenPostgresDoesNotEchoWhatItCannotParse(t *testing.T) {
 		"postgres://handrail:" + testPassword + "@127.0.0.1/stepca?pool_max_conns=many",
 		"password='" + testPassword,
 	} {
-		_, err := OpenPostgres(conn)
+		_, err := OpenPostgres(conn, nil)
 		if err == nil {
 			t.Errorf("accepted %q", strings.ReplaceAll(conn, testPassword, "…"))
 			continue
@@ -101,7 +108,7 @@ func TestOpenPostgresDoesNotEchoWhatItCannotParse(t *testing.T) {
 		}
 	}
 	// The read-only setting cannot be turned off from the string.
-	p, err := OpenPostgres("postgres://handrail:" + testPassword + "@127.0.0.1/stepca?sslmode=disable&default_transaction_read_only=off&statement_timeout=0")
+	p, err := OpenPostgres("postgres://handrail:"+testPassword+"@127.0.0.1/stepca?sslmode=disable&default_transaction_read_only=off&statement_timeout=0", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -144,7 +151,7 @@ func TestPlainErrors(t *testing.T) {
 // With nothing listening, each read fails with an error that names where
 // it tried and not the password; nothing hangs.
 func TestUnreachableDatabase(t *testing.T) {
-	p, err := OpenPostgres("postgres://handrail:" + testPassword + "@127.0.0.1:1/stepca?sslmode=disable&connect_timeout=2")
+	p, err := OpenPostgres("postgres://handrail:"+testPassword+"@127.0.0.1:1/stepca?sslmode=disable&connect_timeout=2", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,5 +171,130 @@ func TestUnreachableDatabase(t *testing.T) {
 	inv := New(p)
 	if err := inv.Refresh(ctx); err == nil || !strings.Contains(inv.Snapshot().State.Problem, "listing certificates") {
 		t.Errorf("Refresh = %v, state %+v", err, inv.Snapshot().State)
+	}
+}
+
+func parsed(t *testing.T, conn string) *pgconn.Config {
+	t.Helper()
+	cfg, err := pgxpool.ParseConfig(conn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &cfg.ConnConfig.Config
+}
+
+// A verified connection that was given no roots of its own is checked
+// against the CA's root and nothing else; every other kind is left alone.
+func TestCARootIsTheTrustAnchorForTheDatabase(t *testing.T) {
+	for _, name := range []string{"PGHOST", "PGSSLMODE", "PGSSLROOTCERT", "PGSERVICE", "PGPASSWORD"} {
+		t.Setenv(name, "")
+	}
+	root, err := x509.ParseCertificate(newDER(t, "7001", func(c *x509.Certificate) {
+		c.Subject = pkix.Name{CommonName: "Test Root CA"}
+		c.IsCA, c.BasicConstraintsValid, c.KeyUsage = true, true, x509.KeyUsageCertSign
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := x509.NewCertPool()
+	want.AddCert(root)
+
+	// A root file of the operator's own choosing.
+	rootFile := filepath.Join(t.TempDir(), "other-root.pem")
+	if err := os.WriteFile(rootFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: newDER(t, "7002", func(c *x509.Certificate) {
+		c.Subject = pkix.Name{CommonName: "Some Other Root"}
+		c.IsCA, c.BasicConstraintsValid = true, true
+	})}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name, conn string
+		wants      bool
+	}{
+		{"remote, verify-full", "postgres://u:p@db.internal.example/stepca?sslmode=verify-full", true},
+		{"local, verify-full", "postgres://u:p@localhost/stepca?sslmode=verify-full", true},
+		{"two hosts, verify-full", "postgres://u:p@db1.internal.example,db2.internal.example/stepca?sslmode=verify-full", true},
+		{"verify-full with its own root file", "postgres://u:p@db.internal.example/stepca?sslmode=verify-full&sslrootcert=" + rootFile, false},
+		{"local, no TLS", "postgres://u:p@127.0.0.1/stepca?sslmode=disable", false},
+		{"local, unverified TLS", "postgres://u:p@127.0.0.1/stepca?sslmode=require", false},
+		{"local, default mode", "postgres://u:p@127.0.0.1/stepca", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := parsed(t, tt.conn)
+			if got := wantsCARoot(c); got != tt.wants {
+				t.Fatalf("wantsCARoot = %v, want %v", got, tt.wants)
+			}
+			before := c.TLSConfig
+			var beforeRoots *x509.CertPool
+			if before != nil {
+				beforeRoots = before.RootCAs
+			}
+			trustCARoot(c, root)
+			all := []*tls.Config{c.TLSConfig}
+			for _, f := range c.Fallbacks {
+				all = append(all, f.TLSConfig)
+			}
+			for _, tc := range all {
+				// verified: the driver checks this connection's certificate.
+				verified := tc != nil && !tc.InsecureSkipVerify
+				switch {
+				case tc == nil:
+				case tt.wants && verified:
+					if !tc.RootCAs.Equal(want) {
+						t.Error("a verified connection is not anchored to the CA's root alone")
+					}
+					if tc.ServerName == "" {
+						t.Error("no server name to check the certificate for")
+					}
+				case !tt.wants && tc == before && tc.RootCAs != beforeRoots:
+					t.Error("the roots of a connection that did not want the CA's were changed")
+				}
+			}
+		})
+	}
+}
+
+// The CA's root is asked for when a connection is made, not when the
+// reader is set up, and a CA that cannot give it yet is a clear failure of
+// that read, not a silent fall back to other roots.
+func TestCARootIsFetchedOnConnect(t *testing.T) {
+	asked := 0
+	caDown := func(context.Context) (*x509.Certificate, error) {
+		asked++
+		return nil, errors.New("pinning the CA's root: connection refused")
+	}
+	p, err := OpenPostgres("postgres://handrail:"+testPassword+"@db.invalid:5432/stepca?sslmode=verify-full&connect_timeout=2", caDown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if asked != 0 {
+		t.Fatal("the CA's root was asked for before any connection was made")
+	}
+	_, err = p.Serials(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "the CA's root, which is not known yet") || !strings.Contains(err.Error(), "connection refused") {
+		t.Fatalf("Serials = %v", err)
+	}
+	if asked == 0 {
+		t.Error("the CA's root was never asked for")
+	}
+	if strings.Contains(err.Error(), testPassword) {
+		t.Error("the error carries the password")
+	}
+
+	// A connection that is not verified does not need the CA at all.
+	asked = 0
+	local, err := OpenPostgres("postgres://handrail:"+testPassword+"@127.0.0.1:1/stepca?sslmode=disable&connect_timeout=2", caDown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer local.Close()
+	if _, err := local.Serials(context.Background()); err == nil || strings.Contains(err.Error(), "CA's root") {
+		t.Errorf("Serials on a local database = %v", err)
+	}
+	if asked != 0 {
+		t.Error("the CA's root was asked for on behalf of an unverified local connection")
 	}
 }

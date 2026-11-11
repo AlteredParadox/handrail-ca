@@ -30,7 +30,6 @@ import (
 	"crypto/x509"
 	"encoding/json"
 	"fmt"
-	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -340,6 +339,7 @@ func (inv *Inventory) read(ctx context.Context) (map[string]*Certificate, map[st
 	known := inv.certs
 	inv.mu.RUnlock()
 
+	// Summaries already held are carried over; the rest are fetched.
 	certs := make(map[string]*Certificate, len(serials))
 	var missing []string
 	for _, serial := range serials {
@@ -350,24 +350,8 @@ func (inv *Inventory) read(ctx context.Context) (map[string]*Certificate, map[st
 			missing = append(missing, serial)
 		}
 	}
-	for start := 0; start < len(missing); start += fetchBatch {
-		batch := missing[start:min(start+fetchBatch, len(missing))]
-		rows, err := inv.src.Certificates(ctx, batch)
-		if err != nil {
-			return nil, nil, 0, fmt.Errorf("reading certificates: %w", err)
-		}
-		for _, row := range rows {
-			if c, wanted := certs[row.Serial]; wanted && c == nil {
-				certs[row.Serial] = summarise(row)
-			}
-		}
-	}
-	// A serial that was listed but whose row was gone a moment later (the
-	// CA does not delete, but nothing here depends on that) is left out.
-	for serial, c := range certs {
-		if c == nil {
-			delete(certs, serial)
-		}
+	if err := inv.fetch(ctx, missing, certs); err != nil {
+		return nil, nil, 0, fmt.Errorf("reading certificates: %w", err)
 	}
 
 	rows, err := inv.src.Revocations(ctx)
@@ -383,6 +367,30 @@ func (inv *Inventory) read(ctx context.Context) (map[string]*Certificate, map[st
 		}
 	}
 	return certs, revoked, orphans, nil
+}
+
+// fetch reads the rows for the serials in missing, in batches, and puts
+// their summaries into certs, where each of them is waiting as a nil
+// entry. A serial that was listed but whose row was gone a moment later
+// (the CA does not delete, but nothing here depends on that) is removed.
+func (inv *Inventory) fetch(ctx context.Context, missing []string, certs map[string]*Certificate) error {
+	for start := 0; start < len(missing); start += fetchBatch {
+		rows, err := inv.src.Certificates(ctx, missing[start:min(start+fetchBatch, len(missing))])
+		if err != nil {
+			return err
+		}
+		for _, row := range rows {
+			if c, wanted := certs[row.Serial]; wanted && c == nil {
+				certs[row.Serial] = summarise(row)
+			}
+		}
+	}
+	for _, serial := range missing {
+		if certs[serial] == nil {
+			delete(certs, serial)
+		}
+	}
+	return nil
 }
 
 // sorted orders certificates by the end of their validity, latest first,
@@ -408,23 +416,10 @@ func sorted(certs map[string]*Certificate) []*Certificate {
 // summarise turns a row into the summary kept in memory. A row that is not
 // what it should be becomes a Certificate with a Problem.
 func summarise(row RawCertificate) *Certificate {
-	c := &Certificate{Serial: clipSerial(row.Serial)}
+	c := &Certificate{Serial: clipSerial(row.Serial), Provisioner: provisionerOf(row.Data)}
 	problem := func(format string, args ...any) *Certificate {
-		return &Certificate{Serial: c.Serial, Provisioner: c.Provisioner, Problem: clip(fmt.Sprintf(format, args...))}
-	}
-	if len(row.Data) > 0 {
-		var data struct {
-			Provisioner *struct {
-				ID   string `json:"id"`
-				Name string `json:"name"`
-				Type string `json:"type"`
-			} `json:"provisioner"`
-		}
-		// The issuance record is a help, not a condition: a certificate
-		// with an unreadable record is still a certificate.
-		if json.Unmarshal(row.Data, &data) == nil && data.Provisioner != nil {
-			c.Provisioner = Provisioner{ID: clip(data.Provisioner.ID), Name: clip(data.Provisioner.Name), Type: clip(data.Provisioner.Type)}
-		}
+		c.Problem = clip(fmt.Sprintf(format, args...))
+		return c
 	}
 	if !decimal(row.Serial) {
 		return problem("the row's key is not a serial number")
@@ -445,18 +440,43 @@ func summarise(row RawCertificate) *Certificate {
 		c.Subject = clip(cert.Subject.String())
 	}
 	c.NotBefore, c.NotAfter = cert.NotBefore.UTC(), cert.NotAfter.UTC()
+	c.Names, c.MoreNames = namesOf(cert)
+	return c
+}
+
+// provisionerOf reads who issued a certificate out of the record the CA
+// stored beside it. The record is a help, not a condition: a certificate
+// with a missing or unreadable record is still a certificate, with no
+// provisioner known.
+func provisionerOf(data []byte) Provisioner {
+	var record struct {
+		Provisioner *struct {
+			ID   string `json:"id"`
+			Name string `json:"name"`
+			Type string `json:"type"`
+		} `json:"provisioner"`
+	}
+	if len(data) == 0 || json.Unmarshal(data, &record) != nil || record.Provisioner == nil {
+		return Provisioner{}
+	}
+	return Provisioner{ID: clip(record.Provisioner.ID), Name: clip(record.Provisioner.Name), Type: clip(record.Provisioner.Type)}
+}
+
+// namesOf lists a certificate's subject alternative names, the first
+// maxNames of them, and counts the rest.
+func namesOf(cert *x509.Certificate) (names []Name, more int) {
 	add := func(kind NameKind, value string) {
-		if len(c.Names) < maxNames {
-			c.Names = append(c.Names, Name{Kind: kind, Value: clip(value)})
+		if len(names) < maxNames {
+			names = append(names, Name{Kind: kind, Value: clip(value)})
 		} else {
-			c.MoreNames++
+			more++
 		}
 	}
 	for _, name := range cert.DNSNames {
 		add(DNS, name)
 	}
 	for _, ip := range cert.IPAddresses {
-		add(IP, net.IP(ip).String())
+		add(IP, ip.String())
 	}
 	for _, email := range cert.EmailAddresses {
 		add(Email, email)
@@ -464,7 +484,7 @@ func summarise(row RawCertificate) *Certificate {
 	for _, uri := range cert.URIs {
 		add(URI, uri.String())
 	}
-	return c
+	return names, more
 }
 
 // readRevocation reads a row of the revocation table. The fields are the

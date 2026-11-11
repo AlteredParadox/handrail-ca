@@ -19,7 +19,7 @@ minute and can be run again; it keeps what is there.
 | | |
 |---|---|
 | CA | `https://localhost:19000` (also `ca.handrail.test` inside the Compose network); the root fingerprint is printed by `make dev-up` |
-| Database | PostgreSQL on `127.0.0.1:15432`, database `stepca`, read-only role `handrail` |
+| Database | PostgreSQL on `127.0.0.1:15432`, database `stepca`, read-only role `handrail`. It also speaks TLS, as `db.handrail.test`, with a certificate from this CA |
 | Passwords | `deploy/dev/.secrets/`, generated on first start, ignored by git |
 | Provisioners | `handrail` (JWK, 90-day cap), `acme` (ACME), `Admin JWK` (the CA's own, for remote management) |
 | Name policy | `*.handrail.test` and `10.20.0.0/16`, CA-wide |
@@ -52,6 +52,8 @@ go run ./cmd/handrail-ca          # http://127.0.0.1:8080
 - `seed.sh`: runs inside the CA container; provisioners, policy,
   certificates.
 - `db-role.sql`: the read-only role, as in the setup guide.
+- `db-tls.sh`: issues a certificate for the database from the CA and
+  turns TLS on in PostgreSQL with a reload, as in the setup guide.
 - `up.sh`: generates passwords, starts everything, runs the seed and the
   role script.
 - `verify.sh`: the checks behind `make dev-verify`.

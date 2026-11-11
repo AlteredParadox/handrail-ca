@@ -237,10 +237,15 @@ admins, and its sessions are read-only. The connection uses TLS when the
 database is on another host: as built, `sslmode=verify-full` is required
 there (TLS, with the database server's certificate checked), every host
 the driver might fall back to included, and any mode is accepted on the
-same machine. Whether to loosen that for a trusted network, or to have
-handrail-ca check the database's certificate against the CA root it
-already holds, is open with the owner. The connection string comes from
-a file, since it holds the password. A row that does not parse is shown as
+same machine. A verified connection is checked against the CA's own root,
+the one fetched by its fingerprint, unless the connection string names
+another with `sslrootcert`: the operator's CA issues PostgreSQL's
+certificate, and handrail-ca needs no certificate or root file of its own
+(owner's decision, 2026-11-11, over an opt-out for trusted networks; the
+setup guide has the steps, and the development CA runs them). The root is
+asked for when a connection is made, so a CA that is down delays the
+inventory, visibly, and does not stop the start. The connection string
+comes from a file, since it holds the password. A row that does not parse is shown as
 unreadable, not skipped. If the database cannot be reached, the last
 inventory stays on screen with its age, and issuing and revoking still work,
 since they go through the CA's API.

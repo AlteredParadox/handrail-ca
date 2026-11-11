@@ -18,12 +18,15 @@ package inventory
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -47,6 +50,9 @@ type Postgres struct {
 	describe string
 }
 
+// RootFunc returns the root certificate of the CA whose database this is.
+type RootFunc func(ctx context.Context) (*x509.Certificate, error)
+
 // OpenPostgres prepares a reader for the database a connection string
 // names: a postgres:// URL or libpq's keyword=value form. No connection is
 // made yet, so handrail-ca can start while the database is down.
@@ -55,7 +61,22 @@ type Postgres struct {
 // certificate verified (sslmode=verify-full): the password and every
 // certificate cross that connection. On this machine (a loopback address,
 // localhost, or a socket) any mode is accepted.
-func OpenPostgres(connString string) (*Postgres, error) {
+//
+// What a verified connection is verified against: the CA's own root, from
+// caRoot, unless the connection string names a file with sslrootcert. The
+// operator already told handrail-ca which CA to trust, by its fingerprint,
+// and that CA can issue the database's certificate, so nothing more has to
+// be configured here. The root is asked for when a connection is made, not
+// now. caRoot may be nil; then only sslrootcert, or failing that the
+// system's roots, apply.
+func OpenPostgres(connString string, caRoot RootFunc) (*Postgres, error) {
+	return openPostgres(connString, caRoot, nil)
+}
+
+// openPostgres is OpenPostgres with a last word on the configuration, for
+// the tests that have to reach a database under a name the machine they
+// run on cannot resolve.
+func openPostgres(connString string, caRoot RootFunc, adjust func(*pgxpool.Config)) (*Postgres, error) {
 	cfg, err := pgxpool.ParseConfig(strings.TrimSpace(connString))
 	if err != nil {
 		// Not wrapped: the text of a parse error can repeat the string it
@@ -72,6 +93,20 @@ func OpenPostgres(connString string) (*Postgres, error) {
 	cfg.ConnConfig.RuntimeParams["application_name"] = "handrail-ca"
 	cfg.ConnConfig.ConnectTimeout = 10 * time.Second
 	cfg.MaxConns, cfg.MinConns = 2, 0
+	if caRoot != nil && wantsCARoot(&cfg.ConnConfig.Config) {
+		cfg.BeforeConnect = func(ctx context.Context, cc *pgx.ConnConfig) error {
+			root, err := caRoot(ctx)
+			if err != nil {
+				return fmt.Errorf("the database's certificate is checked against the CA's root, which is not known yet: %w", err)
+			}
+			trustCARoot(&cc.Config, root)
+			return nil
+		}
+	}
+
+	if adjust != nil {
+		adjust(cfg)
+	}
 
 	pool, err := pgxpool.NewWithConfig(context.Background(), cfg)
 	if err != nil {
@@ -104,6 +139,45 @@ func checkTransport(c *pgconn.Config) error {
 		}
 	}
 	return nil
+}
+
+// verifiedWithoutRoots reports whether a TLS configuration verifies the
+// server's certificate in full but was given no roots to verify it
+// against, which is the case for sslmode=verify-full without sslrootcert.
+func verifiedWithoutRoots(c *tls.Config) bool {
+	return c != nil && !c.InsecureSkipVerify && c.RootCAs == nil
+}
+
+// wantsCARoot reports whether any connection this configuration can make
+// is to be verified against the CA's root.
+func wantsCARoot(c *pgconn.Config) bool {
+	if verifiedWithoutRoots(c.TLSConfig) {
+		return true
+	}
+	for _, f := range c.Fallbacks {
+		if verifiedWithoutRoots(f.TLSConfig) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustCARoot makes the CA's root the only trust anchor of every verified
+// connection in c that was not given roots of its own. Without it such a
+// connection would be checked against the system's roots, which a
+// database with a certificate from a private CA can never satisfy, and
+// which would accept a certificate for the same name from any public CA.
+func trustCARoot(c *pgconn.Config, root *x509.Certificate) {
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	if verifiedWithoutRoots(c.TLSConfig) {
+		c.TLSConfig.RootCAs = pool
+	}
+	for _, f := range c.Fallbacks {
+		if verifiedWithoutRoots(f.TLSConfig) {
+			f.TLSConfig.RootCAs = pool
+		}
+	}
 }
 
 // localHost reports whether a database host can only mean this machine: a
