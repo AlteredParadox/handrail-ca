@@ -103,8 +103,8 @@ func TestServeAndHealthcheck(t *testing.T) {
 	if code := healthcheck([]string{"-listen", addr}, io.Discard); code != 0 {
 		t.Errorf("healthcheck against a live server = %d, want 0", code)
 	}
-	// The container binds the wildcard address; the probe must still dial
-	// loopback on that port.
+	// The container binds the wildcard address, which cannot be dialled:
+	// the probe goes to loopback on that port.
 	_, port, _ := net.SplitHostPort(addr)
 	if code := healthcheck([]string{"-listen", "0.0.0.0:" + port}, io.Discard); code != 0 {
 		t.Errorf("healthcheck with a wildcard listen address = %d, want 0", code)
@@ -135,6 +135,41 @@ func TestServeListenerClosed(t *testing.T) {
 	ln.Close()
 	if code := serve(context.Background(), ln, slog.New(slog.NewTextHandler(io.Discard, nil))); code != 1 {
 		t.Errorf("serve on a closed listener = %d, want 1", code)
+	}
+}
+
+func TestProbeHost(t *testing.T) {
+	tests := []struct{ listen, want string }{
+		{"", "127.0.0.1"},
+		{"0.0.0.0", "127.0.0.1"},
+		{"::", "::1"},
+		{"127.0.0.1", "127.0.0.1"},
+		{"::1", "::1"},
+		{"192.0.2.10", "192.0.2.10"},
+		{"2001:db8::10", "2001:db8::10"},
+		{"localhost", "localhost"},
+	}
+	for _, tt := range tests {
+		if got := probeHost(tt.listen); got != tt.want {
+			t.Errorf("probeHost(%q) = %q, want %q", tt.listen, got, tt.want)
+		}
+	}
+}
+
+// A server bound to IPv6 loopback only does not answer on 127.0.0.1: the
+// probe has to follow the configured address.
+func TestHealthcheckIPv6Loopback(t *testing.T) {
+	ln, err := net.Listen("tcp", "[::1]:0")
+	if err != nil {
+		t.Skipf("no IPv6 loopback here: %v", err)
+	}
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})}
+	go func() { _ = srv.Serve(ln) }()
+	defer srv.Close()
+	if code := healthcheck([]string{"-listen", ln.Addr().String()}, io.Discard); code != 0 {
+		t.Errorf("healthcheck against %s = %d, want 0", ln.Addr(), code)
 	}
 }
 

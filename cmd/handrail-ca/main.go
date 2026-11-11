@@ -115,9 +115,9 @@ func serve(ctx context.Context, ln net.Listener, log *slog.Logger) int {
 }
 
 // healthcheck is the container HEALTHCHECK: the distroless image has no
-// shell or curl, so the binary probes its own /healthz. It dials loopback
-// on the configured port whatever interface the server is bound to; the
-// request never leaves the host, which is why it is plain HTTP.
+// shell or curl, so the binary probes its own /healthz at the address the
+// server was told to listen on (see probeHost). The request goes to the
+// host's own listener and never leaves it, which is why it is plain HTTP.
 func healthcheck(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -125,13 +125,19 @@ func healthcheck(args []string, stderr io.Writer) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	_, port, err := net.SplitHostPort(*listen)
+	host, port, err := net.SplitHostPort(*listen)
 	if err != nil {
 		fmt.Fprintln(stderr, "healthcheck:", err)
 		return 2
 	}
-	client := &http.Client{Timeout: 4 * time.Second}
-	resp, err := client.Get("http://" + net.JoinHostPort("127.0.0.1", port) + "/healthz")
+	// Its own transport, not the default one: no proxy from the environment
+	// (the probe must reach this host's listener directly) and no kept-alive
+	// connection left behind by a one-shot request.
+	client := &http.Client{
+		Timeout:   4 * time.Second,
+		Transport: &http.Transport{DisableKeepAlives: true},
+	}
+	resp, err := client.Get("http://" + net.JoinHostPort(probeHost(host), port) + "/healthz")
 	if err != nil {
 		fmt.Fprintln(stderr, "healthcheck:", err)
 		return 1
@@ -142,6 +148,23 @@ func healthcheck(args []string, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// probeHost is the host the healthcheck dials for a given listen host. A
+// wildcard bind cannot be dialled, so it is reached over loopback of the
+// same family; a concrete address or name is probed as configured, since a
+// server bound to one interface (or to [::1]) does not answer on 127.0.0.1.
+func probeHost(listenHost string) string {
+	if listenHost == "" {
+		return "127.0.0.1"
+	}
+	if ip := net.ParseIP(listenHost); ip != nil && ip.IsUnspecified() {
+		if ip.To4() != nil {
+			return "127.0.0.1"
+		}
+		return "::1"
+	}
+	return listenHost
 }
 
 func envOr(key, def string) string {
