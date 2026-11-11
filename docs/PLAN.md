@@ -82,11 +82,14 @@ and accounts, and nothing about the certificates.
 
 ## 3. What step-ca provides
 
-Read from the step-ca source at tag `v0.30.2` (the current release) on
-2026-11-11, with the load-bearing points re-checked by hand. **None of this
-has been exercised against a running CA yet**; milestone 1 builds the
-environment that does that, and each item is re-verified there before code
-depends on it.
+First read from the step-ca source at tag `v0.30.2` (the current release).
+The database layout, the read endpoints, renewal, revocation, the lifetime
+cap and the name policy have since been checked against a running CA of that
+version: `make dev-verify` runs those checks on the development CA
+(`deploy/dev`), and it is the thing to run before raising the step-ca
+version. **Still from source only:** the token claims and the exact request
+bodies for sign and revoke, which the step CLI builds in those checks; they
+are exercised by handrail-ca's own integration tests in milestones 3 and 4.
 
 Listing:
 
@@ -151,7 +154,20 @@ Revoke (`api/revoke.go`, `authority/tls.go`):
 
 Other read endpoints: `/health`, `/version`, `/roots`, `/intermediates`,
 `/provisioners` (paginated; includes each JWK provisioner's claims),
-`/root/{sha256}`.
+`/root/{sha256}`. `/roots` and `/intermediates` answer 201, not 200, so the
+client accepts any 2xx.
+
+Found on the running CA and not in the first reading:
+
+- A name policy can be set for the whole CA only. Open-source step-ca
+  refuses a policy on a single provisioner or ACME account ("operation not
+  supported in standalone mode"; `disabledInStandalone` in
+  `authority/admin/api/handler.go`).
+- A CA with remote management issues a five-minute certificate to the admin
+  for each management command, from a provisioner named `Admin JWK`, and
+  stores it in `x509_certs` like any other. On a CA that is administered
+  often these outnumber everything else.
+- step-ca refuses to sign a certificate whose validity is already over.
 
 ## 4. Design
 
@@ -193,40 +209,25 @@ be read, status is shown as unknown rather than valid.
 **Acting on the CA.** handrail-ca is configured with one JWK provisioner
 (name, key ID, password file). The recommended setup is a provisioner created
 for handrail-ca alone, so its limits are set in one place on the CA and its
-certificates are identifiable by provisioner name. That provisioner should
-also carry, on the CA:
+certificates are identifiable by provisioner name. Two limits belong on the
+CA's side ([ca-setup.md](ca-setup.md) has the commands):
 
 - a name policy (step-ca's allow-list) limited to the owner's own domains
   and address ranges, so that a stolen provisioner key cannot be used to
   mint a certificate for an outside name that machines trusting this CA
-  would accept. In step-ca `v0.30.2` a provisioner's policy is set through
-  remote management and is checked on every JWK sign request
-  (`newX509NamePolicyValidator` in `jwk.go`); it cannot be written in
-  `ca.json`.
-- a maximum lifetime no longer than the longest interval the owner is
-  willing to renew by hand. Without a published revocation list a
-  mis-issued certificate is trusted until it expires, so this cap is the
-  real limit on the damage; too short a cap defeats the purpose of manual
-  issuance for devices that cannot renew themselves.
+  would accept. In open-source step-ca this policy is CA-wide: it cannot be
+  set for one provisioner, so it also governs ACME and every other
+  provisioner.
+- a maximum lifetime on handrail-ca's provisioner, no longer than the
+  longest interval the owner is willing to renew by hand. Without a
+  published revocation list a mis-issued certificate is trusted until it
+  expires, so this cap is the real limit on the damage; too short a cap
+  defeats the purpose of manual issuance for devices that cannot renew
+  themselves.
 
 Neither limits revocation: any JWK provisioner can revoke any serial. The
-decrypted key lives only in memory. Tokens are minted per request with a random `jti` and a
-one-minute lifetime, and are never logged.
-
-- *Issue:* the CSR is parsed and shown back (subject, SANs, key type) for
-  confirmation before anything is signed; the token is built from exactly
-  what was shown. The token subject is the CSR's common name, or for a CSR
-  without one its first SAN (DNS names first, then IP addresses, email
-  addresses, URIs); a CSR with neither is refused. Because the CA takes the
-  certificate's common name from the token, the confirmation step shows the
-  common name the certificate will carry, including when it was filled in
-  from a SAN. Requested validity is bounded by the provisioner's claims
-  before the request is sent.
-- *Revoke:* offered only on certificates in the inventory, behind a
-  confirmation that names the certificate, with a reason code. The page says
-  what passive revocation means and whether the CA publishes a CRL. After a
-  timeout or an ambiguous answer, the revocation table is re-read before
-  anything is retried.
+decrypted key lives only in memory. Tokens are minted per request with a
+random `jti` and a one-minute lifetime, and are never logged.
 
 **Access to handrail-ca.** Per D2: local accounts, argon2id, login rate
 limiting, server-side sessions (random 256-bit cookie, `HttpOnly`,
@@ -248,8 +249,11 @@ command, which the deployment notes will give.
 
 **Audit.** Every sign-in, issue and revoke, attempted and completed, is
 written to the store's history and as one structured log line: who, what,
-serial, subject, outcome. No secrets. An action whose history row cannot be
-written is not carried out.
+serial, subject, outcome. No secrets. If the history row cannot be written
+(a full disk, a damaged file), the action still goes ahead: a fault in
+handrail-ca's own storage must not be able to stop a revocation. The log
+line is still written, the failure is logged as an error, and every page
+shows a warning that history is not being recorded until it is fixed.
 
 **Configuration.** Flags with `HANDRAIL_*` environment equivalents. Secrets
 (provisioner password, accounts, database credentials) are given as file
@@ -279,25 +283,24 @@ Each milestone is one or a few pull requests, gated by `check`, `vuln` and
 server that answers `/healthz`.
 
 **M1. Foundations and a real CA to test against.**
-- `deploy/dev`: Docker Compose with `smallstep/step-ca:0.30.2` on PostgreSQL
-  (a prepared `ca.json`, since the image's own init always writes Badger),
-  with remote management and an ACME provisioner enabled to match the target
-  CA, a JWK provisioner for handrail-ca with a name policy and a lifetime
-  cap, the read-only database account, and a seed script that issues, renews
-  and revokes a few certificates.
-- Re-verify section 3 against it and correct this document where it differs.
+- Done: `deploy/dev`, a Docker Compose CA (`smallstep/step-ca:0.30.2` on
+  PostgreSQL, remote management, ACME) prepared the way
+  [ca-setup.md](ca-setup.md) describes and seeded with valid, expiring,
+  expired, renewed, revoked and ACME-issued certificates; and
+  `make dev-verify`, which checks section 3 against it. Both run in CI.
 - Configuration loading; the CA client's read side (root pinning, health,
   version, roots, intermediates, provisioners, CRL presence).
 - The store: schema, migrations, and the `user` subcommands.
 - Accounts, sessions, CSRF, roles, the page shell, and a CA status page.
-- An `integration` test suite against the Compose environment, as its own CI
-  job (advisory at first).
+- handrail-ca's own integration tests against the Compose environment, in
+  the same CI job as `make dev-verify` (advisory at first).
 
 **M2. View.**
 - The PostgreSQL inventory source and in-memory index, with fixtures captured
   from the M1 environment.
 - List page: filter by status and provisioner, search subject and SANs, sort,
-  paginate; default view hides expired certificates.
+  paginate; default view hides expired certificates. The CA's own admin
+  certificates (section 3) are hidden unless asked for.
 - Detail page: parsed fields, extensions, fingerprints, chain, PEM and DER
   download, issuing provisioner, revocation record, and the certificate's
   note and labels from the store.
@@ -355,8 +358,8 @@ account management in the web UI; several CAs.
 - **A credential that mints certificates.** The provisioner key is the most
   valuable thing handrail-ca holds. Keeping the CA's signing key in hardware
   does not limit what a provisioner can ask the CA to sign. Mitigations: a
-  dedicated provisioner with a name policy and a lifetime cap on the CA
-  side, the key in memory only, short single-use tokens, roles, an audit
+  CA-wide name policy and a dedicated provisioner with a lifetime cap, both
+  set on the CA, the key in memory only, short single-use tokens, roles, an audit
   trail, and read-only mode for deployments that only need the view.
 
 ## 8. Prior art

@@ -40,6 +40,15 @@ make license-headers  # stamp the notice on new files (git add them first)
 make notices        # regenerate THIRD_PARTY_LICENSES.md after a dependency change
 ```
 
+A throwaway step-ca on PostgreSQL for development is one command away; see
+[deploy/dev](deploy/dev/README.md):
+
+```sh
+make dev-up         # start and seed the development CA
+make dev-verify     # check step-ca's behavior against what the docs say
+make dev-down       # remove it
+```
+
 Changes land through pull requests; `main` requires the `check`, `vuln` and
 `image` CI jobs and the SonarQube Cloud `scan`.
 

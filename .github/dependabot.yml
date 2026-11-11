@@ -61,3 +61,19 @@ updates:
       docker-security:
         applies-to: security-updates
         patterns: ['*']
+
+  # The development CA's images (deploy/dev/compose.yaml), pinned by digest
+  # like the Dockerfile's. A step-ca bump here is checked by the `devenv`
+  # job: do not merge one whose `make dev-verify` is red.
+  - package-ecosystem: docker-compose
+    directory: /deploy/dev
+    schedule:
+      interval: weekly
+    groups:
+      dev-environment:
+        applies-to: version-updates
+        update-types: ['minor', 'patch']
+        patterns: ['*']
+      dev-environment-security:
+        applies-to: security-updates
+        patterns: ['*']

@@ -4,11 +4,11 @@ What has to exist on the CA's side before handrail-ca can show, issue and
 revoke certificates. handrail-ca itself is not built yet (see
 [PLAN.md](PLAN.md)); this is written first so the CA can be made ready.
 
-**How far this has been checked.** The commands and behavior below were read
-from the sources of step CLI `v0.31.0` and step-ca `v0.30.2`. They have not
-yet been run by this project against a CA. Milestone 1 runs them in the test
-environment, and this page is corrected then. Until that is done, check each
-step's result with the commands given.
+**How far this has been checked.** Sections 1 to 3 are run on every fresh
+development CA (`make dev-up`) and their effects are checked by
+`make dev-verify`, against step-ca `0.30.2` with the step CLI of the same
+version. Section 4 (revocation lists) was read from step-ca's source and has
+not been run.
 
 The examples use `internal.example` and `10.20.0.0/16`; substitute your own.
 
@@ -19,9 +19,10 @@ its own, so that its limits are set in one place, its certificates can be
 told apart by provisioner name, and it can be removed without touching
 anything else.
 
-With remote management enabled, run this as a CA admin (the CLI asks for the
+With remote management enabled, run this as a CA admin. The CLI asks for the
 admin's credentials, or takes `--admin-subject`, `--admin-provisioner` and
-`--admin-password-file`):
+`--admin-password-file`; on a CA initialised with remote management the
+admin provisioner is named `Admin JWK`.
 
 ```sh
 step ca provisioner add handrail --type JWK --create \
@@ -62,47 +63,58 @@ list (section 4), a certificate that should not have been issued stays
 trusted until it expires, and the cap is the longest that can be. 90 days is
 a reasonable starting point; shorter is safer and costs more renewals.
 
-## 2. A name policy on that provisioner
+## 2. A name policy on the CA
 
-Without one, whoever holds the provisioner's key and password can obtain a
+Without one, whoever holds a provisioner's key and password can obtain a
 certificate for any name at all, and every machine that trusts your root
 would accept it. A name policy is an allow-list the CA enforces on every
-request from that provisioner.
+request.
+
+**In open-source step-ca the policy is for the whole CA, not for one
+provisioner.** Setting a policy on a single provisioner is refused
+("operation not supported in standalone mode"). The policy below therefore
+also applies to ACME, to every other provisioner, and to the short-lived
+certificates the CA issues to its own admins, so it has to allow every name
+your CA legitimately issues, not only the ones handrail-ca will ask for.
 
 ```sh
-step ca policy provisioner x509 allow dns "*.internal.example" --provisioner handrail
-step ca policy provisioner x509 allow ip 10.20.0.0/16 --provisioner handrail
+step ca policy authority x509 allow dns step
+step ca policy authority x509 allow dns "*.internal.example"
+step ca policy authority x509 allow ip 10.20.0.0/16
 ```
+
+The first line is the admin's own subject (`step` unless you chose another).
+It must come first: step-ca refuses a policy that would lock its admins out,
+and says which names are missing.
 
 Check it:
 
 ```sh
-step ca policy provisioner view --provisioner handrail
+step ca policy authority view
 ```
 
-Things to know:
+Things to know, each checked on the development CA:
 
 - Once any name is allowed, every kind of name without a rule is refused. If
-  you allow DNS names only, requests with IP addresses, email addresses or
+  you allow DNS names and IP ranges only, requests with email addresses or
   URIs are refused. Add a rule for each kind you use.
 - `*.internal.example` covers names exactly one label below
   `internal.example`, such as `git.internal.example`. It does not cover the
   bare `internal.example`, deeper names such as `a.apps.internal.example`
   (allow `*.apps.internal.example` for those), or single-label names such as
   `git`. Allow each of those you use.
-- A request for a literal wildcard certificate (`*.apps.internal.example`)
-  is refused unless you also run
-  `step ca policy provisioner x509 wildcards allow --provisioner handrail`.
-- Use `allow cn` if your certificates carry common names that are not host
-  names.
+- A request for a literal wildcard certificate (`*.internal.example`) is
+  refused unless you also run `step ca policy authority x509 wildcards allow`.
+- The certificate's common name is checked too: a common name that is not
+  itself an allowed name is refused.
 - The policy does not limit revocation. Any JWK provisioner can revoke any
-  certificate of the CA.
-- A provisioner policy can only be set this way, through remote management.
-  It cannot be written in `ca.json`.
+  certificate of the CA, including a serial the CA never issued.
+- Before applying it to a CA that is in use, list what your ACME clients and
+  other provisioners request; anything not allowed starts failing at once.
 
 After setting it, test both sides with the `step` CLI before relying on it:
 a certificate for an allowed name should be issued, and one for an outside
-name refused.
+name refused with "not allowed".
 
 ```sh
 step ca certificate ok.internal.example ok.crt ok.key --provisioner handrail
