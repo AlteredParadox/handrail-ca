@@ -272,8 +272,10 @@ type Inventory struct {
 	window time.Duration
 	now    func() time.Time
 
-	// refreshing serialises refreshes; mu guards the fields below it.
-	refreshing sync.Mutex
+	// refreshing serialises refreshes: whoever has put a value into it is
+	// the one reading. A channel and not a mutex, so that waiting for a
+	// turn can be given up. mu guards the fields below it.
+	refreshing chan struct{}
 	mu         sync.RWMutex
 	certs      map[string]*Certificate
 	current    *Snapshot
@@ -281,7 +283,7 @@ type Inventory struct {
 
 // New returns an empty inventory over src. Nothing is read until Refresh.
 func New(src Source) *Inventory {
-	inv := &Inventory{src: src, window: DefaultExpiringWindow, now: time.Now, certs: map[string]*Certificate{}}
+	inv := &Inventory{src: src, window: DefaultExpiringWindow, now: time.Now, certs: map[string]*Certificate{}, refreshing: make(chan struct{}, 1)}
 	inv.current = &Snapshot{State: State{Source: src.Describe()}, revoked: map[string]*Revocation{}, window: inv.window}
 	return inv
 }
@@ -320,12 +322,30 @@ func (inv *Inventory) Run(ctx context.Context, interval time.Duration, report fu
 // not seen before (a certificate never changes once issued, so nothing is
 // read twice), and the whole revocation table. If any part fails the
 // inventory keeps what it had, and says so in its State.
+//
+// One refresh runs at a time; another waits its turn, for as long as its
+// context lasts. A refresh that is given up, while waiting or while
+// reading, says nothing about the database, so it leaves the State as it
+// was: it must not replace the result of a read that worked with "the
+// caller stopped waiting". Running out of time while reading is different:
+// the database did not answer in the time allowed, and the State says so.
 func (inv *Inventory) Refresh(ctx context.Context) error {
-	inv.refreshing.Lock()
-	defer inv.refreshing.Unlock()
+	select {
+	case inv.refreshing <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-inv.refreshing }()
+	// Both may have been ready at once; the context is the one that counts.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	attempted := inv.now()
 	certs, revoked, orphans, err := inv.read(ctx)
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return err
+	}
 
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
