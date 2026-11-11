@@ -2,7 +2,8 @@
 # `make build` and `make test` are the project's own targets, so CI runs
 # exactly what a developer runs locally; the race suite runs separately.
 #
-# Branch protection on main requires `check`, `vuln` and `image`.
+# Branch protection on main requires `check`, `vuln` and `image` from here,
+# and `scan` from sonarqube.yml.
 name: ci
 
 # push only on main; branch pushes are covered by their pull_request run,
