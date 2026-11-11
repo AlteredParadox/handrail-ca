@@ -246,72 +246,109 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 	// password, without a lookup.
 	username, err := store.NormalizeUsername(typed)
 	if err != nil {
-		s.limiter.fail(s.opts.Now(), "addr:"+remote)
+		if wait := s.limiter.begin(s.opts.Now(), "addr:"+remote); wait > 0 {
+			s.tooManySignIns(w, r, wait)
+			return
+		}
 		s.recordSignIn(r, "", false, "no such user")
 		s.renderSignIn(w, r, http.StatusUnauthorized, "", wrongCredentials)
 		return
 	}
-	keys := []string{"user:" + username, "addr:" + remote}
-	if wait := s.limiter.blocked(s.opts.Now(), keys...); wait > 0 {
-		w.Header().Set("Retry-After", strconv.Itoa(int(wait/time.Second)+1))
-		s.renderSignIn(w, r, http.StatusTooManyRequests, "", "Too many failed sign-ins. Wait a few minutes and try again.")
+	userKey, addrKey := "user:"+username, "addr:"+remote
+	// Refused here without waiting for a hashing slot; checkPassword asks
+	// again, and counts, once it has one.
+	if wait := s.limiter.blocked(s.opts.Now(), userKey, addrKey); wait > 0 {
+		s.tooManySignIns(w, r, wait)
 		return
 	}
 
-	user, ok, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"))
+	checked, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"), userKey, addrKey)
 	if err != nil {
 		s.log.Error("checking a password", "err", err)
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not check the password. The log has the details.")
 		return
 	}
-	if !ok {
-		s.limiter.fail(s.opts.Now(), keys...)
+	if checked.wait > 0 {
+		s.tooManySignIns(w, r, checked.wait)
+		return
+	}
+	if !checked.ok {
 		// Only the name of a real account is recorded: what people type
 		// into a user-name field by mistake includes passwords.
-		s.recordSignIn(r, user.Username, false, "wrong password or no such user")
+		s.recordSignIn(r, checked.user.Username, false, "wrong password or no such user")
 		s.renderSignIn(w, r, http.StatusUnauthorized, "", wrongCredentials)
 		return
 	}
 
 	// A fresh token for every sign-in: nothing set before authentication
-	// carries over into the session.
+	// carries over into the session. The store creates the session only if
+	// the account still has the password hash that was just checked.
 	raw, encoded, err := newToken()
 	now := s.opts.Now()
 	if err == nil {
-		err = s.opts.Store.CreateSession(r.Context(), user.ID, store.HashToken(raw), now, now.Add(sessionLifetime))
+		err = s.opts.Store.CreateSession(r.Context(), checked.user.ID, checked.hash, store.HashToken(raw), now, now.Add(sessionLifetime))
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		// The password was changed, or the account removed, while this
+		// request was in flight: what was checked no longer opens it.
+		s.recordSignIn(r, checked.user.Username, false, "the account changed during sign-in")
+		s.renderSignIn(w, r, http.StatusUnauthorized, "", wrongCredentials)
+		return
 	}
 	if err != nil {
 		s.log.Error("opening a session", "err", err)
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not open a session. The log has the details.")
 		return
 	}
-	s.limiter.reset("user:" + username)
+	s.limiter.forget(userKey)
+	s.limiter.refund(addrKey)
 	s.setCookie(w, sessionCookie, encoded, sessionLifetime)
 	s.setCookie(w, formCookie, "", 0)
-	s.recordSignIn(r, user.Username, true, "")
+	s.recordSignIn(r, checked.user.Username, true, "")
 	http.Redirect(w, r, s.base+"/", http.StatusSeeOther)
+}
+
+func (s *server) tooManySignIns(w http.ResponseWriter, r *http.Request, wait time.Duration) {
+	w.Header().Set("Retry-After", strconv.Itoa(int(wait/time.Second)+1))
+	s.renderSignIn(w, r, http.StatusTooManyRequests, "", "Too many failed sign-ins. Wait a few minutes and try again.")
+}
+
+// passwordCheck is the outcome of checkPassword.
+type passwordCheck struct {
+	ok bool
+	// wait is set when the attempt was refused by the throttle, unchecked.
+	wait time.Duration
+	// user and hash are the account and the hash the password was checked
+	// against; zero unless the account exists.
+	user store.User
+	hash string
 }
 
 // checkPassword reports whether pw opens the account. It takes about as
 // long whether or not the account exists, and at most maxConcurrentHashes
-// run at once. The returned user is zero unless the account exists.
-func (s *server) checkPassword(ctx context.Context, username, pw string) (store.User, bool, error) {
+// run at once. The attempt is counted against the throttle keys after a
+// slot is held and before the password is looked at, so requests that
+// queued for a slot cannot outnumber the attempts the throttle allows.
+func (s *server) checkPassword(ctx context.Context, username, pw string, throttleKeys ...string) (passwordCheck, error) {
 	select {
 	case s.hashSlots <- struct{}{}:
 		defer func() { <-s.hashSlots }()
 	case <-ctx.Done():
-		return store.User{}, false, ctx.Err()
+		return passwordCheck{}, ctx.Err()
+	}
+	if wait := s.limiter.begin(s.opts.Now(), throttleKeys...); wait > 0 {
+		return passwordCheck{wait: wait}, nil
 	}
 	user, hash, err := s.opts.Store.Credentials(ctx, username)
 	if errors.Is(err, store.ErrNotFound) {
 		_, _ = password.Verify(s.dummyHash, pw)
-		return store.User{}, false, nil
+		return passwordCheck{}, nil
 	}
 	if err != nil {
-		return store.User{}, false, err
+		return passwordCheck{}, err
 	}
 	ok, err := password.Verify(hash, pw)
-	return user, ok, err
+	return passwordCheck{ok: ok, user: user, hash: hash}, err
 }
 
 // dummyPasswordHash is a hash of a password nobody has, with the current
@@ -379,23 +416,24 @@ func remoteHost(r *http.Request) string {
 	return host
 }
 
-// limiter slows password guessing: after limiterFailures failed sign-ins
-// for one key (a user name, or a client address) within limiterWindow,
-// further attempts for that key are refused until the window has passed.
-// It is in memory: a restart forgets it, which costs an attacker a restart
-// they cannot cause.
+// limiter slows password guessing: each key (a user name, or a client
+// address) gets limiterAttempts sign-in attempts per limiterWindow. An
+// attempt is counted when it starts, not when it fails, so attempts running
+// at the same time cannot all slip under the limit; a successful sign-in
+// gives its attempt back. It is in memory: a restart forgets it, which
+// costs an attacker a restart they cannot cause.
 type limiter struct {
 	mu      sync.Mutex
 	entries map[string]*limiterEntry
 }
 
 type limiterEntry struct {
-	failures int
+	attempts int
 	start    time.Time
 }
 
 const (
-	limiterFailures = 5
+	limiterAttempts = 5
 	limiterWindow   = 5 * time.Minute
 	// limiterEntries bounds the table; when it is full, finished windows
 	// are dropped, and failing that the table is cleared.
@@ -405,13 +443,18 @@ const (
 func newLimiter() *limiter { return &limiter{entries: map[string]*limiterEntry{}} }
 
 // blocked returns how long the caller must still wait, zero if not at all.
+// It counts nothing.
 func (l *limiter) blocked(now time.Time, keys ...string) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	return l.wait(now, keys)
+}
+
+func (l *limiter) wait(now time.Time, keys []string) time.Duration {
 	var wait time.Duration
 	for _, key := range keys {
 		e := l.entries[key]
-		if e == nil || e.failures < limiterFailures {
+		if e == nil || e.attempts < limiterAttempts {
 			continue
 		}
 		if left := e.start.Add(limiterWindow).Sub(now); left > wait {
@@ -421,9 +464,15 @@ func (l *limiter) blocked(now time.Time, keys ...string) time.Duration {
 	return wait
 }
 
-func (l *limiter) fail(now time.Time, keys ...string) {
+// begin counts one attempt against every key and returns zero. If any key
+// has no attempt left in its window, nothing is counted and the time that
+// key has left is returned.
+func (l *limiter) begin(now time.Time, keys ...string) time.Duration {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if wait := l.wait(now, keys); wait > 0 {
+		return wait
+	}
 	for _, key := range keys {
 		e := l.entries[key]
 		if e == nil || now.Sub(e.start) >= limiterWindow {
@@ -433,14 +482,25 @@ func (l *limiter) fail(now time.Time, keys ...string) {
 			e = &limiterEntry{start: now}
 			l.entries[key] = e
 		}
-		e.failures++
+		e.attempts++
 	}
+	return 0
 }
 
-func (l *limiter) reset(key string) {
+// forget clears a key: the account's owner has just proved who they are.
+func (l *limiter) forget(key string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.entries, key)
+}
+
+// refund gives back the one attempt a successful sign-in was counted for.
+func (l *limiter) refund(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if e := l.entries[key]; e != nil && e.attempts > 0 {
+		e.attempts--
+	}
 }
 
 func (l *limiter) prune(now time.Time) {

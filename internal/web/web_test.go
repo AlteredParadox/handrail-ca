@@ -135,6 +135,9 @@ func newFakeCA(t *testing.T) *fakeCA {
 type brokenStore struct {
 	*store.Store
 	historyErr, sessionErr, createErr, credentialsErr atomic.Pointer[error]
+	// beforeCreate runs between the password check and the session being
+	// created, where a concurrent `user passwd` could land.
+	beforeCreate func()
 }
 
 func (b *brokenStore) AppendHistory(ctx context.Context, e store.Event) error {
@@ -151,11 +154,14 @@ func (b *brokenStore) Session(ctx context.Context, h store.TokenHash, now time.T
 	return b.Store.Session(ctx, h, now)
 }
 
-func (b *brokenStore) CreateSession(ctx context.Context, id int64, h store.TokenHash, now, exp time.Time) error {
+func (b *brokenStore) CreateSession(ctx context.Context, id int64, hash string, h store.TokenHash, now, exp time.Time) error {
 	if err := b.createErr.Load(); err != nil {
 		return *err
 	}
-	return b.Store.CreateSession(ctx, id, h, now, exp)
+	if b.beforeCreate != nil {
+		b.beforeCreate()
+	}
+	return b.Store.CreateSession(ctx, id, hash, h, now, exp)
 }
 
 func (b *brokenStore) Credentials(ctx context.Context, name string) (store.User, string, error) {
@@ -350,8 +356,12 @@ func TestNewNeedsItsParts(t *testing.T) {
 		"no CA":         func(o *Options) { o.CA = nil },
 		"no public URL": func(o *Options) { o.PublicURL = nil },
 		"ftp":           func(o *Options) { o.PublicURL = &url.URL{Scheme: "ftp", Host: "x"} },
-		"no host":       func(o *Options) { o.PublicURL = &url.URL{Scheme: "https"} },
-		"with query":    func(o *Options) { o.PublicURL = &url.URL{Scheme: "https", Host: "x", RawQuery: "a=b"} },
+		"plain HTTP beyond this machine": func(o *Options) {
+			o.PublicURL = &url.URL{Scheme: "http", Host: "handrail.internal.example"}
+		},
+		"plain HTTP on a private address": func(o *Options) { o.PublicURL = &url.URL{Scheme: "http", Host: "10.20.0.9:8080"} },
+		"no host":                         func(o *Options) { o.PublicURL = &url.URL{Scheme: "https"} },
+		"with query":                      func(o *Options) { o.PublicURL = &url.URL{Scheme: "https", Host: "x", RawQuery: "a=b"} },
 	} {
 		o := good
 		change(&o)
@@ -586,7 +596,7 @@ func TestOversizedFormIsRefused(t *testing.T) {
 
 func TestSignInIsThrottled(t *testing.T) {
 	s := newSite(t, "http://127.0.0.1:8080")
-	for range limiterFailures {
+	for range limiterAttempts {
 		wantStatus(t, s.browser().signIn("alice", "a wrong password"), http.StatusUnauthorized)
 	}
 	// Now even the right password is refused, without being checked.
@@ -604,38 +614,138 @@ func TestSignInIsThrottled(t *testing.T) {
 
 	// A success clears the name's count: four more failures do not lock it.
 	s.server.limiter = newLimiter()
-	for range limiterFailures - 1 {
+	for range limiterAttempts - 1 {
 		s.browser().signIn("bob", "wrong")
 	}
 	wantRedirect(t, s.browser().signIn("bob", bobPassword), "/")
 	if e := s.server.limiter.entries["user:bob"]; e != nil {
 		t.Errorf("bob's failures were kept after a success: %+v", e)
 	}
+	// The address keeps its four failures, and gets the successful attempt
+	// back: one more wrong guess is checked, the one after is not.
+	if e := s.server.limiter.entries["addr:10.20.0.5"]; e == nil || e.attempts != limiterAttempts-1 {
+		t.Errorf("the address's count after a success: %+v", e)
+	}
+	wantStatus(t, s.browser().signIn("alice", "wrong"), http.StatusUnauthorized)
+	wantStatus(t, s.browser().signIn("alice", alicePassword), http.StatusTooManyRequests)
+
+	// Names that cannot be accounts count against the address as well.
+	s.server.limiter = newLimiter()
+	for range limiterAttempts {
+		wantStatus(t, s.browser().signIn("not a name", "x"), http.StatusUnauthorized)
+	}
+	wantStatus(t, s.browser().signIn("not a name", "x"), http.StatusTooManyRequests)
+}
+
+// Guesses sent all at once queue for a hashing slot; the throttle must hold
+// for the queue, not only for requests that arrive one after another.
+func TestThrottleHoldsUnderConcurrency(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	const guesses = 30
+	browsers := make([]*browser, guesses)
+	tokens := make([]string, guesses)
+	for i := range browsers {
+		browsers[i] = s.browser()
+		tokens[i] = tokenIn(t, browsers[i].get("/sign-in"))
+	}
+	codes := make([]int, guesses)
+	var wg sync.WaitGroup
+	for i, b := range browsers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			form := url.Values{"form_token": {tokens[i]}, "username": {"alice"}, "password": {fmt.Sprintf("guess number %d", i)}}
+			codes[i] = b.do(http.MethodPost, "/sign-in", form).Code
+		}()
+	}
+	wg.Wait()
+	checked, refused := 0, 0
+	for _, code := range codes {
+		switch code {
+		case http.StatusUnauthorized:
+			checked++
+		case http.StatusTooManyRequests:
+			refused++
+		default:
+			t.Errorf("unexpected status %d", code)
+		}
+	}
+	if checked != limiterAttempts || refused != guesses-limiterAttempts {
+		t.Errorf("%d guesses were checked and %d refused; want %d and %d", checked, refused, limiterAttempts, guesses-limiterAttempts)
+	}
+	if n := len(s.history()); n != limiterAttempts {
+		t.Errorf("%d failed sign-ins in the history, want %d", n, limiterAttempts)
+	}
+}
+
+// `handrail-ca user passwd` signs the account out everywhere. A sign-in
+// with the old password that was already past its check when the change
+// landed must not come out the other side with a session.
+func TestPasswordChangeDuringSignIn(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	ctx := context.Background()
+	s.store.beforeCreate = func() {
+		if err := s.store.Store.SetPassword(ctx, "alice", cheapHash("a new password entirely"), t0); err != nil {
+			t.Error(err)
+		}
+	}
+	b := s.browser()
+	rec := b.signIn("alice", alicePassword)
+	wantStatus(t, rec, http.StatusUnauthorized)
+	wantBody(t, rec, wrongCredentials)
+	if _, ok := b.cookies[sessionCookie]; ok {
+		t.Error("a session cookie was set with the superseded password")
+	}
+	last := s.history()[0]
+	if last.Outcome != store.OutcomeFailed || last.Actor != "alice" || last.Detail != "the account changed during sign-in" {
+		t.Errorf("history = %+v", last)
+	}
+
+	// The same for an account removed in that moment.
+	s.store.beforeCreate = func() {
+		if err := s.store.Store.RemoveUser(ctx, "bob"); err != nil {
+			t.Error(err)
+		}
+	}
+	wantStatus(t, s.browser().signIn("bob", bobPassword), http.StatusUnauthorized)
+
+	// And the new password works.
+	s.store.beforeCreate = nil
+	wantRedirect(t, s.browser().signIn("alice", "a new password entirely"), "/")
 }
 
 func TestLimiterStaysBounded(t *testing.T) {
 	l := newLimiter()
 	for i := range limiterEntries {
-		l.fail(t0, fmt.Sprintf("addr:%d", i))
+		l.begin(t0, fmt.Sprintf("addr:%d", i))
 	}
-	// Full of live windows: the next failure clears the table rather than
+	// Full of live windows: the next attempt clears the table rather than
 	// growing it.
-	l.fail(t0.Add(time.Second), "addr:new")
+	l.begin(t0.Add(time.Second), "addr:new")
 	if len(l.entries) != 1 {
 		t.Errorf("%d entries after overflow, want 1", len(l.entries))
 	}
 	// Finished windows are dropped first.
 	l = newLimiter()
 	for i := range limiterEntries {
-		l.fail(t0, fmt.Sprintf("addr:%d", i))
+		l.begin(t0, fmt.Sprintf("addr:%d", i))
 	}
-	l.fail(t0.Add(limiterWindow), "addr:new")
+	l.begin(t0.Add(limiterWindow), "addr:new")
 	if len(l.entries) != 1 {
 		t.Errorf("%d entries after pruning, want 1", len(l.entries))
 	}
 	if l.blocked(t0, "addr:none") != 0 {
 		t.Error("an unknown key is blocked")
 	}
+	// A refused attempt counts against none of its keys.
+	l = newLimiter()
+	for range limiterAttempts {
+		l.begin(t0, "user:a")
+	}
+	if l.begin(t0, "user:a", "addr:b") == 0 || l.entries["addr:b"] != nil {
+		t.Error("a refused attempt was counted against its other key")
+	}
+	l.refund("addr:none") // nothing to give back: no effect, no panic
 }
 
 func TestSessionsEnd(t *testing.T) {
@@ -739,14 +849,18 @@ func TestOnlyThePublicHostIsAnswered(t *testing.T) {
 // A public URL written with its scheme's default port, or in capitals, is
 // still the address browsers send: no port, lower case.
 func TestPublicURLIsNormalized(t *testing.T) {
-	for _, public := range []string{"https://Handrail.Internal.Example:443", "http://handrail.internal.example:80/"} {
+	for public, name := range map[string]string{
+		"https://Handrail.Internal.Example:443": "handrail.internal.example",
+		"http://LocalHost:80/":                  "localhost",
+		"http://[::1]:8080":                     "[::1]:8080",
+	} {
 		s := newSite(t, public)
 		b := s.browser()
-		b.host = "handrail.internal.example"
-		b.origin = s.public.Scheme + "://handrail.internal.example"
+		b.host = name
+		b.origin = s.public.Scheme + "://" + name
 		wantRedirect(t, b.signIn("alice", alicePassword), "/")
 		wantStatus(t, b.get("/status"), http.StatusOK)
-		b.host = "HANDRAIL.internal.example"
+		b.host = strings.ToUpper(name)
 		wantStatus(t, b.get("/status"), http.StatusOK)
 	}
 }

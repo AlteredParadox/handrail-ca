@@ -41,7 +41,7 @@ export HANDRAIL_CA_ROOT=/etc/handrail-ca/root_ca.crt
 | `-ca-url` | `HANDRAIL_CA_URL` | The CA's address, `https://host[:port]`. |
 | `-ca-root` | `HANDRAIL_CA_ROOT` | File with the CA's root certificate. Every connection to the CA is verified against it and nothing else. |
 | `-listen` | `HANDRAIL_LISTEN` | Listen address; `127.0.0.1:8080` unless set. |
-| `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `http(s)://host[:port][/path]`. Required when listening beyond loopback. |
+| `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. |
 
 handrail-ca serves plain HTTP. To reach it from another machine, put a
 reverse proxy with TLS in front and set `-public-url` to the proxy's
@@ -67,8 +67,8 @@ host. There is no account management in the browser.
 
 A viewer reads; an operator will also issue and revoke. Flags come before
 the user name. Sessions end after an hour unused or twelve hours in all.
-Five failed sign-ins for one name, or from one address, lock that name or
-address out for five minutes.
+Each user name, and each client address, gets five sign-in attempts in five
+minutes; a successful sign-in does not count.
 
 ### As a container
 

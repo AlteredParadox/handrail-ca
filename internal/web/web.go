@@ -27,6 +27,7 @@ import (
 	"errors"
 	"io/fs"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -44,6 +45,9 @@ var staticFS embed.FS
 // repoURL is where the corresponding source lives (AGPL section 13).
 const repoURL = "https://github.com/AlteredParadox/handrail-ca"
 
+// healthPath is the probe the container's HEALTHCHECK asks.
+const healthPath = "/healthz"
+
 // CA is what the pages need from the CA client (*ca.Client).
 type CA interface {
 	URL() string
@@ -59,7 +63,7 @@ type CA interface {
 // Store is what the pages need from the store (*store.Store).
 type Store interface {
 	Credentials(ctx context.Context, username string) (store.User, string, error)
-	CreateSession(ctx context.Context, userID int64, token store.TokenHash, now, expires time.Time) error
+	CreateSession(ctx context.Context, userID int64, passwordHash string, token store.TokenHash, now, expires time.Time) error
 	Session(ctx context.Context, token store.TokenHash, now time.Time) (store.Session, error)
 	TouchSession(ctx context.Context, token store.TokenHash, now time.Time) error
 	DeleteSession(ctx context.Context, token store.TokenHash) error
@@ -122,6 +126,11 @@ func build(opts Options) (*server, http.Handler, error) {
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, nil, errors.New("web: the public URL must be http(s)://host[:port][/path]")
 	}
+	if u.Scheme == "http" && !loopbackName(u.Hostname()) {
+		return nil, nil, errors.New("web: a public URL with http:// is only accepted for a loopback address (localhost, 127.0.0.1, ::1): " +
+			"anywhere else, passwords and session cookies would cross the network in the clear. " +
+			"Put a reverse proxy with TLS in front and give its https:// address")
+	}
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
@@ -165,7 +174,7 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux := http.NewServeMux()
 	// Open to everyone: the probe, the legal pages, the style sheet, and
 	// signing in.
-	mux.HandleFunc("GET /healthz", s.healthz)
+	mux.HandleFunc("GET "+healthPath, s.healthz)
 	mux.HandleFunc("GET /license", text(opts.License))
 	mux.HandleFunc("GET /third-party-licenses", text(opts.ThirdPartyLicenses))
 	mux.HandleFunc("GET /source", func(w http.ResponseWriter, r *http.Request) {
@@ -187,6 +196,15 @@ func build(opts Options) (*server, http.Handler, error) {
 	})
 
 	return s, securityHeaders(s.onlyOurHost(s.underBase(s.sameOriginWrites(mux)))), nil
+}
+
+// loopbackName reports whether a host name can only mean this machine.
+func loopbackName(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func (s *server) healthz(w http.ResponseWriter, _ *http.Request) {
@@ -222,7 +240,7 @@ func securityHeaders(next http.Handler) http.Handler {
 // it says nothing but the version.
 func (s *server) onlyOurHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		probe := r.URL.Path == "/healthz" || r.URL.Path == s.base+"/healthz"
+		probe := r.URL.Path == healthPath || r.URL.Path == s.base+healthPath
 		if !strings.EqualFold(r.Host, s.host) && !probe {
 			http.Error(w, "handrail-ca is not served under this host name", http.StatusMisdirectedRequest)
 			return
@@ -240,7 +258,7 @@ func (s *server) underBase(next http.Handler) http.Handler {
 	stripped := http.StripPrefix(s.base, next)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.URL.Path == "/healthz":
+		case r.URL.Path == healthPath:
 			next.ServeHTTP(w, r)
 		case r.URL.Path == s.base:
 			http.Redirect(w, r, s.base+"/", http.StatusPermanentRedirect)

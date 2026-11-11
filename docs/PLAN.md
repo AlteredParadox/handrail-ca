@@ -280,7 +280,10 @@ As built in milestone 1:
   only Host header answered (the health probe excepted), its origin is the
   only `Origin` a form is accepted from, an `https` scheme marks the cookies
   `Secure`, and its path is the prefix everything is served under. It
-  defaults to the listener on loopback and is required anywhere else.
+  defaults to the listener on loopback and is required anywhere else. An
+  `http://` public URL is refused unless its host is a loopback name:
+  handrail-ca will not send passwords and session cookies across a network
+  in the clear.
 - Sessions last twelve hours, or one hour unused. The cookie holds a random
   token; the store holds its SHA-256. Over HTTPS at the root of a host the
   cookie carries the `__Host-` prefix.
@@ -288,9 +291,11 @@ As built in milestone 1:
   sign-in form, which has no session yet, gets a short-lived cookie of its
   own for the same purpose. A post without the right `Origin` is refused
   before the token is looked at.
-- Sign-in is throttled in memory: five failures for one user name, or from
-  one client address, refuse further attempts for that name or address for
-  five minutes. The address is the connection's; forwarded headers are not
+- Sign-in is throttled in memory: each user name, and each client address,
+  gets five attempts in five minutes. An attempt is counted when its
+  password check starts, so guesses sent at the same time cannot outrun the
+  limit, and a successful sign-in gives its attempt back. The address is
+  the connection's; forwarded headers are not
   trusted, so behind a reverse proxy the per-address limit is one limit for
   everybody, and a known user name can be kept locked out by someone who
   keeps failing on it. A trusted-proxy setting would sharpen the first;
@@ -299,6 +304,9 @@ As built in milestone 1:
   user)", never with what was typed: people type passwords into that field.
 - At most two passwords are hashed at once (64 MiB each), and a missing
   account costs the same hash as a wrong password.
+- A session is created only if the account still has the password hash
+  that was just checked, in one statement in the store: a password change
+  that lands while a sign-in is in flight ends that sign-in too.
 
 **Store.** Per D5: one SQLite file under the data directory (`-data`,
 `HANDRAIL_DATA`; a volume in the container), created with owner-only

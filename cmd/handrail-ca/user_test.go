@@ -176,7 +176,7 @@ func TestUserPasswdSignsOut(t *testing.T) {
 	ctx := context.Background()
 	alice, oldHash, _ := st.Credentials(ctx, "alice")
 	token := store.HashToken([]byte("cookie"))
-	if err := st.CreateSession(ctx, alice.ID, token, time.Now(), time.Now().Add(time.Hour)); err != nil {
+	if err := st.CreateSession(ctx, alice.ID, oldHash, token, time.Now(), time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 

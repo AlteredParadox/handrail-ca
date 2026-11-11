@@ -193,6 +193,7 @@ func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
 		{"root is not a certificate", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", notACert}, 1, "no PEM certificate"},
 		{"CA over plain HTTP", []string{"-data", data, "-ca-url", "http://ca.invalid", "-ca-root", root}, 1, "must start with https://"},
 		{"bad public URL", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-public-url", "handrail.example"}, 1, "-public-url"},
+		{"plain HTTP public URL beyond this machine", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-public-url", "http://handrail.example"}, 1, "only accepted for a loopback address"},
 		{"beyond loopback without a public URL", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root}, 1, "-public-url (HANDRAIL_PUBLIC_URL) is required"},
 		{"beyond loopback without an account", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-public-url", "https://handrail.example"}, 1, "no accounts yet"},
 	}
