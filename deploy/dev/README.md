@@ -44,7 +44,7 @@ issued over ACME.
   role script.
 - `verify.sh`: the checks behind `make dev-verify`.
 - `test.sh`: runs the Go tests named `TestIntegration...` with the CA's
-  address and root certificate in the environment. Those tests are skipped
+  address and root fingerprint in the environment. Those tests are skipped
   everywhere else.
 
 ## Raising the step-ca version

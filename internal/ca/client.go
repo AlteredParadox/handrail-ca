@@ -15,15 +15,17 @@
 // along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 // Package ca is handrail-ca's client for the step-ca HTTP API. This file is
-// the connection: the operator supplies the CA's root certificate, and that
-// certificate is the only trust anchor for every request. Nothing is fetched
-// before the CA has been verified. The response shapes were captured from
-// step-ca 0.30.2 (see docs/PLAN.md, section 3).
+// the connection: the operator configures the SHA-256 fingerprint of the
+// CA's root certificate, the root is fetched from the CA and accepted only
+// if it has that fingerprint, and from then on it is the only trust anchor
+// for every request. The response shapes were captured from step-ca 0.30.2
+// (see docs/PLAN.md, section 3).
 package ca
 
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/hex"
@@ -35,6 +37,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -42,9 +45,6 @@ const (
 	// maxJSON bounds every JSON answer. A page of 100 provisioners with
 	// their encrypted keys is about 100 KiB.
 	maxJSON = 1 << 20
-	// maxRoots bounds the configured trust anchors: one, or two while the
-	// CA's root is being replaced.
-	maxRoots = 4
 
 	defaultTimeout = 10 * time.Second
 )
@@ -53,24 +53,28 @@ const (
 type Config struct {
 	// URL is the CA's address, https://host[:port] with no path.
 	URL string
-	// RootPEM is the CA's root certificate in PEM, the content of
-	// `$(step path)/certs/root_ca.crt` on the CA's host. More than one
-	// certificate is accepted, for a CA that is replacing its root.
-	RootPEM []byte
-	// Timeout bounds each request. Zero means ten seconds.
+	// Fingerprint is the SHA-256 of the CA's root certificate in hex, as
+	// printed by `step certificate fingerprint root_ca.crt`.
+	Fingerprint string
+	// Timeout bounds each request, the fetch of the root included. Zero
+	// means ten seconds.
 	Timeout time.Duration
 	// UserAgent is sent with every request, if set.
 	UserAgent string
 }
 
 // Client talks to one step-ca. It is safe for concurrent use. Creating it
-// makes no connection, so handrail-ca can start, and say so, while the CA is
-// down.
+// makes no connection: the root is fetched and pinned on the first request,
+// so handrail-ca can start, and say so, while the CA is down.
 type Client struct {
-	base      *url.URL
-	roots     []*x509.Certificate
-	userAgent string
-	http      *http.Client
+	base        *url.URL
+	fingerprint [sha256.Size]byte
+	timeout     time.Duration
+	userAgent   string
+
+	mu     sync.Mutex
+	root   *x509.Certificate
+	pinned *http.Client
 }
 
 // New checks the configuration and returns a client for it.
@@ -91,82 +95,33 @@ func New(cfg Config) (*Client, error) {
 	}
 	base.Path, base.RawPath = "", ""
 
-	roots, err := parseRoots(cfg.RootPEM)
-	if err != nil {
-		return nil, fmt.Errorf("CA root certificate: %w", err)
+	sum, err := hex.DecodeString(strings.TrimSpace(cfg.Fingerprint))
+	if err != nil || len(sum) != sha256.Size {
+		return nil, errors.New("CA root fingerprint: want 64 hexadecimal characters (step certificate fingerprint root_ca.crt)")
 	}
-	pool := x509.NewCertPool()
-	for _, root := range roots {
-		pool.AddCert(root)
+	c := &Client{base: base, timeout: cfg.Timeout, userAgent: cfg.UserAgent}
+	copy(c.fingerprint[:], sum)
+	if c.timeout <= 0 {
+		c.timeout = defaultTimeout
 	}
-	timeout := cfg.Timeout
-	if timeout <= 0 {
-		timeout = defaultTimeout
-	}
-	return &Client{
-		base:      base,
-		roots:     roots,
-		userAgent: cfg.UserAgent,
-		http: &http.Client{
-			Timeout:       timeout,
-			CheckRedirect: noRedirect,
-			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
-				TLSClientConfig:       &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
-				ForceAttemptHTTP2:     true,
-				TLSHandshakeTimeout:   timeout,
-				ResponseHeaderTimeout: timeout,
-				MaxIdleConns:          4,
-				IdleConnTimeout:       90 * time.Second,
-			},
-		},
-	}, nil
-}
-
-// parseRoots reads the configured trust anchors: PEM certificates and
-// nothing else, each of them a CA certificate. Handing over a server
-// certificate or a key file by mistake is refused here, not discovered
-// later as a failed connection.
-func parseRoots(data []byte) ([]*x509.Certificate, error) {
-	var roots []*x509.Certificate
-	rest := data
-	for {
-		var block *pem.Block
-		block, rest = pem.Decode(rest)
-		if block == nil {
-			break
-		}
-		if block.Type != "CERTIFICATE" {
-			return nil, fmt.Errorf("found a PEM %q block; only certificates belong in this file", clip(block.Type))
-		}
-		cert, err := x509.ParseCertificate(block.Bytes)
-		if err != nil {
-			return nil, fmt.Errorf("certificate %d does not parse: %w", len(roots)+1, err)
-		}
-		if !cert.IsCA {
-			return nil, fmt.Errorf("certificate %d (%s) is not a CA certificate", len(roots)+1, clip(cert.Subject.String()))
-		}
-		roots = append(roots, cert)
-		if len(roots) > maxRoots {
-			return nil, fmt.Errorf("more than %d certificates", maxRoots)
-		}
-	}
-	if len(roots) == 0 {
-		return nil, errors.New("no PEM certificate found (want the content of root_ca.crt)")
-	}
-	if strings.TrimSpace(string(rest)) != "" {
-		return nil, errors.New("unreadable data after the last certificate")
-	}
-	return roots, nil
+	return c, nil
 }
 
 // URL is the CA's address as configured.
 func (c *Client) URL() string { return c.base.String() }
 
-// TrustedRoots are the configured root certificates, the only ones the
-// connection to the CA is verified against.
-func (c *Client) TrustedRoots() []*x509.Certificate {
-	return append([]*x509.Certificate(nil), c.roots...)
+// RootFingerprint is the configured fingerprint of the CA's root, in
+// lower-case hex: what the root must match, whether or not it has been
+// fetched yet.
+func (c *Client) RootFingerprint() string { return hex.EncodeToString(c.fingerprint[:]) }
+
+// Root returns the CA's root certificate, fetching and pinning it if that
+// has not happened yet.
+func (c *Client) Root(ctx context.Context) (*x509.Certificate, error) {
+	if _, err := c.client(ctx); err != nil {
+		return nil, err
+	}
+	return c.root, nil
 }
 
 // Fingerprint is a certificate's SHA-256 in lower-case hex, as printed by
@@ -192,6 +147,127 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("the CA answered %d: %s", e.Status, e.Message)
 }
 
+// client returns the HTTP client that trusts the pinned root and nothing
+// else, pinning the root first if needed. A failed attempt is not
+// remembered: the next request tries again.
+func (c *Client) client(ctx context.Context) (*http.Client, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.pinned != nil {
+		return c.pinned, nil
+	}
+	root, err := c.fetchRoot(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("pinning the CA's root: %w", err)
+	}
+	pool := x509.NewCertPool()
+	pool.AddCert(root)
+	c.root = root
+	c.pinned = &http.Client{
+		Timeout:       c.timeout,
+		CheckRedirect: noRedirect,
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			TLSClientConfig:       &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12},
+			ForceAttemptHTTP2:     true,
+			TLSHandshakeTimeout:   c.timeout,
+			ResponseHeaderTimeout: c.timeout,
+			MaxIdleConns:          4,
+			IdleConnTimeout:       90 * time.Second,
+		},
+	}
+	return c.pinned, nil
+}
+
+// fetchRoot asks the CA for the root with the configured fingerprint and
+// accepts the answer only if its SHA-256 is that fingerprint.
+//
+// This is the one request in handrail-ca that cannot verify the server's
+// certificate the usual way, because the root that would verify it is what
+// is being fetched. It is the exchange `step ca bootstrap` makes, kept at
+// the owner's decision (2026-11-11) so that the operator configures a
+// fingerprint and not a certificate file. Nothing from it is trusted on
+// the server's word:
+//
+//   - the certificate is authenticated by the operator's fingerprint;
+//   - the request carries nothing secret, and its answer is public;
+//   - before the root is accepted, the certificate the server presented on
+//     this very connection must chain to it for the configured host name,
+//     so a server that merely relays the CA's public root is refused.
+//
+// Every later request goes through a client that trusts that root alone.
+// Do not add a second request of this kind (AGENTS.md).
+func (c *Client) fetchRoot(ctx context.Context) (*x509.Certificate, error) {
+	hc := &http.Client{
+		Timeout:       c.timeout,
+		CheckRedirect: noRedirect,
+		Transport: &http.Transport{
+			Proxy:             http.ProxyFromEnvironment,
+			DisableKeepAlives: true,
+			TLSClientConfig: &tls.Config{
+				// Verified below, against the fetched root: see above.
+				InsecureSkipVerify: true,
+				MinVersion:         tls.VersionTLS12,
+			},
+			TLSHandshakeTimeout:   c.timeout,
+			ResponseHeaderTimeout: c.timeout,
+		},
+	}
+	defer hc.CloseIdleConnections()
+
+	resp, body, err := c.do(ctx, hc, "/root/"+c.RootFingerprint(), nil, maxJSON)
+	if err != nil {
+		var se *StatusError
+		if errors.As(err, &se) && se.Status == http.StatusNotFound {
+			return nil, fmt.Errorf("the CA at %s has no root with fingerprint %s", c.base.Host, c.RootFingerprint())
+		}
+		return nil, err
+	}
+	var answer struct {
+		CA string `json:"ca"`
+	}
+	if err := json.Unmarshal(body, &answer); err != nil {
+		return nil, fmt.Errorf("root answer is not the expected JSON: %w", err)
+	}
+	root, err := onePEMCertificate(answer.CA)
+	if err != nil {
+		return nil, fmt.Errorf("root answer: %w", err)
+	}
+	sum := sha256.Sum256(root.Raw)
+	if subtle.ConstantTimeCompare(sum[:], c.fingerprint[:]) != 1 {
+		return nil, fmt.Errorf("the certificate the CA returned has fingerprint %s, not the configured %s",
+			hex.EncodeToString(sum[:]), c.RootFingerprint())
+	}
+
+	if resp.TLS == nil || len(resp.TLS.PeerCertificates) == 0 {
+		return nil, errors.New("the connection to the CA presented no certificate")
+	}
+	roots, intermediates := x509.NewCertPool(), x509.NewCertPool()
+	roots.AddCert(root)
+	for _, cert := range resp.TLS.PeerCertificates[1:] {
+		intermediates.AddCert(cert)
+	}
+	if _, err := resp.TLS.PeerCertificates[0].Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		DNSName:       c.base.Hostname(),
+	}); err != nil {
+		return nil, fmt.Errorf("the server at %s returned the right root, but its own certificate does not check out against it: %w", c.base.Host, err)
+	}
+	return root, nil
+}
+
+// get fetches a path from the CA over the pinned connection. Any 2xx is a
+// success: step-ca answers 201 for some plain reads.
+func (c *Client) get(ctx context.Context, path string, query url.Values, limit int64) ([]byte, error) {
+	hc, err := c.client(ctx)
+	if err != nil {
+		return nil, err
+	}
+	_, body, err := c.do(ctx, hc, path, query, limit)
+	return body, err
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, query url.Values, into any) error {
 	body, err := c.get(ctx, path, query, maxJSON)
 	if err != nil {
@@ -203,40 +279,39 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, int
 	return nil
 }
 
-// get fetches a path from the CA and reads at most limit bytes of the
-// answer; a longer answer is an error, not a truncated success. Any 2xx is
-// a success: step-ca answers 201 for some plain reads.
-func (c *Client) get(ctx context.Context, path string, query url.Values, limit int64) ([]byte, error) {
+// do makes one GET and reads at most limit bytes of the answer; a longer
+// answer is an error, not a truncated success.
+func (c *Client) do(ctx context.Context, hc *http.Client, path string, query url.Values, limit int64) (*http.Response, []byte, error) {
 	u := *c.base
 	u.Path = path
 	u.RawQuery = query.Encode()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
-	resp, err := c.http.Do(req)
+	resp, err := hc.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		// The error text is optional: read a little of it and move on.
 		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, &StatusError{Status: resp.StatusCode, Message: errorMessage(excerpt)}
+		return nil, nil, &StatusError{Status: resp.StatusCode, Message: errorMessage(excerpt)}
 	}
 	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
-		return nil, fmt.Errorf("%s: reading the answer: %w", path, err)
+		return nil, nil, fmt.Errorf("%s: reading the answer: %w", path, err)
 	}
 	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("%s: the answer is larger than %d bytes", path, limit)
+		return nil, nil, fmt.Errorf("%s: the answer is larger than %d bytes", path, limit)
 	}
-	return body, nil
+	return resp, body, nil
 }
 
 // errorMessage is the "message" of a step-ca error body, shortened; empty
