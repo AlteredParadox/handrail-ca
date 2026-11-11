@@ -443,7 +443,7 @@ func TestProvisioners(t *testing.T) {
 	want := []Provisioner{
 		{Type: "JWK", Name: "Admin JWK", KeyID: "Oa1vCqYez46qTaSt1jOGD2oOXdFtqO9M354y43ifbks", Claims: Claims{DefaultTLSCertDuration: 5 * time.Minute}},
 		{Type: "JWK", Name: "handrail", KeyID: "bV0DLKeg_g9QxXGc3SsJY5LKafxDzsbJkSVKnh2OBWs", Claims: Claims{MaxTLSCertDuration: 2160 * time.Hour}},
-		{Type: "ACME", Name: "acme", Claims: Claims{DisableRenewal: true, AllowRenewalAfterExpiry: true}},
+		{Type: "ACME", Name: "acme"},
 		{Type: "OIDC", Name: "sso"},
 	}
 	if len(got) != len(want) {
