@@ -133,8 +133,11 @@ type listData struct {
 	View         string
 	Sort         string
 	Dir          string
-	Filtered     bool // anything but the plain default list
-	ClearURL     string
+	// Page is the page shown, which is the last one when a later page was
+	// asked for. Zero before the list has been read.
+	Page     int
+	Filtered bool // anything but the plain default list
+	ClearURL string
 
 	Views        []viewLink
 	Provisioners []provisionerOption
@@ -298,6 +301,7 @@ func (s *server) fillPage(data *listData, q listQuery, rows []inventory.Row, now
 	data.Total = len(rows)
 	pages := max((data.Total+listPageSize-1)/listPageSize, 1)
 	page := min(q.Page, pages)
+	data.Page = page
 	start := (page - 1) * listPageSize
 	end := min(start+listPageSize, data.Total)
 	if data.Total > 0 {

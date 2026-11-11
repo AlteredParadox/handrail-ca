@@ -2146,6 +2146,26 @@ func TestReadAgainNow(t *testing.T) {
 	wantRedirect(t, rec, "/?q=internal&sort=subject&view=all")
 	wantBody(t, b.get(rec.Header().Get("Location")), "new.internal.example")
 
+	// From a later page it comes back to that page: the form carries the
+	// page shown.
+	s.rows.mu.Lock()
+	for i := range listPageSize + 5 {
+		s.rows.certs = append(s.rows.certs, leafRow(t, int64(1000+i), fmt.Sprintf("many%03d.internal.example", i), t0, t0.Add(48*time.Hour)))
+	}
+	s.rows.mu.Unlock()
+	if err := s.inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	second := b.get("/?view=all&page=2")
+	wantBody(t, second, `<input type="hidden" name="page" value="2">`)
+	rec = b.do(http.MethodPost, "/refresh", url.Values{"form_token": {token}, "view": {"all"}, "page": {"2"}})
+	wantRedirect(t, rec, "/?page=2&view=all")
+	// A page past the end shows the last one, and that is the one carried.
+	wantBody(t, b.get("/?view=all&page=9"), `<input type="hidden" name="page" value="2">`)
+	if strings.Contains(b.get("/?view=all").Body.String(), `name="page"`) {
+		t.Error("the first page's refresh form carries a page number")
+	}
+
 	// It needs the session's form token and origin like every other form.
 	wantStatus(t, b.do(http.MethodPost, "/refresh", url.Values{}), http.StatusForbidden)
 	b.origin = "https://evil.example"

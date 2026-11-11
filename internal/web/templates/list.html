@@ -34,6 +34,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <input type="hidden" name="view" value="{{.View}}">
 <input type="hidden" name="sort" value="{{.Sort}}">
 <input type="hidden" name="dir" value="{{.Dir}}">
+{{if gt .Page 1}}<input type="hidden" name="page" value="{{.Page}}">{{end}}
 <button type="submit" class="secondary">Read again now</button>
 </form>
 </div>
