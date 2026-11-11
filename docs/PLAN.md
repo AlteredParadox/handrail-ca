@@ -2,8 +2,8 @@
 
 Status: 2026-11-11. Milestone 1 is built: sign-in and a CA status page, on
 a store of its own, against a development CA. Milestone 2 is under way: the
-certificate inventory is read from the CA's database; the list and detail
-pages are next (section 6).
+certificate inventory is read from the CA's database and shown as a list;
+the detail page is next (section 6).
 Section 2 records the decisions made so far.
 
 ## 1. What we are building
@@ -482,9 +482,19 @@ server that answers `/healthz`.
   comes from, how old the picture is, counts by status). Integration tests
   read the development CA's database and check that the account can do
   nothing but read.
-- List page: filter by status and provisioner, search subject and SANs, sort,
-  paginate; default view hides expired certificates. The CA's own admin
-  certificates (section 3) are hidden unless asked for.
+- Done: the list page, at the site's root. Views by status with counts
+  (active by default: in date and not revoked; expiring, expired, revoked,
+  all, and unreadable when there are such rows); search over subject,
+  names and serial (decimal or hexadecimal); filter by provisioner; sort
+  by expiry, subject or date issued; fifty to a page. The CA's own admin
+  certificates (section 3), recognised by the provisioner name step-ca
+  gives them, `Admin JWK`, are left out unless asked for, with a line
+  saying how many. A button reads the database again at once. The page
+  says how old its picture is, and when the last read failed, that
+  certificates issued or revoked since are not on it. Everything is in the
+  address, so a filtered list can be bookmarked; there is no JavaScript,
+  so the ESLint item below still waits for the first script. Rows do not
+  link anywhere yet: the detail page is the next change.
 - A "names in use" summary: every DNS name, IP address, email address and
   URI in the certificates the CA has issued, grouped by parent domain or
   network. step-ca cannot produce this list, and it is what an operator

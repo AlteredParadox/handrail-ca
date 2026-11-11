@@ -1,0 +1,129 @@
+<!--
+handrail-ca — a lightweight web UI for step-ca.
+Copyright (C) 2026 AlteredParadox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+{{define "content"}}
+{{$base := .Base}}{{$token := .FormToken}}
+{{with .Data}}
+<div class="page-head">
+<div>
+<h1>Certificates</h1>
+{{if .Read}}
+<p class="muted">Read from the CA's database {{.LastRead}}.</p>
+{{end}}
+</div>
+<form method="post" action="{{$base}}/refresh">
+<input type="hidden" name="form_token" value="{{$token}}">
+<input type="hidden" name="q" value="{{.Search}}">
+<input type="hidden" name="provisioner" value="{{.Provisioner}}">
+{{if .IncludeAdmin}}<input type="hidden" name="admin" value="1">{{end}}
+<input type="hidden" name="view" value="{{.View}}">
+<input type="hidden" name="sort" value="{{.Sort}}">
+<input type="hidden" name="dir" value="{{.Dir}}">
+<button type="submit" class="secondary">Read again now</button>
+</form>
+</div>
+
+{{if not .Read}}
+<section class="card">
+<h2>The certificate list has not been read yet</h2>
+{{if .Problem}}<p class="problem">It could not be read from the CA's database: {{.Problem}}</p>
+{{else}}<p class="muted">handrail-ca has only just started. It reads the CA's database every few seconds; try again in a moment.</p>{{end}}
+<p class="muted">The <a href="{{$base}}/status">CA status</a> page says where the list comes from.</p>
+</section>
+{{else}}
+
+{{if .Problem}}
+<p class="stale" role="status">This list is as it was {{.LastRead}}: the last attempt to read the CA's database again failed. Certificates issued or revoked since then are not shown. {{.Problem}}</p>
+{{end}}
+
+<form class="card filters" method="get" action="{{$base}}/">
+<div class="field grow">
+<label for="q">Search subject, name or serial</label>
+<input id="q" name="q" type="search" value="{{.Search}}" maxlength="200" autocomplete="off" spellcheck="false">
+</div>
+<div class="field">
+<label for="provisioner">Provisioner</label>
+<select id="provisioner" name="provisioner">
+<option value="">All provisioners</option>
+{{range .Provisioners}}<option value="{{.Name}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+{{end}}
+</select>
+</div>
+<div class="field check">
+<input id="admin" name="admin" type="checkbox" value="1"{{if .IncludeAdmin}} checked{{end}}>
+<label for="admin">Include the CA's own admin certificates</label>
+</div>
+{{if ne .View "active"}}<input type="hidden" name="view" value="{{.View}}">{{end}}
+{{if ne .Sort "expires"}}<input type="hidden" name="sort" value="{{.Sort}}">{{end}}
+{{if .Dir}}<input type="hidden" name="dir" value="{{.Dir}}">{{end}}
+<button type="submit" class="primary">Apply</button>
+{{if .Filtered}}<a class="clear" href="{{.ClearURL}}">Clear</a>{{end}}
+</form>
+
+<nav class="views" aria-label="Status">
+{{range .Views}}<a href="{{.URL}}"{{if .Current}} aria-current="true"{{end}}>{{.Label}} <span>{{.Count}}</span></a>
+{{end}}
+</nav>
+
+<section class="card flush" aria-label="Certificate list">
+{{if .Rows}}
+<div class="scroll">
+<table class="certs">
+<thead>
+<tr>
+<th scope="col">Status</th>
+{{with index .Columns "subject"}}<th scope="col"{{if .Sorted}} aria-sort="{{.Sorted}}"{{end}}><a href="{{.URL}}">Subject and names</a></th>{{end}}
+<th scope="col">Provisioner</th>
+{{with index .Columns "expires"}}<th scope="col"{{if .Sorted}} aria-sort="{{.Sorted}}"{{end}}><a href="{{.URL}}">Expires</a></th>{{end}}
+<th scope="col">Serial</th>
+</tr>
+</thead>
+<tbody>
+{{range .Rows}}
+<tr>
+<td><span class="badge {{.Badge}}">{{.StatusLabel}}</span></td>
+{{if .Problem}}
+<td colspan="3"><div class="problem">This row of the CA's database could not be read as a certificate: {{.Problem}}</div></td>
+{{else}}
+<td><div class="strong">{{.Subject}}</div>{{with .Names}}<div class="sub">{{.}}</div>{{end}}</td>
+<td>{{if .Provisioner}}{{.Provisioner}} <span class="sub">{{.ProvisionerType}}</span>{{else}}<span class="sub">Not recorded</span>{{end}}</td>
+<td><div class="nowrap">{{.Expires}}</div><div class="sub">{{.When}}</div></td>
+{{end}}
+<td class="mono small" title="{{.SerialFull}}">{{.Serial}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{else}}
+<p class="empty">No certificates match.</p>
+{{end}}
+<div class="list-foot">
+<span>{{if .Total}}{{.From}} to {{.To}} of {{.Total}}{{else}}None{{end}}{{with index .Columns "issued"}} · <a href="{{.URL}}">{{if .Sorted}}Sorted by date issued{{else}}Sort by date issued{{end}}</a>{{end}}</span>
+<span class="pager">
+{{if .PrevURL}}<a href="{{.PrevURL}}" rel="prev">Previous</a>{{end}}
+{{if .NextURL}}<a href="{{.NextURL}}" rel="next">Next</a>{{end}}
+</span>
+</div>
+{{if .AdminHidden}}
+<p class="list-note">{{.AdminHidden}} certificate{{if ne .AdminHidden 1}}s{{end}} the CA issued to its own admins {{if ne .AdminHidden 1}}are{{else}}is{{end}} not shown. <a href="{{.AdminURL}}">Show {{if ne .AdminHidden 1}}them{{else}}it{{end}}</a></p>
+{{end}}
+</section>
+{{end}}
+{{end}}
+{{end}}

@@ -5,8 +5,9 @@ view, issue and revoke certificates from a browser.
 
 **Status: early development.** You can sign in and see the state of your CA
 (reachability, version, root and intermediate certificates, provisioners,
-whether a revocation list is published) and how many certificates it has
-issued, read from its database. The certificate list itself, issuing and
+whether a revocation list is published) and the list of every certificate
+it has issued, read from its database: by status, searchable, with the
+revoked and expired ones a click away. A page per certificate, issuing and
 revoking are not built yet; the [build plan](docs/PLAN.md) has the
 order.
 

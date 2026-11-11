@@ -101,6 +101,9 @@ type Provisioner struct {
 type Certificate struct {
 	// Serial is the decimal serial number, the row's key.
 	Serial string
+	// SerialHex is the same number in lower-case hexadecimal, the form
+	// most tools print. Empty for a row that could not be read.
+	SerialHex string
 	// Subject is the common name, or the whole subject when there is none.
 	Subject string
 	// Names are the subject alternative names, at most maxNames of them;
@@ -435,6 +438,7 @@ func summarise(row RawCertificate) *Certificate {
 		return problem("the row's key is not the serial number of the certificate stored under it")
 	}
 
+	c.SerialHex = cert.SerialNumber.Text(16)
 	c.Subject = clip(cert.Subject.CommonName)
 	if c.Subject == "" {
 		c.Subject = clip(cert.Subject.String())

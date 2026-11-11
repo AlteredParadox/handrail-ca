@@ -386,6 +386,153 @@ tbody tr:last-child td {
   border-bottom: 0;
 }
 
+/* The certificate list */
+.page-head {
+  align-items: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 24px;
+  justify-content: space-between;
+}
+
+.stale {
+  background: var(--warn-ground);
+  border-radius: 8px;
+  color: var(--warn);
+  font-size: 14px;
+  overflow-wrap: anywhere;
+  padding: 12px 16px;
+}
+
+.filters {
+  align-items: flex-end;
+  flex-direction: row;
+  flex-wrap: wrap;
+  gap: 16px;
+  padding: 16px;
+}
+
+.filters .grow {
+  flex: 1 1 260px;
+}
+
+.filters .check {
+  align-items: center;
+  flex-direction: row;
+  gap: 8px;
+  min-height: 44px;
+}
+
+.filters .check label {
+  color: var(--ink);
+  font-size: 14px;
+  font-weight: 400;
+}
+
+.filters button.primary {
+  padding: 0 18px;
+}
+
+.filters .clear {
+  align-items: center;
+  display: flex;
+  min-height: 44px;
+}
+
+.views {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.views a {
+  align-items: center;
+  background: var(--surface);
+  border: 1px solid var(--field);
+  border-radius: 6px;
+  color: var(--ink);
+  display: flex;
+  font-weight: 500;
+  gap: 8px;
+  min-height: 44px;
+  padding: 0 14px;
+  text-decoration: none;
+}
+
+.views a span {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.views a[aria-current="true"] {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #ffffff;
+}
+
+.views a[aria-current="true"] span {
+  color: #d9dce1;
+}
+
+table.certs td {
+  padding: 14px 16px;
+  vertical-align: top;
+}
+
+table.certs th {
+  padding: 12px 16px;
+}
+
+table.certs th a {
+  color: inherit;
+}
+
+table.certs th[aria-sort="ascending"] a::after {
+  content: " ↑";
+}
+
+table.certs th[aria-sort="descending"] a::after {
+  content: " ↓";
+}
+
+.sub {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.nowrap {
+  white-space: nowrap;
+}
+
+.empty {
+  color: var(--muted);
+  padding: 32px 16px;
+  text-align: center;
+}
+
+.list-foot {
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  display: flex;
+  flex-wrap: wrap;
+  font-size: 14px;
+  gap: 8px 16px;
+  justify-content: space-between;
+  padding: 12px 16px;
+}
+
+.pager {
+  display: flex;
+  gap: 16px;
+}
+
+.list-note {
+  border-top: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 14px;
+  padding: 12px 16px;
+}
+
 /* Forms */
 .field {
   display: flex;
@@ -424,6 +571,40 @@ button.primary {
 
 button.primary:hover {
   background: var(--accent-dark);
+}
+
+button.secondary {
+  background: var(--surface);
+  border: 1px solid var(--field);
+  border-radius: 6px;
+  color: var(--ink);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+  min-height: 44px;
+  padding: 0 14px;
+}
+
+button.secondary:hover {
+  border-color: var(--ink);
+}
+
+select,
+input[type="search"] {
+  background: var(--surface);
+  border: 1px solid var(--field);
+  border-radius: 6px;
+  color: var(--ink);
+  font: inherit;
+  height: 44px;
+  padding: 0 12px;
+  width: 100%;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+  height: 18px;
+  width: 18px;
 }
 
 :focus-visible {
