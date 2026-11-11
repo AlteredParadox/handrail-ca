@@ -13,9 +13,13 @@ development CA issues one, turns TLS on with a reload, and
 `make dev-test` reads the database over it with `sslmode=verify-full`,
 and checks that another CA's root and another host name are refused. The
 renewal was run once by hand (the new certificate is presented after the
-reload, the old one until then). Two things there were not run: the
+reload, the old one until then). Not run there: the `listen_addresses`
+change and its restart (the development database already listens on
+every interface; that the default is `localhost` and that the setting
+needs a restart were read from PostgreSQL's own `pg_settings`), the
 `pg_hba.conf` line, and the files' locations, which are a stock
-PostgreSQL's and may differ on yours. Section 4 (revocation lists) was run once by hand on that CA: with
+PostgreSQL's and may differ on yours. How step-ca behaves when its
+database restarts under it was not tried either. Section 4 (revocation lists) was run once by hand on that CA: with
 the block shown there the list is served, and a certificate revoked
 afterwards appears in it at once. It is not part of the automatic checks,
 and it was not tried with a signing key held in a hardware token.
@@ -201,14 +205,31 @@ fingerprint.
    SHOW ssl;                             -- on
    ```
 
-4. **Let handrail-ca's machine in, over TLS only**, in `pg_hba.conf`, and
-   reload again:
+4. **Make sure PostgreSQL listens on the network.** A PostgreSQL that has
+   only ever served a step-ca on its own machine listens on `localhost`
+   alone, which is its default, and nothing from another machine reaches
+   it whatever the steps below say.
+
+   ```sql
+   SHOW listen_addresses;                -- localhost: local connections only
+   ALTER SYSTEM SET listen_addresses = 'localhost, 10.20.0.30';
+   ```
+
+   Give it the address of the interface handrail-ca will come in on, or
+   `*` for all of them. Unlike everything else here, this setting is read
+   only when PostgreSQL starts: it needs a restart, not a reload, and a
+   restart drops step-ca's own connection for a moment. Restart PostgreSQL
+   at a quiet time, then check that the CA still answers
+   (`step ca health`).
+
+5. **Let handrail-ca's machine in, over TLS only**, in `pg_hba.conf`, and
+   reload:
 
    ```
    hostssl  stepca  handrail  10.20.0.25/32  scram-sha-256
    ```
 
-5. **Give handrail-ca the connection string** (section 5), with the same
+6. **Give handrail-ca the connection string** (section 5), with the same
    host name as on the certificate and `sslmode=verify-full`:
 
    ```
