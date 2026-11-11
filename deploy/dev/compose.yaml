@@ -1,0 +1,84 @@
+# Development and test CA: step-ca on PostgreSQL, set up the way
+# docs/ca-setup.md describes. Started by `make dev-up` (deploy/dev/up.sh),
+# which generates the passwords under .secrets/ first; nothing here is a
+# credential. NOT for production: one host, throwaway keys, passwords on disk.
+#
+# Images are pinned by digest like the Dockerfile's; keep the tag beside the
+# digest so the pin stays readable. The step-ca tag is the version this
+# project's reading of step-ca's database and API is checked against
+# (deploy/dev/verify.sh); raise it only together with a passing verify run.
+name: handrail-dev
+
+services:
+  db:
+    image: postgres:17-alpine@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0
+    environment:
+      POSTGRES_USER: stepca
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_stepca_password
+    secrets:
+      - pg_stepca_password
+      - handrail_db_password
+    volumes:
+      - db-data:/var/lib/postgresql/data
+      - ./db-role.sql:/dev-db-role.sql:ro
+    ports:
+      - "127.0.0.1:15432:5432"
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "stepca"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  ca:
+    image: smallstep/step-ca:0.30.2@sha256:a2b17872915c193259b75a5474c398326f41bd199f0842093e52cf4182bc8270
+    depends_on:
+      db:
+        condition: service_healthy
+    # The image's own entrypoint always initialises the CA on Badger; this
+    # wrapper runs it, then points ca.json at PostgreSQL before the CA's
+    # first start.
+    entrypoint: ["/bin/bash", "/dev-entrypoint.sh"]
+    command: ["/usr/local/bin/step-ca", "--password-file", "/home/step/secrets/password", "/home/step/config/ca.json"]
+    environment:
+      DOCKER_STEPCA_INIT_NAME: Handrail Dev CA
+      DOCKER_STEPCA_INIT_DNS_NAMES: ca.handrail.test,localhost
+      DOCKER_STEPCA_INIT_PASSWORD_FILE: /run/secrets/ca_password
+      DOCKER_STEPCA_INIT_REMOTE_MANAGEMENT: "true"
+      DOCKER_STEPCA_INIT_ACME: "true"
+    secrets:
+      - ca_password
+      - pg_stepca_password
+      - handrail_provisioner_password
+    volumes:
+      - ca-data:/home/step
+      - ./ca-entrypoint.sh:/dev-entrypoint.sh:ro
+      - ./seed.sh:/dev-seed.sh:ro
+    networks:
+      default:
+        # The CA's own name, and the names the seed's ACME requests are
+        # validated against (the CA connects back to this container).
+        aliases:
+          - ca.handrail.test
+          - acme1.handrail.test
+          - acme2.handrail.test
+    ports:
+      - "127.0.0.1:19000:9000"
+    healthcheck:
+      test: ["CMD", "step", "ca", "health"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+
+secrets:
+  ca_password:
+    file: ./.secrets/ca_password
+  pg_stepca_password:
+    file: ./.secrets/pg_stepca_password
+  handrail_provisioner_password:
+    file: ./.secrets/handrail_provisioner_password
+  handrail_db_password:
+    file: ./.secrets/handrail_db_password
+
+volumes:
+  db-data:
+  ca-data:

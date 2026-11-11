@@ -3,7 +3,7 @@ BINARY := handrail-ca
 # this with the tag; local builds report the git description, or "dev".
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build run test vet notices notices-check license-headers license-check clean
+.PHONY: build run test vet notices notices-check license-headers license-check dev-up dev-verify dev-down clean
 
 # `notices` runs FIRST: THIRD_PARTY_LICENSES.md is embedded into the binary
 # (legal.go), so regenerating it here means what ships always matches what
@@ -49,6 +49,19 @@ license-headers:
 # Cheap and deterministic (no network, no build), so this one DOES gate CI.
 license-check:
 	@./scripts/license-headers.sh --check
+
+# The development CA: step-ca on PostgreSQL in Docker Compose, seeded with
+# certificates (deploy/dev/README.md). dev-verify checks the step-ca behavior
+# the plan and the setup guide rely on against it; dev-down removes it and
+# its volumes.
+dev-up:
+	@./deploy/dev/up.sh
+
+dev-verify:
+	@./deploy/dev/verify.sh
+
+dev-down:
+	@docker compose -f deploy/dev/compose.yaml down -v
 
 clean:
 	rm -f $(BINARY)
