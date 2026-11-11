@@ -5,8 +5,9 @@ view, issue and revoke certificates from a browser.
 
 **Status: early development.** You can sign in and see the state of your CA
 (reachability, version, root and intermediate certificates, provisioners,
-whether a revocation list is published). Listing, issuing and revoking
-certificates are not built yet; the [build plan](docs/PLAN.md) has the
+whether a revocation list is published) and how many certificates it has
+issued, read from its database. The certificate list itself, issuing and
+revoking are not built yet; the [build plan](docs/PLAN.md) has the
 order.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
@@ -22,14 +23,16 @@ make build          # static binary ./handrail-ca, version-stamped
 ./handrail-ca version
 ```
 
-handrail-ca needs three things to start: a directory for its own store, the
-CA's address, and the fingerprint of the CA's root certificate
-([docs/ca-setup.md](docs/ca-setup.md) says where that comes from).
+handrail-ca needs four things to start: a directory for its own store, the
+CA's address, the fingerprint of the CA's root certificate, and a file with
+the connection string for the CA's PostgreSQL database
+([docs/ca-setup.md](docs/ca-setup.md) says where each comes from).
 
 ```sh
 export HANDRAIL_DATA=/var/lib/handrail-ca
 export HANDRAIL_CA_URL=https://ca.internal.example
 export HANDRAIL_CA_FINGERPRINT=<64 hex characters>   # step certificate fingerprint root_ca.crt, on the CA's host
+export HANDRAIL_DB_URL_FILE=/etc/handrail-ca/db_url  # a file, because it holds a password
 
 ./handrail-ca user add -role operator alice   # asks for a password
 ./handrail-ca                                 # serves http://127.0.0.1:8080
@@ -40,6 +43,7 @@ export HANDRAIL_CA_FINGERPRINT=<64 hex characters>   # step certificate fingerpr
 | `-data` | `HANDRAIL_DATA` | Directory for handrail-ca's own store (accounts, sessions, history). Created owner-only. |
 | `-ca-url` | `HANDRAIL_CA_URL` | The CA's address, `https://host[:port]`. |
 | `-ca-fingerprint` | `HANDRAIL_CA_FINGERPRINT` | SHA-256 fingerprint of the CA's root certificate. handrail-ca fetches the root from the CA, accepts it only if it has this fingerprint, and from then on verifies every connection to the CA against that root and nothing else. |
+| `-db-url-file` | `HANDRAIL_DB_URL_FILE` | File holding the connection string for the CA's PostgreSQL database: `postgres://user:password@host:port/database?sslmode=verify-full`, for an account that can only read the three certificate tables. Keep the file readable by handrail-ca's user alone. |
 | `-listen` | `HANDRAIL_LISTEN` | Listen address; `127.0.0.1:8080` unless set. |
 | `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. |
 | `-trusted-proxy` | `HANDRAIL_TRUSTED_PROXIES` | Addresses or CIDR ranges of the reverse proxies in front, comma-separated. Set it whenever there is one. |
@@ -118,7 +122,16 @@ those visitors share one allowance of sign-in attempts. If it cannot be
 fixed, leave `-trusted-proxy` unset: handrail-ca then does not count by
 address at all, and limits attempts per user name only.
 
-It starts whether or not the CA is up; the CA status page says which.
+The certificate list is read from the CA's database, which step-ca must
+be keeping in PostgreSQL. handrail-ca only ever reads it: three tables,
+in read-only sessions, with an account that should be able to do nothing
+else. A database on another machine has to be reached with
+`sslmode=verify-full`, TLS with the database server's certificate
+checked, since the password and the list both cross that connection; on
+the same machine any mode is accepted.
+
+It starts whether or not the CA and its database are up; the CA status
+page says which, and how old its picture of the certificates is.
 
 ### Accounts
 
@@ -176,6 +189,8 @@ docker volume create handrail-data
 docker run --rm -it -v handrail-data:/data handrail-ca user add -role operator alice
 docker run -d -p 127.0.0.1:8080:8080 \
   -v handrail-data:/data \
+  -v /etc/handrail-ca/db_url:/run/secrets/handrail_db_url:ro \
+  -e HANDRAIL_DB_URL_FILE=/run/secrets/handrail_db_url \
   -e HANDRAIL_CA_URL=https://ca.internal.example \
   -e HANDRAIL_CA_FINGERPRINT=<the root's SHA-256 fingerprint> \
   -e HANDRAIL_PUBLIC_URL=http://127.0.0.1:8080 \

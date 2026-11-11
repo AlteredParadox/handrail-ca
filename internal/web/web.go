@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"handrail-ca/internal/ca"
+	"handrail-ca/internal/inventory"
 	"handrail-ca/internal/password"
 	"handrail-ca/internal/store"
 )
@@ -76,6 +77,15 @@ type Store interface {
 	AppendHistory(ctx context.Context, e store.Event) error
 }
 
+// Inventory is what the pages need from the certificate inventory
+// (*inventory.Inventory).
+type Inventory interface {
+	Snapshot() *inventory.Snapshot
+}
+
+// InventoryRefresh is how often the inventory is read again.
+const InventoryRefresh = 30 * time.Second
+
 // Options carries what main hands the server.
 type Options struct {
 	// Version is the stamped build version (a tag, a git description or
@@ -87,6 +97,8 @@ type Options struct {
 
 	Store Store
 	CA    CA
+	// Inventory is the picture of what the CA has issued.
+	Inventory Inventory
 	// PublicURL is the address browsers use: scheme://host[:port][/path].
 	// Its host is the only Host header answered, its origin the only one
 	// forms are accepted from, its scheme decides whether cookies are
@@ -137,8 +149,8 @@ func New(opts Options) (http.Handler, error) {
 
 // build is New, also returning the state behind the handler for the tests.
 func build(opts Options) (*server, http.Handler, error) {
-	if opts.Store == nil || opts.CA == nil || opts.PublicURL == nil {
-		return nil, nil, errors.New("web: a store, a CA client and a public URL are required")
+	if opts.Store == nil || opts.CA == nil || opts.Inventory == nil || opts.PublicURL == nil {
+		return nil, nil, errors.New("web: a store, a CA client, an inventory and a public URL are required")
 	}
 	u := opts.PublicURL
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {

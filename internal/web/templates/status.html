@@ -35,6 +35,27 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{with .HealthProblem}}<p class="problem">The CA did not answer its health check: {{.}}</p>{{end}}
 </section>
 
+{{with .Inventory}}
+<section class="card">
+<div class="card-head">
+<h2>Certificate inventory</h2>
+{{if .Current}}<span class="badge ok">Up to date</span>
+{{else if .Read}}<span class="badge warn">Out of date</span>
+{{else}}<span class="badge unknown">Not read</span>{{end}}
+</div>
+<dl>
+<dt>Source</dt><dd>{{.Source}}</dd>
+<dt>Last read</dt><dd>{{if .Read}}{{.LastRead}}{{else}}<span class="muted">Never</span>{{end}}</dd>
+<dt>Certificates</dt><dd>{{if .Read}}{{.Total}} in all{{with .Breakdown}}: {{.}}{{end}}{{else}}<span class="muted">Not known</span>{{end}}</dd>
+</dl>
+{{if .Problem}}
+<p class="problem">{{if .Read}}The last attempt to read it again failed, so this is the picture as it was then: {{else}}It could not be read: {{end}}{{.Problem}}</p>
+{{end}}
+{{if .Orphans}}<p class="muted">{{.Orphans}} revocation{{if ne .Orphans 1}}s are{{else}} is{{end}} recorded for serial numbers that are not among the certificates. step-ca records a revocation for any serial it is asked to revoke.</p>{{end}}
+<p class="muted">Read again every {{.Every}}. It includes certificates issued elsewhere, such as ACME renewals. handrail-ca can read three tables of the CA's database and change none.</p>
+</section>
+{{end}}
+
 <section class="card">
 <div class="card-head">
 <h2>Root certificate</h2>

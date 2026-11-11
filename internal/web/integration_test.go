@@ -17,6 +17,7 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"regexp"
@@ -24,6 +25,7 @@ import (
 	"testing"
 
 	"handrail-ca/internal/ca"
+	"handrail-ca/internal/inventory"
 )
 
 // Runs against the development CA (deploy/dev), a real step-ca, and is
@@ -41,6 +43,23 @@ func TestIntegrationStatusPage(t *testing.T) {
 	s := newSite(t, "http://127.0.0.1:8080")
 	s.server.opts.CA = client
 
+	// The inventory too, read from the development CA's database with the
+	// read-only role.
+	conn, err := os.ReadFile(os.Getenv("HANDRAIL_DEV_DB_URL_FILE"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := inventory.OpenPostgres(string(conn))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	inv := inventory.New(db)
+	if err := inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.server.opts.Inventory = inv
+
 	b := s.browser()
 	wantRedirect(t, b.signIn("alice", alicePassword), "/")
 	page := b.get("/status")
@@ -53,7 +72,12 @@ func TestIntegrationStatusPage(t *testing.T) {
 		"Handrail Dev CA Intermediate CA",
 		"No revocation list",
 		"Admin JWK", "5 minutes", "handrail", "90 days", "acme",
+		"Certificate inventory", "Up to date", "PostgreSQL database &#34;stepca&#34; at 127.0.0.1:15432, as &#34;handrail&#34;, read-only",
+		"1 revoked",
 	)
+	if !regexp.MustCompile(`\d+ in all: `).MatchString(page.Body.String()) {
+		t.Error("no certificate count on the page")
+	}
 	body := page.Body.String()
 	if !regexp.MustCompile(`<dd>\d+\.\d+\.\d+`).MatchString(body) {
 		t.Error("no step-ca version on the page")

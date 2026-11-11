@@ -43,6 +43,7 @@ import (
 	"golang.org/x/crypto/argon2"
 
 	"handrail-ca/internal/ca"
+	"handrail-ca/internal/inventory"
 	"handrail-ca/internal/store"
 )
 
@@ -123,6 +124,90 @@ func testCert(t *testing.T, cn string, notAfter time.Time) *x509.Certificate {
 		t.Fatal(err)
 	}
 	return cert
+}
+
+// fakeRows stands in for the CA's database: an inventory.Source over rows
+// held in memory, which can be made to fail.
+type fakeRows struct {
+	mu          sync.Mutex
+	certs       []inventory.RawCertificate
+	revocations []inventory.RawRevocation
+	err         error
+}
+
+func (f *fakeRows) Describe() string { return "a test database" }
+
+func (f *fakeRows) fail(err error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.err = err
+}
+
+func (f *fakeRows) Serials(context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.err != nil {
+		return nil, f.err
+	}
+	var serials []string
+	for _, c := range f.certs {
+		serials = append(serials, c.Serial)
+	}
+	return serials, nil
+}
+
+func (f *fakeRows) Certificates(_ context.Context, serials []string) ([]inventory.RawCertificate, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	var rows []inventory.RawCertificate
+	for _, c := range f.certs {
+		for _, s := range serials {
+			if c.Serial == s {
+				rows = append(rows, c)
+			}
+		}
+	}
+	return rows, f.err
+}
+
+func (f *fakeRows) Revocations(context.Context) ([]inventory.RawRevocation, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.revocations, f.err
+}
+
+// leafRow is a certificate row as the CA would store it.
+func leafRow(t *testing.T, serial int64, name string, notBefore, notAfter time.Time) inventory.RawCertificate {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: name}, DNSNames: []string{name},
+		NotBefore: notBefore, NotAfter: notAfter,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return inventory.RawCertificate{Serial: fmt.Sprint(serial), DER: der, Data: []byte(`{"provisioner":{"id":"p1","name":"handrail","type":"JWK"}}`)}
+}
+
+// newFakeRows is a small database: one valid certificate, one expired, one
+// revoked, and one row that is not a certificate.
+func newFakeRows(t *testing.T) *fakeRows {
+	t.Helper()
+	day := 24 * time.Hour
+	return &fakeRows{
+		certs: []inventory.RawCertificate{
+			leafRow(t, 101, "web1.internal.example", t0.Add(-day), t0.Add(90*day)),
+			leafRow(t, 102, "old.internal.example", t0.Add(-10*day), t0.Add(-day)),
+			leafRow(t, 103, "gone.internal.example", t0.Add(-day), t0.Add(90*day)),
+			{Serial: "104", DER: []byte("not a certificate")},
+		},
+		revocations: []inventory.RawRevocation{{Serial: "103", JSON: []byte(`{"Serial":"103","ReasonCode":1,"RevokedAt":"2026-11-11T08:00:00Z"}`)}},
+	}
 }
 
 func newFakeCA(t *testing.T) *fakeCA {
@@ -208,6 +293,8 @@ type site struct {
 	handler http.Handler
 	store   *brokenStore
 	ca      *fakeCA
+	rows    *fakeRows
+	inv     *inventory.Inventory
 	clock   *clock
 	log     *bytes.Buffer
 	public  *url.URL
@@ -237,10 +324,16 @@ func newSite(t *testing.T, publicURL string, trustedProxies ...string) *site {
 	if err != nil {
 		t.Fatal(err)
 	}
-	s := &site{t: t, store: &brokenStore{Store: st}, ca: newFakeCA(t), clock: &clock{now: t0}, log: &bytes.Buffer{}, public: u}
+	s := &site{t: t, store: &brokenStore{Store: st}, ca: newFakeCA(t), rows: newFakeRows(t), clock: &clock{now: t0}, log: &bytes.Buffer{}, public: u}
+	// The inventory as it is after its first read, on the site's clock.
+	s.inv = inventory.New(s.rows)
+	s.inv.SetClock(s.clock.Now)
+	if err := s.inv.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
 	s.server, s.handler, err = build(Options{
 		Version: "v1.2.3", License: []byte("LICENSE TEXT"), ThirdPartyLicenses: []byte("NOTICES TEXT"),
-		Store: s.store, CA: s.ca, PublicURL: u, TrustedProxies: proxies, Now: s.clock.Now,
+		Store: s.store, CA: s.ca, Inventory: s.inv, PublicURL: u, TrustedProxies: proxies, Now: s.clock.Now,
 		Log: slog.New(slog.NewTextHandler(&syncWriter{buf: s.log}, nil)),
 	})
 	if err != nil {
@@ -386,6 +479,7 @@ func TestNewNeedsItsParts(t *testing.T) {
 	for name, change := range map[string]func(*Options){
 		"no store":      func(o *Options) { o.Store = nil },
 		"no CA":         func(o *Options) { o.CA = nil },
+		"no inventory":  func(o *Options) { o.Inventory = nil },
 		"no public URL": func(o *Options) { o.PublicURL = nil },
 		"ftp":           func(o *Options) { o.PublicURL = &url.URL{Scheme: "ftp", Host: "x"} },
 		"plain HTTP beyond this machine": func(o *Options) {
@@ -1113,6 +1207,11 @@ func TestStatusPage(t *testing.T) {
 		"Example Intermediate CA", "2029-11-11, in 3 years",
 		"No revocation list", "systems that already trust it are not told",
 		"handrail", "90 days", "acme", "CA default",
+		// The inventory, as of its last read.
+		"Certificate inventory", "Up to date", "a test database",
+		"0 seconds ago, at 12:00:00 UTC",
+		"4 in all: 1 valid, 1 expired, 1 revoked, 1 unreadable",
+		"Read again every 30 seconds",
 	)
 	for _, absent := range []string{"Not reachable", "Not known", "could not", "does not list"} {
 		if strings.Contains(page.Body.String(), absent) {
@@ -1176,6 +1275,71 @@ func TestStatusPageBeforeTheRootIsFetched(t *testing.T) {
 			t.Errorf("the page shows %q for a root that was never fetched", absent)
 		}
 	}
+}
+
+// The inventory card says how old its picture is and why, and never shows
+// a count it does not have.
+func TestStatusPageInventoryStates(t *testing.T) {
+	ctx := context.Background()
+
+	// Never read: the database was down from the start.
+	s := newSite(t, "http://127.0.0.1:8080")
+	down := &fakeRows{err: errors.New(`failed to connect to "<db>": connection refused`)}
+	never := inventory.New(down)
+	never.SetClock(s.clock.Now)
+	_ = never.Refresh(ctx)
+	s.server.opts.Inventory = never
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	page := b.get("/status")
+	wantBody(t, page, "Not read", "Never", "Not known",
+		"It could not be read: listing certificates: failed to connect to &#34;&lt;db&gt;&#34;: connection refused")
+	for _, absent := range []string{"Up to date", "0 in all", "ago, at"} {
+		if strings.Contains(page.Body.String(), absent) {
+			t.Errorf("an unread inventory's card says %q", absent)
+		}
+	}
+
+	// Read once, then the database goes away: the earlier picture, its
+	// age, and the reason.
+	s = newSite(t, "http://127.0.0.1:8080")
+	b = s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	s.clock.advance(5 * time.Minute)
+	s.rows.fail(errors.New("connection reset by peer"))
+	if err := s.inv.Refresh(ctx); err == nil {
+		t.Fatal("the refresh succeeded against a failing source")
+	}
+	page = b.get("/status")
+	wantBody(t, page, "Out of date", "5 minutes ago, at 12:00:00 UTC", "4 in all",
+		"The last attempt to read it again failed, so this is the picture as it was then: listing certificates: connection reset by peer")
+	if strings.Contains(page.Body.String(), "Up to date") {
+		t.Error("a stale inventory is called up to date")
+	}
+
+	// And back, with what changed meanwhile: a certificate that has
+	// expired by now, and revocations for serials never issued.
+	s.rows.fail(nil)
+	s.rows.mu.Lock()
+	s.rows.revocations = append(s.rows.revocations, inventory.RawRevocation{Serial: "9001", JSON: []byte(`{}`)})
+	s.rows.mu.Unlock()
+	if err := s.inv.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	page = b.get("/status")
+	wantBody(t, page, "Up to date", "1 revocation is recorded for serial numbers that are not among the certificates")
+	s.rows.mu.Lock()
+	s.rows.revocations = append(s.rows.revocations, inventory.RawRevocation{Serial: "9002", JSON: []byte(`{}`)})
+	s.rows.mu.Unlock()
+	if err := s.inv.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	wantBody(t, b.get("/status"), "2 revocations are recorded")
+	// The counts are as of now, not as of the read.
+	s.clock.advance(100 * 24 * time.Hour)
+	b = s.browser() // the session ended long ago
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	wantBody(t, b.get("/status"), "4 in all: 2 expired, 1 revoked, 1 unreadable")
 }
 
 func TestStatusPageVariants(t *testing.T) {

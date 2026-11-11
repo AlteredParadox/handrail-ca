@@ -19,11 +19,14 @@ package web
 import (
 	"context"
 	"crypto/x509"
+	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
 	"handrail-ca/internal/ca"
+	"handrail-ca/internal/inventory"
 )
 
 const (
@@ -175,6 +178,63 @@ func readCA(ctx context.Context, client CA, now time.Time) *caSnapshot {
 	return snap
 }
 
+// statusData is what the status page shows: the reading of the CA, which
+// is reused for a while, and the inventory's state, which is always as of
+// this moment.
+type statusData struct {
+	*caSnapshot
+	Inventory inventoryView
+}
+
+// inventoryView is the inventory's state in the words the page uses.
+type inventoryView struct {
+	Source string
+	// Read says whether there is a picture at all; Current, whether the
+	// last attempt to bring it up to date worked.
+	Read, Current bool
+	LastRead      string // how long ago, and when
+	Every         string
+	Total         int
+	Breakdown     string
+	Problem       string
+	// Orphans counts revocations recorded for serials that were never
+	// among the certificates.
+	Orphans int
+}
+
+func newInventoryView(snap *inventory.Snapshot, now time.Time) inventoryView {
+	st := snap.State
+	v := inventoryView{
+		Source:  st.Source,
+		Read:    !st.LoadedAt.IsZero(),
+		Current: !st.LoadedAt.IsZero() && st.Problem == "",
+		Every:   span(InventoryRefresh),
+		Total:   len(snap.Certificates),
+		Problem: st.Problem,
+		Orphans: st.OrphanRevocations,
+	}
+	if v.Read {
+		v.LastRead = span(now.Sub(st.LoadedAt)) + " ago, at " + st.LoadedAt.UTC().Format("15:04:05 UTC")
+	}
+	// Every status that occurs, most numerous concern last: what works
+	// first, then what does not.
+	counts := snap.Counts(now)
+	var parts []string
+	for _, status := range []inventory.Status{
+		inventory.StatusValid, inventory.StatusExpiring, inventory.StatusNotYetValid, inventory.StatusExpired,
+		inventory.StatusRevoked, inventory.StatusUnknown, inventory.StatusUnreadable,
+	} {
+		if n := counts[status]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%d %s", n, status))
+		}
+	}
+	v.Breakdown = strings.Join(parts, ", ")
+	return v
+}
+
 func (s *server) statusPage(w http.ResponseWriter, r *http.Request) {
-	s.render(w, r, http.StatusOK, "status.html", "CA status", s.status.get(r.Context(), s.opts.CA, s.opts.Now))
+	s.render(w, r, http.StatusOK, "status.html", "CA status", statusData{
+		caSnapshot: s.status.get(r.Context(), s.opts.CA, s.opts.Now),
+		Inventory:  newInventoryView(s.opts.Inventory.Snapshot(), s.opts.Now()),
+	})
 }

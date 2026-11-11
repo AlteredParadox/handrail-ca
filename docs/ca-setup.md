@@ -194,6 +194,6 @@ When handrail-ca is installed it will need:
 | The root certificate's SHA-256 fingerprint (`-ca-fingerprint`) | `step certificate fingerprint $(step path)/certs/root_ca.crt` on the CA's host. handrail-ca fetches the root from the CA and accepts it only if it has this fingerprint, so read it off the CA's own host, not off a network answer |
 | The provisioner's name | `handrail`, from section 1 |
 | The provisioner's password | The file from section 1 |
-| The database address, name, role and password | Section 3 |
+| The database address, name, role and password (`-db-url-file`) | Section 3, as one connection string in a file: `postgres://handrail:PASSWORD@HOST:5432/stepca?sslmode=verify-full`. Readable by handrail-ca's user only |
 
 Secrets are passed as file paths, never on the command line.
