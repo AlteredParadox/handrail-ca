@@ -66,11 +66,11 @@ default, a Content-Security-Policy with no inline script, and pages that work
 without JavaScript. A first-pass mockup of the six screens (list, detail,
 issue, revoke, CA status, sign-in) exists as a design canvas outside this
 repository and is the starting point for the UI milestones. The pages
-follow it, with one difference: the mockup loads IBM Plex from Google
-Fonts, which the Content-Security-Policy forbids like every other
-third-party load, so the pages use IBM Plex where the viewer has it
-installed and the system fonts otherwise. Embedding the font files (SIL
-OFL) is the alternative, undecided.
+follow it. The mockup loads IBM Plex from Google Fonts, which the
+Content-Security-Policy forbids like every other third-party load, so the
+fonts are embedded instead (owner's decision, 2026-11-11): the Latin
+subsets of the five weights in use, about 100 KB, unmodified from IBM's own
+packages, under the SIL Open Font License.
 
 **D5. handrail-ca has a small store of its own.** One SQLite file in a data
 directory, for the things that are handrail-ca's and not the CA's:

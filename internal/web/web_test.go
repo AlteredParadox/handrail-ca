@@ -32,6 +32,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"regexp"
 	"strings"
 	"sync"
@@ -403,6 +404,7 @@ func TestPublicRoutes(t *testing.T) {
 		{"/license", http.StatusOK, "LICENSE TEXT"},
 		{"/third-party-licenses", http.StatusOK, "NOTICES TEXT"},
 		{"/static/style.css", http.StatusOK, "--accent"},
+		{"/static/fonts/OFL.txt", http.StatusOK, "SIL Open Font License"},
 		{"/sign-in", http.StatusOK, "Sign in"},
 		{"/no-such-page", http.StatusNotFound, "There is no such page."},
 		{"/static/", http.StatusOK, "style.css"},
@@ -422,6 +424,39 @@ func TestPublicRoutes(t *testing.T) {
 	if rec.Code != http.StatusFound || rec.Header().Get("Location") != repoURL+"/tree/v1.2.3" {
 		t.Errorf("/source: %d to %q", rec.Code, rec.Header().Get("Location"))
 	}
+}
+
+// Every font the style sheet names is in the binary, and is served as a
+// font from this origin, which is all the Content-Security-Policy allows.
+func TestFontsAreEmbedded(t *testing.T) {
+	b := newSite(t, "http://127.0.0.1:8080").browser()
+	css := b.get("/static/style.css").Body.String()
+	files := regexp.MustCompile(`url\("(fonts/[^"]+)"\)`).FindAllStringSubmatch(css, -1)
+	if len(files) != 5 {
+		t.Fatalf("the style sheet names %d font files, want 5", len(files))
+	}
+	for _, m := range files {
+		rec := b.get("/static/" + m[1])
+		if rec.Code != http.StatusOK || rec.Header().Get("Content-Type") != "font/woff2" || !strings.HasPrefix(rec.Body.String(), "wOF2") {
+			t.Errorf("%s: %d %q", m[1], rec.Code, rec.Header().Get("Content-Type"))
+		}
+	}
+	if regexp.MustCompile(`(?i)@import|url\(\s*["']?(https?:)?//`).MatchString(css) {
+		t.Error("the style sheet loads something from another site")
+	}
+	// The fonts' license is among the third-party notices the binary serves.
+	if notices := string(legalNotices(t)); !strings.Contains(notices, "IBM Plex") || !strings.Contains(notices, "SIL OPEN FONT LICENSE") {
+		t.Error("THIRD_PARTY_LICENSES.md does not carry the fonts' license")
+	}
+}
+
+func legalNotices(t *testing.T) []byte {
+	t.Helper()
+	data, err := os.ReadFile("../../THIRD_PARTY_LICENSES.md")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return data
 }
 
 func TestSecurityHeaders(t *testing.T) {
