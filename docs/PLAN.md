@@ -341,7 +341,11 @@ As built in milestone 1:
   (2026-11-11): proxy on the host listed as 127.0.0.1 (the warning names
   172.17.0.1), listed as 172.17.0.1 (the visitor's own address is
   recorded, and an `X-Forwarded-For` the visitor sent is not believed),
-  and proxy in a container on a shared network. Without
+  and proxy in a container on a shared network. Only a proxy's own
+  address belongs in `-trusted-proxy`: listing a visitor's address, a NAT
+  or gateway they arrive through, or a whole network makes the walk skip
+  the real visitor and believe what the visitor wrote to its left (found
+  in review; the README had advised exactly that for two cases). Without
   `proxy_set_header Host $http_host;` nginx sends the backend's address
   as `Host` and every page is a 421; the log explains that once per name
   asked for, and the README carries the configuration that works. Not

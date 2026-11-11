@@ -83,6 +83,13 @@ reads the visitor's own address from that header, counts sign-in attempts
 for each visitor separately, and records it in the history. The header is
 believed only on connections from the listed addresses.
 
+List only reverse proxies you run yourself, each by the exact address it
+connects from. Whatever connects from a listed address is believed about
+who the visitor is, so never list a visitor's own address, a gateway or NAT
+that visitors arrive through, or a whole network: anyone arriving from
+there could then put any address they like in the header, in the history
+and past the limit per address.
+
 The address to list is the one handrail-ca sees, which is not always the
 one you would guess:
 
@@ -90,20 +97,26 @@ one you would guess:
 - handrail-ca in a container, proxy on the host (`docker run -p
   127.0.0.1:8080:8080`): the Docker bridge's gateway, `172.17.0.1` on a
   default installation. Not `127.0.0.1`.
-- Proxy in a container on the same Docker network: that network's subnet
-  (`docker network inspect`), since a container's own address can change
-  when it is recreated.
+- Proxy in a container on the same Docker network: that container's own
+  address. Give it a fixed one (`docker run --ip`, or `ipv4_address` in
+  Compose), since otherwise it can change when the container is recreated.
 
 If it is missing or wrong, handrail-ca still runs and nobody is locked out
 by it: under an `https` public URL an address that is not a listed proxy is
 never counted as one visitor. Sign-in attempts are then limited per user
 name only, the history shows the proxy's address for everyone, and the log
-says so, naming the address that requests are arriving from. To check,
-sign in once and look at `remote=` on the `audit` line in the log: it
-should be the address of the machine you signed in from. If it is an
-address of Docker's, the proxy itself is not being shown where visitors
-come from; add that address to `-trusted-proxy` as well, and handrail-ca
-will not count by address at all.
+says so, naming the address that requests are arriving from.
+
+To check, sign in once and look at `remote=` on the `audit` line in the
+log: it should be the address of the machine you signed in from. If it is
+an address of Docker's, or the same for everybody, the proxy itself is not
+being shown where visitors come from (Docker can translate their addresses
+before the proxy sees them). Do not add that address to `-trusted-proxy`:
+it is where visitors arrive from, not a proxy. Fix it where it happens, for
+instance by running the proxy on the host's own network. Until then all
+those visitors share one allowance of sign-in attempts. If it cannot be
+fixed, leave `-trusted-proxy` unset: handrail-ca then does not count by
+address at all, and limits attempts per user name only.
 
 It starts whether or not the CA is up; the CA status page says which.
 
