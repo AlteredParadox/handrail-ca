@@ -33,7 +33,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -117,10 +116,10 @@ type server struct {
 	status    *statusCache
 	strangers strangerBudget
 
-	// unlisted are the peers already warned about as not being listed
-	// proxies (see clientAddr).
-	unlistedMu sync.Mutex
-	unlisted   map[netip.Addr]bool
+	// Things already warned about once: peers that are not listed
+	// proxies (see clientAddr), and host names requests were refused for.
+	unlistedPeers onceEach
+	refusedHosts  onceEach
 
 	// historyBroken is set while the last history write failed; every page
 	// then says that history is not being recorded.
@@ -257,15 +256,36 @@ func securityHeaders(next http.Handler) http.Handler {
 // would run with that name's cookies and origin, not ours. The health probe
 // is exempt: the container's own check reaches it by loopback address, and
 // it says nothing but the version.
+//
+// The usual cause in practice is a reverse proxy that does not pass the
+// visitor's Host header on (nginx sends the backend's address unless told
+// otherwise), which refuses every page. The log says so once per name.
 func (s *server) onlyOurHost(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		probe := r.URL.Path == healthPath || r.URL.Path == s.base+healthPath
 		if !strings.EqualFold(r.Host, s.host) && !probe {
+			// The name is whatever the sender wrote: shortened, and quoted
+			// by the log handler.
+			if asked := clipHost(r.Host); s.refusedHosts.first(asked) {
+				s.log.Warn("refused a request addressed to a host name other than the public URL's. "+
+					"If this is your reverse proxy, make it pass the visitor's Host header through "+
+					"(nginx: proxy_set_header Host $http_host;)",
+					"asked_for", asked, "answering_only", s.host)
+			}
 			http.Error(w, "handrail-ca is not served under this host name", http.StatusMisdirectedRequest)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// clipHost bounds a Host header for the log.
+func clipHost(host string) string {
+	const limit = 100
+	if len(host) > limit {
+		return host[:limit] + "…"
+	}
+	return host
 }
 
 // underBase serves the site below the public URL's path. The health probe

@@ -338,8 +338,11 @@ As built in milestone 1:
   (2026-11-11): proxy on the host listed as 127.0.0.1 (the warning names
   172.17.0.1), listed as 172.17.0.1 (the visitor's own address is
   recorded, and an `X-Forwarded-For` the visitor sent is not believed),
-  and proxy in a container on a shared network. Not tried: visitors from
-  another machine, or any proxy other than nginx.
+  and proxy in a container on a shared network. Without
+  `proxy_set_header Host $http_host;` nginx sends the backend's address
+  as `Host` and every page is a 421; the log explains that once per name
+  asked for, and the README carries the configuration that works. Not
+  tried: visitors from another machine, or any proxy other than nginx.
 - A sign-in for a name that is not an account is recorded as "(unknown
   user)", never with what was typed: people type passwords into that field.
 - History rows are never deleted, so what someone who is not signed in can

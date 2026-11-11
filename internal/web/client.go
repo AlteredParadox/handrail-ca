@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/netip"
 	"strings"
+	"sync"
 )
 
 // maxForwardedHops bounds how much of an X-Forwarded-For header is read.
@@ -74,22 +75,38 @@ func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 	return peer.String(), false
 }
 
-// maxUnlistedPeers bounds how many distinct addresses unlistedPeer
-// remembers having warned about.
-const maxUnlistedPeers = 8
+// maxDistinctWarnings bounds how many different values a onceEach
+// remembers, and so how many warnings of one kind are ever logged.
+const maxDistinctWarnings = 8
+
+// onceEach answers yes the first time it is shown a value, for the first
+// maxDistinctWarnings values. It is how a misconfiguration that every
+// request repeats gets one line in the log instead of one per request,
+// and how values chosen by whoever sends the request cannot flood it.
+type onceEach struct {
+	mu   sync.Mutex
+	seen map[string]bool
+}
+
+func (o *onceEach) first(value string) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.seen[value] || len(o.seen) >= maxDistinctWarnings {
+		return false
+	}
+	if o.seen == nil {
+		o.seen = map[string]bool{}
+	}
+	o.seen[value] = true
+	return true
+}
 
 // unlistedPeer logs, once per address, that requests are arriving under an
 // https public URL from an address that is not a listed proxy.
 func (s *server) unlistedPeer(peer netip.Addr) {
-	s.unlistedMu.Lock()
-	defer s.unlistedMu.Unlock()
-	if s.unlisted[peer] || len(s.unlisted) >= maxUnlistedPeers {
+	if !s.unlistedPeers.first(peer.String()) {
 		return
 	}
-	if s.unlisted == nil {
-		s.unlisted = map[netip.Addr]bool{}
-	}
-	s.unlisted[peer] = true
 	s.log.Warn("requests are arriving from an address that is not in -trusted-proxy (HANDRAIL_TRUSTED_PROXIES). "+
 		"If it is your reverse proxy, add it: until then visitors cannot be told apart, sign-in attempts are limited "+
 		"per user name only, and the history records this address for everyone",
