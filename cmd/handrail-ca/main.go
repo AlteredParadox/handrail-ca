@@ -45,14 +45,14 @@ const defaultListen = "127.0.0.1:8080"
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	code := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 	stop()
 	os.Exit(code)
 }
 
 // run is main without the process: it returns the exit code, so the tests
 // can drive every path. It serves until ctx is cancelled.
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) > 0 {
 		switch args[0] {
 		case "version", "--version", "-version":
@@ -60,6 +60,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return 0
 		case "healthcheck":
 			return healthcheck(args[1:], stderr)
+		case "user":
+			return userCommand(ctx, args[1:], stdin, stdout, stderr)
 		}
 	}
 	fs := flag.NewFlagSet("handrail-ca", flag.ContinueOnError)
