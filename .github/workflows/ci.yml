@@ -113,9 +113,10 @@ jobs:
           [ "$health" = healthy ] || { echo "health: $health"; docker inspect -f '{{json .State.Health}}' smoke; docker logs smoke; exit 1; }
           docker stop smoke >/dev/null
 
-  # The development CA (step-ca on PostgreSQL, deploy/dev) comes up, and
+  # The development CA (step-ca on PostgreSQL, deploy/dev) comes up,
   # step-ca still behaves the way docs/PLAN.md section 3 and
-  # docs/ca-setup.md say it does. Its own job and NOT required: it pulls
+  # docs/ca-setup.md say it does, and handrail-ca's integration tests pass
+  # against it. Its own job and NOT required: it pulls
   # two images from Docker Hub and its failure modes are mostly not the
   # PR's fault. A red run on a PR that raises the step-ca version is the
   # exception: that is this job doing its work.
@@ -123,10 +124,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
       - name: make dev-up
         run: make dev-up
       - name: make dev-verify
         run: make dev-verify
+      # handrail-ca's own code against the real CA (the TestIntegration*
+      # functions, which `make test` skips).
+      - name: make dev-test
+        run: make dev-test
       - name: Logs
         if: failure()
         run: docker compose -f deploy/dev/compose.yaml logs --no-color --tail 200

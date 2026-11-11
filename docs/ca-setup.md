@@ -7,8 +7,10 @@ revoke certificates. handrail-ca itself is not built yet (see
 **How far this has been checked.** Sections 1 to 3 are run on every fresh
 development CA (`make dev-up`) and their effects are checked by
 `make dev-verify`, against step-ca `0.30.2` with the step CLI of the same
-version. Section 4 (revocation lists) was read from step-ca's source and has
-not been run.
+version. Section 4 (revocation lists) was run once by hand on that CA: with
+the block shown there the list is served, and a certificate revoked
+afterwards appears in it at once. It is not part of the automatic checks,
+and it was not tried with a signing key held in a hardware token.
 
 The examples use `internal.example` and `10.20.0.0/16`; substitute your own.
 
@@ -165,8 +167,9 @@ To publish one, add a top-level `crl` block to `ca.json` and restart the CA:
 }
 ```
 
-The list is then served at `/1.0/crl`. Before turning it on, weigh three
-things:
+The list is then served at `/1.0/crl` (DER; `?pem=true` for PEM), signed by
+the intermediate, and already holds every certificate revoked before it was
+switched on. Before turning it on, weigh three things:
 
 - It only helps for clients that check it. Most TLS clients do not check
   revocation lists for a private CA unless they are configured to, and
@@ -187,7 +190,7 @@ When handrail-ca is installed it will need:
 | What | Where it comes from |
 |---|---|
 | The CA's URL | A name listed in `dnsNames` in `ca.json`; tokens for any other name are refused |
-| The root certificate's SHA-256 fingerprint | `step certificate fingerprint $(step path)/certs/root_ca.crt` |
+| The root certificate's SHA-256 fingerprint | `step certificate fingerprint $(step path)/certs/root_ca.crt` on the CA's host. handrail-ca fetches the root from the CA and accepts it only if it has this fingerprint, so read it off the CA's own host, not off a network answer |
 | The provisioner's name | `handrail`, from section 1 |
 | The provisioner's password | The file from section 1 |
 | The database address, name, role and password | Section 3 |

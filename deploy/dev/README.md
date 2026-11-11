@@ -7,6 +7,7 @@ disk, keys in a volume.
 ```sh
 make dev-up       # start, seed, create the read-only database role
 make dev-verify   # check step-ca's behavior against what the docs say
+make dev-test     # run handrail-ca's integration tests against it
 make dev-down     # remove it and its volumes
 ```
 
@@ -42,6 +43,9 @@ issued over ACME.
 - `up.sh`: generates passwords, starts everything, runs the seed and the
   role script.
 - `verify.sh`: the checks behind `make dev-verify`.
+- `test.sh`: runs the Go tests named `TestIntegration...` with the CA's
+  address and root fingerprint in the environment. Those tests are skipped
+  everywhere else.
 
 ## Raising the step-ca version
 

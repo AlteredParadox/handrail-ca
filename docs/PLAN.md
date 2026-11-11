@@ -1,6 +1,7 @@
 # handrail-ca build plan
 
-Status: 2026-11-11. The scaffold is merged; nothing else below is built yet.
+Status: 2026-11-11. The scaffold, the development CA and the read side of
+the CA client are built; milestone 1 is in progress (section 6).
 Section 2 records the decisions made so far.
 
 ## 1. What we are building
@@ -87,7 +88,8 @@ The database layout, the read endpoints, renewal, revocation, the lifetime
 cap and the name policy have since been checked against a running CA of that
 version: `make dev-verify` runs those checks on the development CA
 (`deploy/dev`), and it is the thing to run before raising the step-ca
-version. **Still from source only:** the token claims and the exact request
+version. The read endpoints are also exercised by handrail-ca's own client
+in `make dev-test`. **Still from source only:** the token claims and the exact request
 bodies for sign and revoke, which the step CLI builds in those checks; they
 are exercised by handrail-ca's own integration tests in milestones 3 and 4.
 
@@ -150,7 +152,9 @@ Revoke (`api/revoke.go`, `authority/tls.go`):
 - Revoking writes `revoked_x509_certs`, which blocks renewal and rekey of
   that certificate. Relying parties learn of it only through the CRL, and
   only if `crl.enabled` is set in ca.json (`GET /1.0/crl`, 404 when off).
-  There is no OCSP responder.
+  When on, the answer is 200 with the DER list (`application/pkix-crl`),
+  signed by the intermediate; with `generateOnRevoke` a revocation is in it
+  at once (run by hand on the development CA). There is no OCSP responder.
 
 Other read endpoints: `/health`, `/version`, `/roots`, `/intermediates`,
 `/provisioners` (paginated; includes each JWK provisioner's claims),
@@ -178,9 +182,24 @@ browser ──HTTPS──▶ handrail-ca ──HTTPS (pinned root)──▶ step
 ```
 
 **CA client.** Hand-written `net/http` client and our own request and
-response structs. The CA's root is fetched once by its SHA-256 fingerprint,
-checked against that fingerprint, and from then on is the only trust anchor
-for the CA connection. `github.com/smallstep/certificates/ca` is not
+response structs. The operator configures the SHA-256 fingerprint of the
+CA's root certificate. The root is fetched from the CA once, accepted only
+if it has that fingerprint, and from then on is the only trust anchor for
+the CA connection. This is the exchange `step ca bootstrap` makes, and it
+means one request is made before the server can be verified in the usual
+way. Nothing from that request is trusted on the server's word: the
+certificate must match the fingerprint, the request carries nothing
+secret, and the certificate the server presented on that same connection
+must chain to the fetched root for the configured host name, so a server
+that only relays the CA's public root is refused. (For a while the
+operator supplied the root as a file instead, which needs no such request;
+the owner chose the fingerprint on 2026-11-11, a string being easier to
+handle than a file.) That one request has a file to itself
+(`internal/ca/rootfetch.go`), the exceptions made for it are scoped to
+that file, and a test fails if certificate verification is switched off
+anywhere else in the repository. The root is pinned on first use, so handrail-ca
+starts, and reports it, while the CA is down. Redirects are not followed
+and every answer is size-bounded. `github.com/smallstep/certificates/ca` is not
 imported: it links 491 non-standard-library packages, including two Badger
 versions, gRPC and Google API clients.
 
@@ -303,12 +322,15 @@ server that answers `/healthz`.
   [ca-setup.md](ca-setup.md) describes and seeded with valid, expiring,
   expired, renewed, revoked and ACME-issued certificates; and
   `make dev-verify`, which checks section 3 against it. Both run in CI.
-- Configuration loading; the CA client's read side (root pinning, health,
-  version, roots, intermediates, provisioners, CRL presence).
+- Done: the CA client's read side (`internal/ca`: the pinned root, health,
+  version, roots, intermediates, provisioners, CRL presence), with
+  integration tests against the development CA (`make dev-test`, in the
+  same CI job as `make dev-verify`).
+- Configuration loading.
 - The store: schema, migrations, and the `user` subcommands.
 - Accounts, sessions, CSRF, roles, the page shell, and a CA status page.
-- handrail-ca's own integration tests against the Compose environment, in
-  the same CI job as `make dev-verify` (advisory at first).
+- Integration tests for each of these against the Compose environment as
+  they arrive (the CI job is advisory at first).
 
 **M2. View.**
 - The PostgreSQL inventory source and in-memory index, with fixtures captured
