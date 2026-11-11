@@ -35,6 +35,10 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{end}}
 </div>
 
+{{if .Stale}}
+<output class="stale">This page is as the CA's database was {{.LastRead}}: the last attempt to read it again failed. If this certificate has been revoked since then, that is not shown here. {{.Stale}}</output>
+{{end}}
+
 {{if .Problem}}
 <section class="card">
 <h2>This row is not a certificate</h2>
@@ -106,8 +110,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <div class="card-head">
 <h2>Revocation</h2>
 {{if .Revocation}}<span class="badge bad">Revoked</span>
-{{else if .RevocationsKnown}}<span class="badge ok">Not revoked</span>
-{{else}}<span class="badge unknown">Not known</span>{{end}}
+{{else if not .RevocationsKnown}}<span class="badge unknown">Not known</span>
+{{else if .Stale}}<span class="badge warn">Not revoked {{.LastRead}}</span>
+{{else}}<span class="badge ok">Not revoked</span>{{end}}
 </div>
 {{with .Revocation}}
 {{if .Problem}}
@@ -122,8 +127,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{end}}
 <p class="muted">The CA will not renew a revoked certificate. Whether systems that trust it learn of the revocation depends on the CA publishing a revocation list; the <a href="{{$base}}/status">CA status</a> page says whether it does.</p>
 {{else}}
-{{if .RevocationsKnown}}<p class="muted">The CA has no revocation record for this certificate{{with .LastRead}}, as of {{.}}{{end}}.</p>
-{{else}}<p class="problem">The CA's revocation records have not been read. This certificate may have been revoked.</p>{{end}}
+{{if not .RevocationsKnown}}<p class="problem">The CA's revocation records have not been read. This certificate may have been revoked.</p>
+{{else if .Stale}}<p class="problem">The CA had no revocation record for this certificate {{.LastRead}}. Its records could not be read again since, so a revocation after that would not show here.</p>
+{{else}}<p class="muted">The CA has no revocation record for this certificate{{with .LastRead}}, as of {{.}}{{end}}.</p>{{end}}
 {{end}}
 </section>
 
