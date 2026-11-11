@@ -50,10 +50,13 @@ tables with a read-only account and changes nothing in the CA's database.
 server-side sessions and two roles, viewer and operator. With the store (D5)
 the accounts live there and are managed from the command line on the host
 (`handrail-ca user add`, `passwd`, `remove`, `list`); there is no account
-management in the web UI in the first release. `add` and `passwd` generate
-a password and print it once, or take one from a file; nothing prompts, so
-no terminal library is needed. Changing a password ends that account's
-sessions. OIDC is a later milestone.
+management in the web UI in the first release. `add` and `passwd` set a
+password one of three ways: typed at the terminal, unseen and twice
+(owner's request, 2026-11-11); generated and printed once (`-generate`, an
+empty entry at the prompt, or no terminal); or read from a file. Changing a
+password ends that account's sessions. There is no way to read a password
+back and none for a user to change their own from the browser; the second
+is a candidate for later. OIDC is a later milestone.
 
 **D3. Key generation: offered, as the second path.** Pasting a CSR is the
 default and keeps the private key with the requester. "Generate a key for
@@ -341,6 +344,7 @@ In use:
 | Module | For | License |
 |---|---|---|
 | `golang.org/x/crypto` | argon2id | BSD-3-Clause |
+| `golang.org/x/term` | asking for a password at the terminal without showing it | BSD-3-Clause |
 | `modernc.org/sqlite` | the store; pure Go, so the binary stays static | BSD-3-Clause |
 
 `modernc.org/sqlite` is SQLite's C source translated to Go. With it, seven

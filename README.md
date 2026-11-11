@@ -31,7 +31,7 @@ export HANDRAIL_DATA=/var/lib/handrail-ca
 export HANDRAIL_CA_URL=https://ca.internal.example
 export HANDRAIL_CA_ROOT=/etc/handrail-ca/root_ca.crt
 
-./handrail-ca user add -role operator alice   # prints a generated password once
+./handrail-ca user add -role operator alice   # asks for a password
 ./handrail-ca                                 # serves http://127.0.0.1:8080
 ```
 
@@ -70,12 +70,21 @@ Accounts are kept in the store and managed from the command line on the
 host. There is no account management in the browser.
 
 ```sh
-./handrail-ca user add -role operator alice  # prints a generated password once
-./handrail-ca user add -password-file pw.txt bob   # viewer, password from a file
-./handrail-ca user passwd alice              # new password; signs alice out
+./handrail-ca user add -role operator alice  # asks for a password, typed unseen
+./handrail-ca user add -generate bob         # viewer; generates one, prints it once
+./handrail-ca user add -password-file pw.txt carol   # password from a file
+./handrail-ca user passwd alice              # set a new password; signs alice out
 ./handrail-ca user remove bob
 ./handrail-ca user list
 ```
+
+`add` and `passwd` take the password the same three ways. At a terminal
+they ask for it, twice; leave it empty and one is generated and printed
+once. `-generate` skips the question, and is what happens when there is no
+terminal to ask on (a script, or `docker run` without `-it`).
+`-password-file` reads it from a file, or from standard input with `-`. A
+password is 12 to 1,024 characters. Nobody can read an existing password
+back: resetting one means setting a new one with `passwd`.
 
 A viewer reads; an operator will also issue and revoke. Flags come before
 the user name. Sessions end after an hour unused or twelve hours in all.
@@ -87,7 +96,7 @@ sign-in attempts in five minutes; a successful sign-in does not count.
 ```sh
 docker build --build-arg VERSION=$(git describe --tags --always) -t handrail-ca .
 docker volume create handrail-data
-docker run --rm -v handrail-data:/data handrail-ca user add -role operator alice
+docker run --rm -it -v handrail-data:/data handrail-ca user add -role operator alice
 docker run -d -p 127.0.0.1:8080:8080 \
   -v handrail-data:/data \
   -v /etc/handrail-ca/root_ca.crt:/etc/handrail/root_ca.crt:ro \
