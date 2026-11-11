@@ -324,10 +324,22 @@ As built in milestone 1:
   visitor is the rightmost address in `X-Forwarded-For` that is not itself
   a listed proxy, so nothing a visitor writes into the header is believed.
   From any other peer the header is ignored. Where the visitor's address
-  cannot be known (an `https` public URL with no proxy listed, or a listed
-  proxy that sends no usable header), there is no per-address limit at
-  all: one shared limit would let anyone who can reach the sign-in page
-  block everyone's sign-in. handrail-ca warns at start in the first case.
+  cannot be known, there is no per-address limit at all: one shared limit
+  would let anyone who can reach the sign-in page block everyone's
+  sign-in. That is the case for a listed proxy that sends no usable
+  header, and, under an `https` public URL, for every peer that is not a
+  listed proxy: handrail-ca does not speak TLS, so nothing but a proxy
+  connects there, and a proxy listed under the wrong address is easy to
+  have (in a container, the proxy on the same machine arrives from the
+  Docker bridge's gateway, not from 127.0.0.1). The log warns at start
+  when no proxy is listed, and once per address when requests arrive from
+  one that is not listed, naming it.
+- Tried behind nginx with TLS, with handrail-ca in a container
+  (2026-11-11): proxy on the host listed as 127.0.0.1 (the warning names
+  172.17.0.1), listed as 172.17.0.1 (the visitor's own address is
+  recorded, and an `X-Forwarded-For` the visitor sent is not believed),
+  and proxy in a container on a shared network. Not tried: visitors from
+  another machine, or any proxy other than nginx.
 - A sign-in for a name that is not an account is recorded as "(unknown
   user)", never with what was typed: people type passwords into that field.
 - History rows are never deleted, so what someone who is not signed in can
