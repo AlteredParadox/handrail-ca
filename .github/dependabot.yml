@@ -10,10 +10,10 @@ updates:
   # applies-to covers version updates ONLY, so security updates would arrive
   # one PR per advisory. Both kinds are grouped here.
   #
-  # The version-update groups deliberately cover minor and patch ONLY.
-  # Majors fall outside every group and so arrive as one PR each — a grouped
-  # PR labelled "N updates" hides breaking jumps, and one major per PR keeps
-  # them individually reviewable and individually revertable.
+  # The version-update groups, in every ecosystem below, deliberately cover
+  # minor and patch ONLY. Majors fall outside every group and so arrive as
+  # one PR each — a grouped PR labelled "N updates" hides breaking jumps, and
+  # one major per PR keeps them individually reviewable and revertable.
   - package-ecosystem: gomod
     directory: /
     schedule:
@@ -41,6 +41,7 @@ updates:
     groups:
       github-actions:
         applies-to: version-updates
+        update-types: ['minor', 'patch']
         patterns: ['*']
       github-actions-security:
         applies-to: security-updates
@@ -55,6 +56,7 @@ updates:
     groups:
       docker:
         applies-to: version-updates
+        update-types: ['minor', 'patch']
         patterns: ['*']
       docker-security:
         applies-to: security-updates
