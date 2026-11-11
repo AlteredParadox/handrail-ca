@@ -7,7 +7,7 @@ that one.
 
 ## 1. What we are building
 
-A single static Go binary that gives an operator a browser view of a
+A static Go binary that gives an operator a browser view of a
 [step-ca](https://github.com/smallstep/certificates) instance:
 
 - **View** every X.509 certificate the CA has issued: status (valid, expiring,
@@ -18,9 +18,10 @@ A single static Go binary that gives an operator a browser view of a
 - **Revoke** a certificate, with a reason, and say truthfully what that
   revocation does and does not achieve.
 
-"Lightweight" is a requirement, not a mood: one binary, an embedded front end
-with no build step, no database of its own in the first release, no changes
-to the CA it sits beside, and a short dependency list (section 5).
+"Lightweight" is a requirement, not a mood: one binary for the web UI with
+an embedded front end and no build step, one small exporter beside the CA
+(D1), no database of its own in the first release, no changes to the CA, and
+a short dependency list (section 5).
 
 Not in scope for the first release: SSH certificates, managing provisioners
 or CA configuration, more than one CA per instance, renewing certificates on
@@ -37,25 +38,40 @@ step-ca's database. The target CA uses Badger v2, step-ca's default: an
 embedded store that only the CA process can open while it runs. That leaves
 two ways to get a complete list.
 
-- *Recommended: read a copy.* handrail-ca copies the CA's database directory
-  to a private temporary directory every few minutes, and again right after
-  it issues or revokes something, opens the copy, reads three buckets and
-  deletes it. Nothing about the CA changes. The cost is that a certificate
-  issued elsewhere (an ACME renewal, the `step` CLI) appears only after the
-  next copy, and that handrail-ca has to run where it can read the
-  directory, in practice on the CA's host. Whether such a copy is reliable
-  was tested rather than assumed; see "Copying a live Badger directory" in
-  section 3.
-- *Alternative: move the CA to PostgreSQL.* Then the list is live and exact,
-  and handrail-ca can run anywhere with a read-only database account. The
-  cost is a database server the CA depends on from then on, and a one-time
-  migration of a working CA, including the provisioners and admins that
-  remote management keeps in the same database.
-- The SQL reader stays in the design as a second source behind the same
+- *Recommended: a small exporter beside the CA, and the web UI apart from
+  it.* Reading the database means reading files only the CA's host has, and
+  a browser-facing program should not be the thing that does it. So the work
+  is split in two:
+  - `handrail-export` runs on the CA's host under the CA's account, from a
+    timer. It copies the database directory to a private temporary
+    directory, opens the copy, reads three buckets, and writes one snapshot
+    file holding only certificates, their provisioner records and
+    revocations. It listens on nothing and never writes to the CA's
+    directory.
+  - `handrail-ca`, the web UI, reads that snapshot and nothing else of the
+    CA's. It can run on the same host under its own account, or on another
+    machine, in which case the exporter sends the snapshot to it over HTTPS.
+  - Nothing about the CA changes. A certificate issued elsewhere (an ACME
+    renewal, the `step` CLI) appears after the next export; what handrail-ca
+    issues or revokes itself is shown at once and confirmed by the next
+    export.
+  - Whether a copy of a live Badger directory is reliable was tested rather
+    than assumed; see "Copying a live Badger directory" in section 3.
+- *Simpler, not recommended: one program on the CA's host.* handrail-ca
+  copies and reads the directory itself. One thing to deploy, but it puts a
+  web application on the CA's host with read access to the whole database:
+  ACME accounts, used tokens and, with remote management, provisioners and
+  admins.
+- *Alternative: move the CA to PostgreSQL.* The list is then live and exact,
+  and handrail-ca reads it with a database account limited to three tables.
+  The cost is a database server the CA depends on from then on, and a
+  one-time migration of a working CA, including the provisioners and admins
+  that remote management keeps in the same database.
+- The SQL reader stays in the design as another source behind the same
   interface, for CAs that already run on PostgreSQL or MySQL. It is not in
   the first release.
-- **Needed from the owner:** confirmation of the copy approach, and that
-  handrail-ca will run on the CA's host.
+- **Needed from the owner:** confirmation of the exporter approach, and
+  whether the web UI should run on the CA's host or on another machine.
 
 ### Made (owner, 2026-11-11)
 
@@ -150,10 +166,15 @@ Issue (`api/sign.go`, `authority/provisioner/jwk.go`):
 - `POST /1.0/sign` with `{"csr","ott","notBefore","notAfter"}` returns 201
   and `{"crt","ca","certChain"}`.
 - The one-time token for a JWK provisioner: header `kid`; `iss` = provisioner
-  name; `aud` = `https://<a dnsName from ca.json>/1.0/sign`; `sub` must match
-  the CSR common name; `sans` must equal the CSR's SANs exactly; `jti` is
-  single-use; `nbf`/`exp` checked with one minute of leeway; `iat` must not
-  predate the CA's start.
+  name; `aud` = `https://<a dnsName from ca.json>/1.0/sign`; `sans` must
+  equal the CSR's SANs exactly; `jti` is single-use; `nbf`/`exp` checked with
+  one minute of leeway; `iat` must not predate the CA's start.
+- `sub` must be non-empty. If the CSR has a common name, `sub` (or one of
+  `sans`) must equal it; a CSR with no common name passes that check with
+  any subject. With the default certificate template the CA builds the
+  certificate's subject from `sub`, not from the CSR, so the token decides
+  the common name the certificate ends up with (read from
+  `CreateTemplateData` in `jwk.go`; to be confirmed on a running CA).
 - Validity must fall inside the provisioner's `minTLSCertDuration` and
   `maxTLSCertDuration` (global defaults 5 minutes and 24 hours), else 403.
 - The provisioner's private key is published encrypted
@@ -180,9 +201,12 @@ Other read endpoints: `/health`, `/version`, `/roots`, `/intermediates`,
 ## 4. Design
 
 ```
-browser ──HTTPS──▶ handrail-ca ──HTTPS (pinned root)──▶ step-ca API        issue, revoke, status
+browser ──HTTPS──▶ handrail-ca ──HTTPS (pinned root)──▶ step-ca API    issue, revoke, status
+                        ▲
+                        │ snapshot: certificates, provisioner records, revocations
                         │
-                        └──reads a copy of─────────────▶ step-ca database   certificate list
+                 handrail-export ──reads a copy of──▶ step-ca database
+                 (CA host, timer)
 ```
 
 **CA client.** Hand-written `net/http` client and our own request and
@@ -193,28 +217,32 @@ imported: it links 491 non-standard-library packages, including two Badger
 versions, gRPC and Google API clients.
 
 **Inventory.** An `inventory.Source` interface. The first implementation
-reads Badger by copy (D1):
+reads snapshots made by the exporter (D1).
 
-1. Copy the CA's database directory to a private temporary directory.
-2. Open the copy with Badger v2, read `x509_certs`, `x509_certs_data` and
-   `revoked_x509_certs`, close it and delete the copy.
-3. Parse certificates not seen before and keep a compact summary per serial
-   in memory. Certificates are immutable, so nothing is parsed twice. The DER
-   is kept for the detail page while the inventory is small; milestone 2
-   measures when that stops being reasonable.
+`handrail-export`, on the CA's host:
 
-A copy is taken on start, on a timer (five minutes by default), on request,
-and right after handrail-ca issues or revokes. If a copy fails to complete or
-to open, the previous inventory stays, the pages say how old it is, and the
-copy is retried. A row that does not parse is shown as unreadable, not
-skipped. handrail-ca never opens the CA's own directory and never writes to
-it.
+1. Copies the CA's database directory to a private temporary directory.
+2. Opens the copy with Badger v2, reads `x509_certs`, `x509_certs_data` and
+   `revoked_x509_certs`, closes it and deletes the copy.
+3. Writes the snapshot: each certificate's DER, its provisioner record, its
+   revocation record if any, and the time of the copy. The file is written
+   beside its destination and renamed into place, so a reader never sees
+   half of one. With a push target configured it also sends the snapshot
+   there over HTTPS, authenticated with a token.
 
-Reading by copy needs read access to the whole directory, which also holds
-ACME accounts, used tokens and, with remote management, provisioners and
-admins. handrail-ca reads three buckets and ignores the rest, but the
-operating system cannot enforce that; the deployment notes will say so. The
-SQL source, when it is added, can be held to `SELECT` on three tables.
+If the copy fails to complete or to open, it tries again and otherwise exits
+non-zero for the timer to report; the last good snapshot stays in place. It
+is a separate binary so that Badger is linked into the program that needs it
+and not into the one that faces browsers.
+
+`handrail-ca` loads the newest snapshot on start and whenever one arrives. It
+parses certificates it has not seen before and keeps a compact summary per
+serial in memory; certificates are immutable, so nothing is parsed twice. A
+record that does not parse is shown as unreadable, not skipped. Every page
+that shows the inventory says how old the snapshot is, and an inventory
+older than a configurable limit is flagged as stale. What handrail-ca itself
+issues or revokes is added to the view at once, from the CA's own answer,
+and marked as awaiting the next export.
 
 Status is derived, most severe first: revoked, expired, not yet valid,
 expiring soon (configurable window), valid. If the revocation table could not
@@ -229,13 +257,18 @@ one-minute lifetime, and are never logged.
 
 - *Issue:* the CSR is parsed and shown back (subject, SANs, key type) for
   confirmation before anything is signed; the token is built from exactly
-  what was shown. Requested validity is bounded by the provisioner's claims
+  what was shown. The token subject is the CSR's common name, or for a CSR
+  without one its first SAN (DNS names first, then IP addresses, email
+  addresses, URIs); a CSR with neither is refused. Because the CA takes the
+  certificate's common name from the token, the confirmation step shows the
+  common name the certificate will carry, including when it was filled in
+  from a SAN. Requested validity is bounded by the provisioner's claims
   before the request is sent.
 - *Revoke:* offered only on certificates in the inventory, behind a
   confirmation that names the certificate, with a reason code. The page says
   what passive revocation means and whether the CA publishes a CRL. After a
-  timeout or an ambiguous answer, a fresh copy of the database is read
-  before anything is retried.
+  timeout or an ambiguous answer, nothing is retried until the next
+  snapshot shows whether the revocation took effect.
 
 **Access to handrail-ca.** Per D2: local accounts, argon2id, login rate
 limiting, server-side sessions (random 256-bit cookie, `HttpOnly`,
@@ -261,13 +294,14 @@ The scaffold has none. Planned, each to be confirmed when it is added:
 | Module | For | License |
 |---|---|---|
 | `github.com/go-jose/go-jose/v4` | open the provisioner key (PBES2 JWE), sign tokens | Apache-2.0 |
-| `github.com/dgraph-io/badger/v2` (v2.2007.4) | read copies of the CA's database | Apache-2.0 |
+| `github.com/dgraph-io/badger/v2` (v2.2007.4) | `handrail-export` only: read copies of the CA's database | Apache-2.0 |
 | `golang.org/x/crypto` | argon2id | BSD-3-Clause |
 
 Certificate and CSR handling is `crypto/x509` from the standard library.
 
-Badger is the heaviest of these and its v2 line is no longer developed; it is
-pinned to the version step-ca itself links, and what it adds to the binary
+Badger is the heaviest of these and its v2 line is no longer developed. It is
+pinned to the version step-ca itself links and is linked only into
+`handrail-export`, which has no network listener; what it adds to that binary
 and to the `vuln` job is measured when it lands (milestone 2). The SQL
 drivers (`pgx`, `go-sql-driver/mysql`) arrive only with the SQL source.
 
@@ -293,14 +327,16 @@ server that answers `/healthz`.
   job (advisory at first).
 
 **M2. View.**
-- The Badger copy source and in-memory index, with fixtures captured from
-  the M1 environment.
+- `handrail-export` and the snapshot format; the snapshot source and
+  in-memory index in handrail-ca, with fixtures captured from the M1
+  environment. Snapshot by file first; by HTTPS push in the same milestone
+  if the UI is to run on another machine (D1).
 - List page: filter by status and provisioner, search subject and SANs, sort,
   paginate; default view hides expired certificates.
 - Detail page: parsed fields, extensions, fingerprints, chain, PEM and DER
   download, issuing provisioner, revocation record.
-- Measure copy and scan time and memory with 100,000 synthetic rows, and
-  what Badger adds to the binary, and record the results here.
+- Measure export and load time and memory with 100,000 synthetic rows, and
+  the size of the exporter binary, and record the results here.
 - ESLint `jscheck` joins `make` and CI with the first JavaScript file.
 
 **M3. Revoke.**
@@ -308,14 +344,18 @@ server that answers `/healthz`.
 - The revoke flow, the audit log, outcome verification, read-only mode.
 
 **M4. Issue.**
-- CSR path: parse, confirm, sign, download certificate and chain.
+- CSR path: parse, confirm, sign, download certificate and chain. The
+  real-CA tests cover a CSR with a common name, a SAN-only CSR, and a CSR
+  whose common name is not among its SANs, and check the subject of what
+  comes back.
 - Generated-key path (per D3).
 - Validity limits from the provisioner's claims.
 
 **M5. First release, v0.1.0.**
-- Deployment documentation: creating the provisioner, running beside the CA
-  with read access to its database directory, reverse proxy and container
+- Deployment documentation: creating the provisioner, installing the
+  exporter and its timer on the CA's host, reverse proxy and container
   examples, what revocation means.
+- The release carries both binaries; the container image carries the web UI.
 - A security review of the whole tree before the tag; `scan` added to the
   required checks if it is not already.
 - Screenshots, release notes, the GHCR image.
@@ -332,15 +372,15 @@ a store of its own for notes and history; several CAs.
   itself. If milestone 1 finds copies unreliable, the fallback is the
   PostgreSQL alternative, and that is known before the view is built.
 - **Reading another program's files.** The bucket layout is not a published
-  interface. Mitigations: handrail-ca only ever reads a copy, parsing is
+  interface. Mitigations: the exporter only ever reads a copy, parsing is
   strict and fails visibly, the integration suite is pinned to a step-ca
   version, and it runs against each new step-ca release before the pin is
   raised.
-- **Running on the CA's host.** handrail-ca becomes one more program on the
-  most sensitive machine. Mitigations: its own unprivileged account, read
-  access to the database directory and nothing else of the CA's, no access
-  to the CA's keys or configuration, and the hardened container the `image`
-  job already tests.
+- **A program on the CA's host.** The exporter runs on the most sensitive
+  machine, under an account that can read the whole database. Mitigations:
+  it is small, has no listener, takes no input from the network, reads a
+  copy and writes one file. The web UI, which does face the network, sees
+  only what the exporter chose to write.
 - **Table growth.** Short-lived certificates and no pruning mean the tables
   only grow. M2 measures this instead of assuming it is fine.
 - **Revocation is weaker than the word suggests.** Without a CRL a revoked
