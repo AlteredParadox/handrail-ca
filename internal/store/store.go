@@ -31,7 +31,7 @@ import (
 	"path/filepath"
 	"time"
 
-	_ "modernc.org/sqlite" // the "sqlite" database/sql driver, pure Go
+	"modernc.org/sqlite" // registers the "sqlite" database/sql driver, pure Go
 )
 
 // FileName is the store's file inside the data directory.
@@ -118,21 +118,67 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 	// The path is percent-encoded: SQLite reads this as a URI, where "?",
 	// "#" and "%" in a directory name would otherwise end or alter it.
 	dsn := "file:" + (&url.URL{Path: filepath.ToSlash(path)}).EscapedPath() +
-		"?_pragma=busy_timeout(5000)&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_txlock=immediate"
+		fmt.Sprintf("?_pragma=busy_timeout(%d)", busyTimeout.Milliseconds()) +
+		"&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_txlock=immediate"
+	// Two processes opening a new store at the same moment (the server
+	// starting while a `user` command runs, or two commands) collide on
+	// the file's first-time set-up: switching it to WAL needs the file to
+	// itself, and SQLite answers "busy" at once there instead of waiting
+	// out busy_timeout. That is transient, so the whole open is tried
+	// again, from a fresh connection, until it works or openRetryFor has
+	// passed. Anything else is final.
+	start := time.Now()
+	for wait := 5 * time.Millisecond; ; wait = min(2*wait, 250*time.Millisecond) {
+		s, err := openOnce(ctx, dsn)
+		if err == nil {
+			return s, nil
+		}
+		if !isBusy(err) || time.Since(start) >= openRetryFor {
+			return nil, fmt.Errorf("store %s: %w", path, err)
+		}
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("store %s: %w", path, ctx.Err())
+		case <-time.After(wait):
+		}
+	}
+}
+
+// busyTimeout is how long a statement waits for another connection's lock
+// before SQLite reports "busy". openRetryFor is how long Open keeps
+// retrying a store that is busy being set up by another process; Open can
+// outlast it, and the caller's deadline, by one busyTimeout, which SQLite
+// sits out without looking at the context. Variables so that the tests
+// need not wait.
+var (
+	busyTimeout  = 5 * time.Second
+	openRetryFor = 15 * time.Second
+)
+
+// openOnce connects and brings the schema up to date, once.
+func openOnce(ctx context.Context, dsn string) (*Store, error) {
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("store: %w", err)
+		return nil, err
 	}
 	// One connection: writes are rare and short, and a single writer never
 	// waits on itself. The `user` subcommands open the same file from
-	// another process; busy_timeout covers that.
+	// another process; busy_timeout covers that once the file is set up.
 	db.SetMaxOpenConns(1)
 	s := &Store{db: db}
 	if err := s.migrate(ctx); err != nil {
 		_ = db.Close()
-		return nil, fmt.Errorf("store %s: %w", path, err)
+		return nil, err
 	}
 	return s, nil
+}
+
+// isBusy reports whether err is SQLite saying another connection holds the
+// lock it needs (SQLITE_BUSY and its extended codes).
+func isBusy(err error) bool {
+	const sqliteBusy = 5 // the primary result code, in the low byte
+	var se *sqlite.Error
+	return errors.As(err, &se) && se.Code()&0xff == sqliteBusy
 }
 
 // Close releases the file.

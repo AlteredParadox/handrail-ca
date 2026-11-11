@@ -186,10 +186,13 @@ func TestAFailedSchemaStepChangesNothing(t *testing.T) {
 	}
 }
 
+// Opening a new store from several places at once must work for all of
+// them: the server starting while a `user` command runs is two processes
+// setting the same file up.
 func TestConcurrentOpenOfANewStore(t *testing.T) {
 	dir := t.TempDir()
 	var wg sync.WaitGroup
-	errs := make([]error, 4)
+	errs := make([]error, 8)
 	for i := range errs {
 		wg.Add(1)
 		go func() {
@@ -615,5 +618,88 @@ func TestClosedStoreReportsErrors(t *testing.T) {
 		if err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, sql.ErrNoRows) {
 			t.Errorf("%s on a closed store: %v", name, err)
 		}
+	}
+}
+
+// lockedStoreFile creates the store's file in dir and returns it held
+// under an exclusive lock, as another process in the middle of setting it
+// up would hold it. release lets go.
+func lockedStoreFile(t *testing.T, dir string) (release func()) {
+	t.Helper()
+	other, err := sql.Open("sqlite", "file:"+filepath.ToSlash(filepath.Join(dir, FileName)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := other.Conn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := conn.ExecContext(context.Background(), "BEGIN EXCLUSIVE"); err != nil {
+		t.Fatal(err)
+	}
+	released := false
+	release = func() {
+		if !released {
+			released = true
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+			_ = conn.Close()
+			_ = other.Close()
+		}
+	}
+	t.Cleanup(release)
+	return release
+}
+
+func TestOpenWaitsForAStoreThatIsBusy(t *testing.T) {
+	dir := t.TempDir()
+	release := lockedStoreFile(t, dir)
+	// Let go shortly after Open has started trying.
+	timer := time.AfterFunc(300*time.Millisecond, release)
+	defer timer.Stop()
+
+	start := time.Now()
+	s, err := Open(context.Background(), dir)
+	if err != nil {
+		t.Fatalf("Open did not wait out the other holder: %v (after %v)", err, time.Since(start))
+	}
+	defer s.Close()
+	if _, err := s.AddUser(context.Background(), "alice", "hash", RoleViewer, t0); err != nil {
+		t.Errorf("the store is not usable after the wait: %v", err)
+	}
+}
+
+func TestOpenGivesUpOnAStoreThatStaysBusy(t *testing.T) {
+	savedRetry, savedBusy := openRetryFor, busyTimeout
+	t.Cleanup(func() { openRetryFor, busyTimeout = savedRetry, savedBusy })
+	openRetryFor, busyTimeout = 300*time.Millisecond, 50*time.Millisecond
+	dir := t.TempDir()
+	lockedStoreFile(t, dir)
+
+	// After openRetryFor, with SQLite's own word for it.
+	start := time.Now()
+	_, err := Open(context.Background(), dir)
+	if err == nil || !isBusy(err) || !strings.Contains(err.Error(), FileName) {
+		t.Fatalf("err = %v, want a busy error naming the file", err)
+	}
+	if took := time.Since(start); took < openRetryFor || took > 5*time.Second {
+		t.Errorf("gave up after %v, want a little over %v", took, openRetryFor)
+	}
+
+	// Sooner, if the caller's own deadline comes first.
+	openRetryFor = time.Minute
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	start = time.Now()
+	if _, err := Open(ctx, dir); err == nil {
+		t.Fatal("opened a store another connection holds exclusively")
+	}
+	if took := time.Since(start); took > 5*time.Second {
+		t.Errorf("Open took %v to give up on a 200ms deadline", took)
+	}
+}
+
+func TestIsBusy(t *testing.T) {
+	if isBusy(nil) || isBusy(errors.New("database is locked")) || isBusy(context.DeadlineExceeded) {
+		t.Error("an error that is not SQLite's is called busy")
 	}
 }
