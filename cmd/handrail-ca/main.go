@@ -22,6 +22,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -39,20 +40,49 @@ import (
 // reports "dev".
 var version = "dev"
 
-func main() {
-	if len(os.Args) > 1 && (os.Args[1] == "version" || os.Args[1] == "--version" || os.Args[1] == "-version") {
-		fmt.Println("handrail-ca", version)
-		return
-	}
-	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
-		os.Exit(healthcheck(os.Args[2:]))
-	}
-	listen := flag.String("listen", envOr("HANDRAIL_LISTEN", "127.0.0.1:8080"), "address to listen on (or set HANDRAIL_LISTEN)")
-	flag.Parse()
+// defaultListen is loopback: nothing here is authenticated yet.
+const defaultListen = "127.0.0.1:8080"
 
-	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+func main() {
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr)
+	stop()
+	os.Exit(code)
+}
+
+// run is main without the process: it returns the exit code, so the tests
+// can drive every path. It serves until ctx is cancelled.
+func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+	if len(args) > 0 {
+		switch args[0] {
+		case "version", "--version", "-version":
+			fmt.Fprintln(stdout, "handrail-ca", version)
+			return 0
+		case "healthcheck":
+			return healthcheck(args[1:], stderr)
+		}
+	}
+	fs := flag.NewFlagSet("handrail-ca", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	listen := fs.String("listen", envOr("HANDRAIL_LISTEN", defaultListen), "address to listen on (or set HANDRAIL_LISTEN)")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
+	log := slog.New(slog.NewTextHandler(stderr, nil))
+	ln, err := net.Listen("tcp", *listen)
+	if err != nil {
+		log.Error("listen", "addr", *listen, "err", err)
+		return 1
+	}
+	log.Info("handrail-ca listening", "addr", ln.Addr().String(), "version", version)
+	return serve(ctx, ln, log)
+}
+
+// serve answers on ln until ctx is cancelled, then drains in-flight
+// requests for up to ten seconds.
+func serve(ctx context.Context, ln net.Listener, log *slog.Logger) int {
 	srv := &http.Server{
-		Addr: *listen,
 		Handler: web.New(web.Options{
 			Version:            version,
 			License:            legal.License,
@@ -64,17 +94,6 @@ func main() {
 		IdleTimeout:       120 * time.Second,
 		MaxHeaderBytes:    64 << 10,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-
-	ln, err := net.Listen("tcp", *listen)
-	if err != nil {
-		log.Error("listen", "addr", *listen, "err", err)
-		os.Exit(1)
-	}
-	log.Info("handrail-ca listening", "addr", ln.Addr().String(), "version", version)
-
 	errc := make(chan error, 1)
 	go func() { errc <- srv.Serve(ln) }()
 
@@ -82,41 +101,44 @@ func main() {
 	case err := <-errc:
 		if !errors.Is(err, http.ErrServerClosed) {
 			log.Error("serve", "err", err)
-			os.Exit(1)
+			return 1
 		}
 	case <-ctx.Done():
 		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdown); err != nil {
 			log.Error("shutdown", "err", err)
-			os.Exit(1)
+			return 1
 		}
 	}
+	return 0
 }
 
 // healthcheck is the container HEALTHCHECK: the distroless image has no
 // shell or curl, so the binary probes its own /healthz. It dials loopback
-// on the configured port whatever interface the server is bound to.
-func healthcheck(args []string) int {
+// on the configured port whatever interface the server is bound to; the
+// request never leaves the host, which is why it is plain HTTP.
+func healthcheck(args []string, stderr io.Writer) int {
 	fs := flag.NewFlagSet("healthcheck", flag.ContinueOnError)
-	listen := fs.String("listen", envOr("HANDRAIL_LISTEN", "127.0.0.1:8080"), "the server's listen address")
+	fs.SetOutput(stderr)
+	listen := fs.String("listen", envOr("HANDRAIL_LISTEN", defaultListen), "the server's listen address")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	_, port, err := net.SplitHostPort(*listen)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		fmt.Fprintln(stderr, "healthcheck:", err)
 		return 2
 	}
 	client := &http.Client{Timeout: 4 * time.Second}
 	resp, err := client.Get("http://" + net.JoinHostPort("127.0.0.1", port) + "/healthz")
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "healthcheck:", err)
+		fmt.Fprintln(stderr, "healthcheck:", err)
 		return 1
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		fmt.Fprintln(os.Stderr, "healthcheck: status", resp.StatusCode)
+		fmt.Fprintln(stderr, "healthcheck: status", resp.StatusCode)
 		return 1
 	}
 	return 0
