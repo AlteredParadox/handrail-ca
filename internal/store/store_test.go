@@ -317,17 +317,22 @@ func TestSessions(t *testing.T) {
 	token := HashToken([]byte("the cookie value"))
 	expires := t0.Add(12 * time.Hour)
 
-	if err := s.CreateSession(ctx, alice.ID, token, t0, t0); err == nil {
+	if err := s.CreateSession(ctx, alice.ID, "hash", token, t0, t0); err == nil {
 		t.Error("created a session that is already over")
 	}
-	if err := s.CreateSession(ctx, 9999, token, t0, expires); err == nil {
+	if err := s.CreateSession(ctx, 9999, "hash", token, t0, expires); !errors.Is(err, ErrNotFound) {
 		t.Error("created a session for a user that does not exist")
 	}
-	if err := s.CreateSession(ctx, alice.ID, token, t0, expires); err != nil {
+	if err := s.CreateSession(ctx, alice.ID, "hash", token, t0, expires); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.CreateSession(ctx, alice.ID, token, t0, expires); err == nil {
+	if err := s.CreateSession(ctx, alice.ID, "hash", token, t0, expires); err == nil {
 		t.Error("the same token was stored twice")
+	}
+	// The session is tied to the password that was checked: with any other
+	// hash on the account, none is created.
+	if err := s.CreateSession(ctx, alice.ID, "an older hash", HashToken([]byte("another")), t0, expires); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a session for a superseded password: %v, want ErrNotFound", err)
 	}
 
 	sess, err := s.Session(ctx, token, t0.Add(time.Hour))
@@ -370,7 +375,7 @@ func TestOnlyTheTokenHashIsStored(t *testing.T) {
 	ctx := context.Background()
 	alice, _ := s.AddUser(ctx, "alice", "hash", RoleViewer, t0)
 	const token = "session-token-that-must-not-be-on-disk"
-	if err := s.CreateSession(ctx, alice.ID, HashToken([]byte(token)), t0, t0.Add(time.Hour)); err != nil {
+	if err := s.CreateSession(ctx, alice.ID, "hash", HashToken([]byte(token)), t0, t0.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -395,7 +400,7 @@ func TestSessionsEndWithTheAccountOrItsPassword(t *testing.T) {
 	bob, _ := s.AddUser(ctx, "bob", "hash", RoleViewer, t0)
 	a1, a2, b1 := HashToken([]byte("a1")), HashToken([]byte("a2")), HashToken([]byte("b1"))
 	for token, id := range map[TokenHash]int64{a1: alice.ID, a2: alice.ID, b1: bob.ID} {
-		if err := s.CreateSession(ctx, id, token, t0, t0.Add(time.Hour)); err != nil {
+		if err := s.CreateSession(ctx, id, "hash", token, t0, t0.Add(time.Hour)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -432,9 +437,9 @@ func TestDeleteExpiredSessions(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	must(s.CreateSession(ctx, alice.ID, fresh, t0, t0.Add(12*time.Hour)))
-	must(s.CreateSession(ctx, alice.ID, idle, t0, t0.Add(12*time.Hour)))
-	must(s.CreateSession(ctx, alice.ID, over, t0, t0.Add(time.Hour)))
+	must(s.CreateSession(ctx, alice.ID, "hash", fresh, t0, t0.Add(12*time.Hour)))
+	must(s.CreateSession(ctx, alice.ID, "hash", idle, t0, t0.Add(12*time.Hour)))
+	must(s.CreateSession(ctx, alice.ID, "hash", over, t0, t0.Add(time.Hour)))
 	now := t0.Add(2 * time.Hour)
 	must(s.TouchSession(ctx, fresh, now.Add(-time.Minute)))
 
@@ -581,7 +586,7 @@ func TestClosedStoreReportsErrors(t *testing.T) {
 		"AppendHist":   s.AppendHistory(ctx, Event{At: t0, Actor: "a", Action: "b", Outcome: "c"}),
 		"SetPassword":  s.SetPassword(ctx, "alice", "h", t0),
 		"RemoveUser":   s.RemoveUser(ctx, "alice"),
-		"Create":       s.CreateSession(ctx, 1, token, t0, t0.Add(time.Hour)),
+		"Create":       s.CreateSession(ctx, 1, "hash", token, t0, t0.Add(time.Hour)),
 		"Touch":        s.TouchSession(ctx, token, t0),
 		"Delete":       s.DeleteSession(ctx, token),
 		"migrate":      s.migrate(ctx),

@@ -27,21 +27,28 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"golang.org/x/term"
+
 	"handrail-ca/internal/password"
 	"handrail-ca/internal/store"
 )
 
 const userUsage = `Manage handrail-ca's accounts. Flags come before the user name.
 
-  handrail-ca user add    [-data DIR] [-role viewer|operator] [-password-file FILE] NAME
-  handrail-ca user passwd [-data DIR] [-password-file FILE] NAME
+  handrail-ca user add    [-data DIR] [-role viewer|operator] [-generate | -password-file FILE] NAME
+  handrail-ca user passwd [-data DIR] [-generate | -password-file FILE] NAME
   handrail-ca user remove [-data DIR] NAME
   handrail-ca user list   [-data DIR]
 
 -data            the data directory (or set HANDRAIL_DATA)
 -role            viewer (reads) or operator (also issues and revokes); default viewer
--password-file   read the password from FILE, or from standard input if FILE is "-".
-                 Without it a password is generated and printed once.
+
+The password for add and passwd, which sets a new one and signs the user out:
+  on a terminal    you are asked to type it, twice, unseen. Leave it empty
+                   and one is generated and printed once.
+-generate          generate one without asking, and print it once. This is
+                   also what happens when there is no terminal to ask on.
+-password-file     read it from FILE, or from standard input if FILE is "-".
 `
 
 // userCommand runs `handrail-ca user ...` and returns the exit code. The
@@ -64,7 +71,12 @@ func userCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	dataDir := fs.String("data", os.Getenv("HANDRAIL_DATA"), "")
 	role := fs.String("role", string(store.RoleViewer), "")
 	passwordFile := fs.String("password-file", "", "")
+	generate := fs.Bool("generate", false, "")
 	if err := fs.Parse(args[1:]); err != nil {
+		return 2
+	}
+	if *generate && *passwordFile != "" {
+		fmt.Fprintf(stderr, "handrail-ca user %s: -generate and -password-file are two different sources for the password; give one\n", verb)
 		return 2
 	}
 	wantName := verb != "list"
@@ -85,11 +97,17 @@ func userCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	defer st.Close()
 
 	u := userAdmin{store: st, stdin: stdin, stdout: stdout, stderr: stderr, now: time.Now()}
+	source := passwordSource{file: *passwordFile}
+	if !*generate && *passwordFile == "" {
+		// Nil when standard input is not a terminal: then nobody is there
+		// to ask, and a password is generated.
+		source.ask = newPrompt(ctx, stdin, stderr)
+	}
 	switch verb {
 	case "add":
-		err = u.add(ctx, fs.Arg(0), *role, *passwordFile)
+		err = u.add(ctx, fs.Arg(0), *role, source)
 	case "passwd":
-		err = u.passwd(ctx, fs.Arg(0), *passwordFile)
+		err = u.passwd(ctx, fs.Arg(0), source)
 	case "remove":
 		err = u.remove(ctx, fs.Arg(0))
 	case "list":
@@ -109,7 +127,7 @@ type userAdmin struct {
 	now            time.Time
 }
 
-func (u userAdmin) add(ctx context.Context, name, roleName, passwordFile string) error {
+func (u userAdmin) add(ctx context.Context, name, roleName string, source passwordSource) error {
 	role, err := store.ParseRole(roleName)
 	if err != nil {
 		return err
@@ -120,7 +138,7 @@ func (u userAdmin) add(ctx context.Context, name, roleName, passwordFile string)
 	if err != nil {
 		return err
 	}
-	pw, generated, err := u.password(passwordFile)
+	pw, generated, err := u.password(name, source)
 	if err != nil {
 		return err
 	}
@@ -137,7 +155,7 @@ func (u userAdmin) add(ctx context.Context, name, roleName, passwordFile string)
 	return nil
 }
 
-func (u userAdmin) passwd(ctx context.Context, name, passwordFile string) error {
+func (u userAdmin) passwd(ctx context.Context, name string, source passwordSource) error {
 	name, err := store.NormalizeUsername(name)
 	if err != nil {
 		return err
@@ -145,7 +163,7 @@ func (u userAdmin) passwd(ctx context.Context, name, passwordFile string) error 
 	if _, _, err := u.store.Credentials(ctx, name); err != nil {
 		return notFound(err, name)
 	}
-	pw, generated, err := u.password(passwordFile)
+	pw, generated, err := u.password(name, source)
 	if err != nil {
 		return err
 	}
@@ -193,15 +211,66 @@ func (u userAdmin) list(ctx context.Context) error {
 	return w.Flush()
 }
 
-// password returns the password to set: the content of passwordFile (one
-// trailing line break dropped), or a generated one when no file is named.
-func (u userAdmin) password(passwordFile string) (pw string, generated bool, err error) {
-	if passwordFile == "" {
+// passwordSource is where the password for add or passwd comes from: a
+// file, the person at the terminal, or, with neither, the generator.
+type passwordSource struct {
+	// file is the -password-file value: a path, or "-" for standard input.
+	file string
+	// ask puts a question to the person at the terminal and returns what
+	// they type, unseen. Nil when there is no terminal or -generate is set.
+	ask func(question string) (string, error)
+}
+
+// promptTries is how often a typed password may be refused (too short, or
+// the two entries differ) before the command gives up.
+const promptTries = 3
+
+// password returns the password to set, and whether it was generated here
+// (and so has to be shown).
+func (u userAdmin) password(name string, source passwordSource) (pw string, generated bool, err error) {
+	switch {
+	case source.file != "":
+		pw, err = u.passwordFromFile(source.file)
+		return pw, false, err
+	case source.ask == nil:
 		pw, err = password.Generate()
 		return pw, true, err
 	}
-	var data []byte
-	// One byte more than the longest password, to tell "too long" from
+	for try := 1; ; try++ {
+		pw, err = source.ask(fmt.Sprintf("New password for %s (at least %d characters; leave empty to generate one): ", name, password.MinLength))
+		if err != nil {
+			return "", false, fmt.Errorf("reading the password: %w", err)
+		}
+		if pw == "" {
+			pw, err = password.Generate()
+			return pw, true, err
+		}
+		problem := password.Check(pw)
+		if problem == nil {
+			var again string
+			if again, err = source.ask("Again: "); err != nil {
+				return "", false, fmt.Errorf("reading the password: %w", err)
+			}
+			if again == pw {
+				return pw, false, nil
+			}
+			problem = errors.New("the two entries differ")
+		}
+		if try == promptTries {
+			return "", false, fmt.Errorf("%w; nothing was changed", problem)
+		}
+		fmt.Fprintf(u.stderr, "Not accepted: %v. Try again.\n", problem)
+	}
+}
+
+// passwordFromFile reads the password from a file, or from standard input
+// for "-", dropping one trailing line break.
+func (u userAdmin) passwordFromFile(passwordFile string) (string, error) {
+	var (
+		data []byte
+		err  error
+	)
+	// A little more than the longest password, to tell "too long" from
 	// "exactly the limit" without reading an unbounded file.
 	const limit = password.MaxLength + 3
 	if passwordFile == "-" {
@@ -214,13 +283,52 @@ func (u userAdmin) password(passwordFile string) (pw string, generated bool, err
 		}
 	}
 	if err != nil {
-		return "", false, fmt.Errorf("reading the password: %w", err)
+		return "", fmt.Errorf("reading the password: %w", err)
 	}
-	pw = strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
+	pw := strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
 	if err := password.Check(pw); err != nil {
-		return "", false, err
+		return "", err
 	}
-	return pw, false, nil
+	return pw, nil
+}
+
+// newPrompt returns a function that asks a question on the terminal and
+// reads the answer without showing it, or nil when standard input is not a
+// terminal. A variable so that the tests can stand in for the terminal.
+var newPrompt = func(ctx context.Context, stdin io.Reader, stderr io.Writer) func(question string) (string, error) {
+	f, ok := stdin.(*os.File)
+	if !ok || !term.IsTerminal(int(f.Fd())) {
+		return nil
+	}
+	fd := int(f.Fd())
+	return func(question string) (string, error) {
+		// The terminal's settings as they are now, to put back if the read
+		// is abandoned: an interrupt must not leave the shell without echo.
+		before, _ := term.GetState(fd)
+		fmt.Fprint(stderr, question)
+		type answer struct {
+			text []byte
+			err  error
+		}
+		done := make(chan answer, 1)
+		go func() {
+			text, err := term.ReadPassword(fd)
+			done <- answer{text, err}
+		}()
+		select {
+		case a := <-done:
+			fmt.Fprintln(stderr)
+			return string(a.text), a.err
+		case <-ctx.Done():
+			// Ctrl-C: main turns the signal into a cancelled context, and
+			// the read above would otherwise sit there until Enter.
+			if before != nil {
+				_ = term.Restore(fd, before)
+			}
+			fmt.Fprintln(stderr)
+			return "", errors.New("interrupted")
+		}
+	}
 }
 
 // show prints a generated password, the only time it is ever shown.

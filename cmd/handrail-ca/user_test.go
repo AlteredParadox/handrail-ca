@@ -19,6 +19,8 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -176,7 +178,7 @@ func TestUserPasswdSignsOut(t *testing.T) {
 	ctx := context.Background()
 	alice, oldHash, _ := st.Credentials(ctx, "alice")
 	token := store.HashToken([]byte("cookie"))
-	if err := st.CreateSession(ctx, alice.ID, token, time.Now(), time.Now().Add(time.Hour)); err != nil {
+	if err := st.CreateSession(ctx, alice.ID, oldHash, token, time.Now(), time.Now().Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 
@@ -262,5 +264,185 @@ func TestUserReportsAnUnusableDataDirectory(t *testing.T) {
 	code, _, errOut := user(t, "", "list", "-data", file)
 	if code != 1 || !strings.Contains(errOut, "handrail-ca user:") {
 		t.Errorf("exit %d, %q", code, errOut)
+	}
+}
+
+// atTerminal makes the user commands believe someone is at a terminal who
+// types the given answers, one per question. It returns the questions asked.
+func atTerminal(t *testing.T, answers ...string) *[]string {
+	t.Helper()
+	var asked []string
+	saved := newPrompt
+	t.Cleanup(func() { newPrompt = saved })
+	newPrompt = func(context.Context, io.Reader, io.Writer) func(string) (string, error) {
+		return func(question string) (string, error) {
+			asked = append(asked, question)
+			if len(answers) == 0 {
+				return "", errors.New("interrupted")
+			}
+			answer := answers[0]
+			answers = answers[1:]
+			return answer, nil
+		}
+	}
+	return &asked
+}
+
+func opens(t *testing.T, dir, name, pw string) bool {
+	t.Helper()
+	_, hash, err := openStore(t, dir).Credentials(context.Background(), name)
+	if err != nil {
+		return false
+	}
+	ok, err := password.Verify(hash, pw)
+	return ok && err == nil
+}
+
+func TestUserAddAsksForAPasswordAtATerminal(t *testing.T) {
+	dir := t.TempDir()
+	const typed = "typed at the keyboard"
+	asked := atTerminal(t, typed, typed)
+
+	code, out, errOut := user(t, "", "add", "-data", dir, "-role", "operator", "alice")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if len(*asked) != 2 || !strings.Contains((*asked)[0], "New password for alice") || !strings.Contains((*asked)[0], "leave empty to generate") || (*asked)[1] != "Again: " {
+		t.Errorf("questions = %q", *asked)
+	}
+	// A typed password is never shown back.
+	if strings.Contains(out+errOut, typed) || strings.Contains(out, "shown once") {
+		t.Errorf("the typed password was printed: %q %q", out, errOut)
+	}
+	if !opens(t, dir, "alice", typed) {
+		t.Error("the typed password does not open the account")
+	}
+}
+
+func TestUserPromptLeftEmptyGenerates(t *testing.T) {
+	dir := t.TempDir()
+	asked := atTerminal(t, "")
+	code, out, errOut := user(t, "", "add", "-data", dir, "alice")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	m := shownPassword.FindStringSubmatch(out)
+	if m == nil || len(*asked) != 1 {
+		t.Fatalf("output %q after %d questions", out, len(*asked))
+	}
+	if !opens(t, dir, "alice", m[1]) {
+		t.Error("the generated password does not open the account")
+	}
+}
+
+func TestUserPromptRetriesAndGivesUp(t *testing.T) {
+	dir := t.TempDir()
+	const typed = "second time lucky"
+
+	// Too short, then a mismatch, then right.
+	asked := atTerminal(t, "short", typed, "second time lucku", typed, typed)
+	code, _, errOut := user(t, "", "add", "-data", dir, "alice")
+	if code != 0 {
+		t.Fatalf("exit %d: %s", code, errOut)
+	}
+	if len(*asked) != 5 || !strings.Contains(errOut, "the minimum is 12") || !strings.Contains(errOut, "the two entries differ") {
+		t.Errorf("%d questions, stderr %q", len(*asked), errOut)
+	}
+	if !opens(t, dir, "alice", typed) {
+		t.Error("the accepted password does not open the account")
+	}
+
+	// Three refusals: nothing is created.
+	atTerminal(t, "short", "shorter", "no")
+	code, out, errOut := user(t, "", "add", "-data", dir, "bob")
+	if code != 1 || !strings.Contains(errOut, "nothing was changed") || shownPassword.MatchString(out) {
+		t.Errorf("exit %d, %q, %q", code, out, errOut)
+	}
+	// Interrupted at the second question.
+	atTerminal(t, "long enough to be accepted")
+	code, _, errOut = user(t, "", "add", "-data", dir, "bob")
+	if code != 1 || !strings.Contains(errOut, "reading the password: interrupted") {
+		t.Errorf("exit %d, %q", code, errOut)
+	}
+	// Interrupted at the first.
+	atTerminal(t)
+	if code, _, _ = user(t, "", "add", "-data", dir, "bob"); code != 1 {
+		t.Errorf("exit %d after an interrupt", code)
+	}
+	if n, _ := openStore(t, dir).CountUsers(context.Background()); n != 1 {
+		t.Errorf("%d accounts, want only alice", n)
+	}
+}
+
+func TestUserPasswdAtATerminal(t *testing.T) {
+	dir := t.TempDir()
+	if code, _, errOut := user(t, "", "add", "-data", dir, "alice"); code != 0 {
+		t.Fatal(errOut)
+	}
+	_, before, _ := openStore(t, dir).Credentials(context.Background(), "alice")
+	const typed = "a new one, typed in"
+
+	// Given up on: the old password stays.
+	atTerminal(t, typed, "something else", typed, "again something else", typed, "and again")
+	if code, _, errOut := user(t, "", "passwd", "-data", dir, "alice"); code != 1 || !strings.Contains(errOut, "nothing was changed") {
+		t.Fatalf("exit %d, %q", code, errOut)
+	}
+	if _, after, _ := openStore(t, dir).Credentials(context.Background(), "alice"); after != before {
+		t.Error("the password changed although the command gave up")
+	}
+	// An unknown user is reported before anything is asked.
+	asked := atTerminal(t, typed, typed)
+	if code, _, _ := user(t, "", "passwd", "-data", dir, "nobody"); code != 1 || len(*asked) != 0 {
+		t.Errorf("exit %d after %d questions for an unknown user", code, len(*asked))
+	}
+
+	atTerminal(t, typed, typed)
+	code, out, errOut := user(t, "", "passwd", "-data", dir, "alice")
+	if code != 0 || strings.Contains(out+errOut, typed) || !strings.Contains(out, "signed them out everywhere") {
+		t.Fatalf("exit %d, %q, %q", code, out, errOut)
+	}
+	if !opens(t, dir, "alice", typed) {
+		t.Error("the typed password does not open the account")
+	}
+}
+
+// -generate and -password-file never ask, terminal or not.
+func TestUserGenerateAndFileDoNotAsk(t *testing.T) {
+	dir := t.TempDir()
+	asked := atTerminal(t, "must not be asked", "must not be asked")
+
+	code, out, errOut := user(t, "", "add", "-data", dir, "-generate", "alice")
+	if code != 0 || !shownPassword.MatchString(out) {
+		t.Fatalf("exit %d, %q, %q", code, out, errOut)
+	}
+	code, _, errOut = user(t, "from standard input\n", "add", "-data", dir, "-password-file", "-", "bob")
+	if code != 0 || !opens(t, dir, "bob", "from standard input") {
+		t.Fatalf("exit %d, %q", code, errOut)
+	}
+	code, out, _ = user(t, "", "passwd", "-data", dir, "-generate", "bob")
+	if code != 0 || !shownPassword.MatchString(out) {
+		t.Fatalf("passwd -generate: exit %d, %q", code, out)
+	}
+	if len(*asked) != 0 {
+		t.Errorf("asked %q", *asked)
+	}
+	code, _, errOut = user(t, "", "add", "-data", dir, "-generate", "-password-file", "-", "carol")
+	if code != 2 || !strings.Contains(errOut, "two different sources") {
+		t.Errorf("both flags: exit %d, %q", code, errOut)
+	}
+}
+
+// Standard input that is a file, a pipe or nothing at all is not a terminal.
+func TestNoPromptWithoutATerminal(t *testing.T) {
+	f, err := os.Open(os.DevNull)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	if newPrompt(context.Background(), f, io.Discard) != nil {
+		t.Error("a prompt was offered on a file")
+	}
+	if newPrompt(context.Background(), strings.NewReader(""), io.Discard) != nil {
+		t.Error("a prompt was offered on a reader that is not a file")
 	}
 }

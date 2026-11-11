@@ -23,9 +23,14 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"handrail-ca/internal/store"
 )
 
 func listenLoopback(t *testing.T) net.Listener {
@@ -59,12 +64,30 @@ func TestRunBadFlag(t *testing.T) {
 	}
 }
 
+// testFingerprint is a well-formed root fingerprint that is no CA's.
+var testFingerprint = strings.Repeat("ab", 32)
+
+// serverArgs is a complete configuration: a fresh data directory, a CA
+// address nothing listens on, and a root fingerprint.
+func serverArgs(t *testing.T, listen string, more ...string) []string {
+	t.Helper()
+	clearEnv(t)
+	return append([]string{"-listen", listen, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-fingerprint", testFingerprint}, more...)
+}
+
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_FINGERPRINT", "HANDRAIL_PUBLIC_URL", "HANDRAIL_TRUSTED_PROXIES"} {
+		t.Setenv(name, "")
+	}
+}
+
 func TestRunListenFailure(t *testing.T) {
 	// The port is taken for the length of the test, so the listen must fail.
 	ln := listenLoopback(t)
 	defer ln.Close()
 	var errOut bytes.Buffer
-	code := run(context.Background(), []string{"-listen", ln.Addr().String()}, nil, io.Discard, &errOut)
+	code := run(context.Background(), serverArgs(t, ln.Addr().String()), nil, io.Discard, &errOut)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
@@ -73,31 +96,183 @@ func TestRunListenFailure(t *testing.T) {
 	}
 }
 
-// A cancelled context is the SIGTERM path: run binds, serves and exits 0.
-func TestRunStopsOnCancel(t *testing.T) {
+// An empty store on loopback starts, and says what to do next. Cancelling
+// the context is the SIGTERM path: run drains and exits 0.
+func TestRunStartsWithoutAccountsOnLoopback(t *testing.T) {
+	addr := freeAddr(t)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var errOut syncBuffer
+	done := make(chan int, 1)
+	args := serverArgs(t, addr)
+	go func() { done <- run(ctx, args, nil, io.Discard, &errOut) }()
+	waitForHealth(t, addr, &errOut)
 	cancel()
-	if code := run(ctx, []string{"-listen", "127.0.0.1:0"}, nil, io.Discard, io.Discard); code != 0 {
-		t.Errorf("exit code = %d, want 0", code)
+	if code := <-done; code != 0 {
+		t.Errorf("exit code = %d, want 0: %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "no accounts yet") {
+		t.Errorf("no hint about adding an account: %s", errOut.String())
 	}
 }
 
-func TestServeAndHealthcheck(t *testing.T) {
+// An https public URL means a proxy is in front. Without being told which,
+// handrail-ca says at start what that costs; told, it does not.
+func TestRunWarnsAboutAnUndeclaredProxy(t *testing.T) {
+	const warning = "no -trusted-proxy"
+	for name, tt := range map[string]struct {
+		more []string
+		want bool
+	}{
+		"undeclared": {[]string{"-public-url", "https://handrail.example"}, true},
+		"declared":   {[]string{"-public-url", "https://handrail.example", "-trusted-proxy", "127.0.0.1, 10.20.0.0/16"}, false},
+		"plain HTTP": {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			addr := freeAddr(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var errOut syncBuffer
+			done := make(chan int, 1)
+			args := serverArgs(t, addr, tt.more...)
+			go func() { done <- run(ctx, args, nil, io.Discard, &errOut) }()
+			waitForHealth(t, addr, &errOut)
+			cancel()
+			if code := <-done; code != 0 {
+				t.Fatalf("exit code = %d: %s", code, errOut.String())
+			}
+			if got := strings.Contains(errOut.String(), warning); got != tt.want {
+				t.Errorf("warning present = %v, want %v: %s", got, tt.want, errOut.String())
+			}
+		})
+	}
+}
+
+// waitForHealth returns once the server at addr answers its health probe.
+func waitForHealth(t *testing.T, addr string, log *syncBuffer) {
+	t.Helper()
+	var err error
+	for range 200 {
+		var resp *http.Response
+		if resp, err = http.Get("http://" + addr + "/healthz"); err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ok"`) {
+				t.Fatalf("GET /healthz = %d %q", resp.StatusCode, body)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the server did not come up: %v\n%s", err, log.String())
+}
+
+func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
+	root := testFingerprint
+	dataIsAFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(dataIsAFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	clearEnv(t)
+	tests := []struct {
+		name string
+		args []string
+		code int
+		want string
+	}{
+		{"nothing", nil, 2, "not configured: -data (HANDRAIL_DATA), -ca-url (HANDRAIL_CA_URL), -ca-fingerprint (HANDRAIL_CA_FINGERPRINT)"},
+		{"no CA", []string{"-data", data}, 2, "not configured: -ca-url (HANDRAIL_CA_URL), -ca-fingerprint"},
+		{"trusted proxy by name", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-trusted-proxy", "proxy.internal.example"}, 2, "-trusted-proxy: invalid IP address or CIDR range: proxy.internal.example"},
+		{"stray argument", []string{"-data", data, "serve"}, 2, `unexpected argument "serve"`},
+		{"data directory is a file", []string{"-data", dataIsAFile, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root}, 1, "opening the store"},
+		{"fingerprint is not one", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", "root_ca.crt"}, 1, "64 hexadecimal characters"},
+		{"CA over plain HTTP", []string{"-data", data, "-ca-url", "http://ca.invalid", "-ca-fingerprint", root}, 1, "must start with https://"},
+		{"bad public URL", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "handrail.example"}, 1, "-public-url"},
+		{"plain HTTP public URL beyond this machine", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "http://handrail.example"}, 1, "only accepted for a loopback address"},
+		{"beyond loopback without a public URL", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root}, 1, "-public-url (HANDRAIL_PUBLIC_URL) is required"},
+		{"beyond loopback without an account", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "https://handrail.example"}, 1, "no accounts yet"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var errOut bytes.Buffer
+			code := run(context.Background(), tt.args, nil, io.Discard, &errOut)
+			if code != tt.code || !strings.Contains(errOut.String(), tt.want) {
+				t.Errorf("exit %d, stderr %q; want %d and %q", code, errOut.String(), tt.code, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolvePublicURL(t *testing.T) {
+	loopback := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8080}
+	v6 := &net.TCPAddr{IP: net.IPv6loopback, Port: 8080}
+	anywhere := &net.TCPAddr{IP: net.IPv4zero, Port: 8080}
+	tests := []struct {
+		name, configured string
+		addr             net.Addr
+		want             string
+	}{
+		{"loopback default", "", loopback, "http://127.0.0.1:8080"},
+		{"IPv6 loopback default", "", v6, "http://[::1]:8080"},
+		{"configured on loopback", "https://handrail.example/ca/", loopback, "https://handrail.example/ca/"},
+		{"configured beyond loopback", "https://handrail.example", anywhere, "https://handrail.example"},
+		{"required beyond loopback", "", anywhere, ""},
+		{"no scheme", "handrail.example", anywhere, ""},
+		{"with credentials", "https://u:p@handrail.example", anywhere, ""},
+		{"with query", "https://handrail.example/?a=b", anywhere, ""},
+		{"unparseable", "https://handrail.example:port", anywhere, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := config{publicURL: tt.configured}.resolvePublicURL(tt.addr)
+			if tt.want == "" {
+				if err == nil {
+					t.Fatalf("accepted, as %v", u)
+				}
+				return
+			}
+			if err != nil || u.String() != tt.want {
+				t.Fatalf("got %v, %v; want %s", u, err, tt.want)
+			}
+		})
+	}
+}
+
+// freeAddr returns a loopback address that was free a moment ago.
+func freeAddr(t *testing.T) string {
+	t.Helper()
 	ln := listenLoopback(t)
 	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+// The whole program: configure, add an account, serve, probe, stop.
+func TestRunServesAndHealthcheck(t *testing.T) {
+	addr := freeAddr(t)
+	args := serverArgs(t, addr)
+	data := args[3]
+	if code := run(context.Background(), []string{"user", "add", "-data", data, "alice"}, nil, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("user add = %d", code)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var errOut syncBuffer
 	done := make(chan int, 1)
-	go func() { done <- serve(ctx, ln, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
+	go func() { done <- run(ctx, args, nil, io.Discard, &errOut) }()
 
-	resp, err := http.Get("http://" + addr + "/healthz")
+	waitForHealth(t, addr, &errOut)
+	// The pages are there, and want a sign-in.
+	resp, err := http.Get("http://" + addr + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ok"`) {
-		t.Fatalf("GET /healthz = %d %q", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "Sign in") || !strings.Contains(string(body), "ca.invalid") {
+		t.Errorf("GET / ended at %d %q", resp.StatusCode, resp.Request.URL)
 	}
 
 	if code := healthcheck([]string{"-listen", addr}, io.Discard); code != 0 {
@@ -109,32 +284,73 @@ func TestServeAndHealthcheck(t *testing.T) {
 	if code := healthcheck([]string{"-listen", "0.0.0.0:" + port}, io.Discard); code != 0 {
 		t.Errorf("healthcheck with a wildcard listen address = %d, want 0", code)
 	}
+	if strings.Contains(errOut.String(), "no accounts yet") {
+		t.Error("warned about accounts although one exists")
+	}
 
 	cancel()
 	select {
 	case code := <-done:
 		if code != 0 {
-			t.Errorf("serve returned %d after cancel, want 0", code)
+			t.Errorf("run returned %d after cancel, want 0", code)
 		}
 	case <-time.After(15 * time.Second):
-		t.Fatal("serve did not return after cancel")
+		t.Fatal("run did not return after cancel")
 	}
 
-	var errOut bytes.Buffer
-	if code := healthcheck([]string{"-listen", addr}, &errOut); code != 1 {
+	var probeErr bytes.Buffer
+	if code := healthcheck([]string{"-listen", addr}, &probeErr); code != 1 {
 		t.Errorf("healthcheck against a stopped server = %d, want 1", code)
 	}
-	if !strings.Contains(errOut.String(), "healthcheck:") {
-		t.Errorf("stderr %q does not report the failure", errOut.String())
+	if !strings.Contains(probeErr.String(), "healthcheck:") {
+		t.Errorf("stderr %q does not report the failure", probeErr.String())
 	}
+}
+
+// syncBuffer is a buffer the server's log can write to while the test reads.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // serve reports a listener that fails underneath it rather than hanging.
 func TestServeListenerClosed(t *testing.T) {
 	ln := listenLoopback(t)
 	ln.Close()
-	if code := serve(context.Background(), ln, slog.New(slog.NewTextHandler(io.Discard, nil))); code != 1 {
+	if code := serve(context.Background(), ln, http.NotFoundHandler(), slog.New(slog.NewTextHandler(io.Discard, nil))); code != 1 {
 		t.Errorf("serve on a closed listener = %d, want 1", code)
+	}
+}
+
+func TestSweepSessionsStopsWithTheContext(t *testing.T) {
+	st, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		sweepSessions(ctx, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sweep did not stop")
 	}
 }
 

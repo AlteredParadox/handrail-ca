@@ -1,8 +1,9 @@
 # Preparing step-ca for handrail-ca
 
 What has to exist on the CA's side before handrail-ca can show, issue and
-revoke certificates. handrail-ca itself is not built yet (see
-[PLAN.md](PLAN.md)); this is written first so the CA can be made ready.
+revoke certificates. handrail-ca is being built (see [PLAN.md](PLAN.md));
+today it uses the CA's address and root fingerprint from section 5, and the
+rest as each milestone arrives.
 
 **How far this has been checked.** Sections 1 to 3 are run on every fresh
 development CA (`make dev-up`) and their effects are checked by
@@ -189,8 +190,8 @@ When handrail-ca is installed it will need:
 
 | What | Where it comes from |
 |---|---|
-| The CA's URL | A name listed in `dnsNames` in `ca.json`; tokens for any other name are refused |
-| The root certificate's SHA-256 fingerprint | `step certificate fingerprint $(step path)/certs/root_ca.crt` on the CA's host. handrail-ca fetches the root from the CA and accepts it only if it has this fingerprint, so read it off the CA's own host, not off a network answer |
+| The CA's URL (`-ca-url`) | A name listed in `dnsNames` in `ca.json`; tokens for any other name are refused |
+| The root certificate's SHA-256 fingerprint (`-ca-fingerprint`) | `step certificate fingerprint $(step path)/certs/root_ca.crt` on the CA's host. handrail-ca fetches the root from the CA and accepts it only if it has this fingerprint, so read it off the CA's own host, not off a network answer |
 | The provisioner's name | `handrail`, from section 1 |
 | The provisioner's password | The file from section 1 |
 | The database address, name, role and password | Section 3 |

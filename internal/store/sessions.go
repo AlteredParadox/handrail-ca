@@ -39,15 +39,27 @@ type Session struct {
 	ExpiresAt  time.Time
 }
 
-// CreateSession records a new session for a user, valid until expires.
-func (s *Store) CreateSession(ctx context.Context, userID int64, token TokenHash, now, expires time.Time) error {
+// CreateSession records a new session, valid until expires, for the account
+// whose password was just checked against passwordHash. The session is
+// created only if the account still has that hash, in the same statement:
+// a password changed between the check and this call ends every session of
+// the account, and must not be followed by a new one opened with the old
+// password. ErrNotFound if the account is gone or its password has changed.
+func (s *Store) CreateSession(ctx context.Context, userID int64, passwordHash string, token TokenHash, now, expires time.Time) error {
 	if !expires.After(now) {
 		return errors.New("session would expire before it starts")
 	}
-	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at) VALUES (?, ?, ?, ?, ?)`,
-		token[:], userID, now.Unix(), now.Unix(), expires.Unix())
-	return err
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO sessions (token_hash, user_id, created_at, last_seen_at, expires_at)
+		 SELECT ?1, id, ?2, ?2, ?3 FROM users WHERE id = ?4 AND password_hash = ?5`,
+		token[:], now.Unix(), expires.Unix(), userID, passwordHash)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 // Session looks a session up by its token's hash and returns it with its

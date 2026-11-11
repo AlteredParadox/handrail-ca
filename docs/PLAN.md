@@ -1,7 +1,8 @@
 # handrail-ca build plan
 
-Status: 2026-11-11. The scaffold, the development CA and the read side of
-the CA client are built; milestone 1 is in progress (section 6).
+Status: 2026-11-11. Milestone 1 is built: sign-in and a CA status page, on
+a store of its own, against a development CA. Milestone 2, the certificate
+list, is next (section 6).
 Section 2 records the decisions made so far.
 
 ## 1. What we are building
@@ -49,10 +50,13 @@ tables with a read-only account and changes nothing in the CA's database.
 server-side sessions and two roles, viewer and operator. With the store (D5)
 the accounts live there and are managed from the command line on the host
 (`handrail-ca user add`, `passwd`, `remove`, `list`); there is no account
-management in the web UI in the first release. `add` and `passwd` generate
-a password and print it once, or take one from a file; nothing prompts, so
-no terminal library is needed. Changing a password ends that account's
-sessions. OIDC is a later milestone.
+management in the web UI in the first release. `add` and `passwd` set a
+password one of three ways: typed at the terminal, unseen and twice
+(owner's request, 2026-11-11); generated and printed once (`-generate`, an
+empty entry at the prompt, or no terminal); or read from a file. Changing a
+password ends that account's sessions. There is no way to read a password
+back and none for a user to change their own from the browser; the second
+is a candidate for later. OIDC is a later milestone.
 
 **D3. Key generation: offered, as the second path.** Pasting a CSR is the
 default and keeps the private key with the requester. "Generate a key for
@@ -64,7 +68,12 @@ of JavaScript for filtering, copying and confirmation. Auto-escaping by
 default, a Content-Security-Policy with no inline script, and pages that work
 without JavaScript. A first-pass mockup of the six screens (list, detail,
 issue, revoke, CA status, sign-in) exists as a design canvas outside this
-repository and is the starting point for the UI milestones.
+repository and is the starting point for the UI milestones. The pages
+follow it. The mockup loads IBM Plex from Google Fonts, which the
+Content-Security-Policy forbids like every other third-party load, so the
+fonts are embedded instead (owner's decision, 2026-11-11): the Latin
+subsets of the five weights in use, about 100 KB, unmodified from IBM's own
+packages, under the SIL Open Font License.
 
 **D5. handrail-ca has a small store of its own.** One SQLite file in a data
 directory, for the things that are handrail-ca's and not the CA's:
@@ -277,6 +286,86 @@ the store is an error. TLS is terminated by a reverse proxy or by
 handrail-ca itself (certificate and key files); a base-path option supports
 serving under a sub-path.
 
+As built in milestone 1:
+
+- One setting, `-public-url`, is the address browsers use. Its host is the
+  only Host header answered (the health probe excepted), its origin is the
+  only `Origin` a form is accepted from, an `https` scheme marks the cookies
+  `Secure`, and its path is the prefix everything is served under. It
+  defaults to the listener on loopback and is required anywhere else. An
+  `http://` public URL is refused unless its host is a loopback name:
+  handrail-ca will not send passwords and session cookies across a network
+  in the clear.
+- Sessions last twelve hours, or one hour unused. The cookie holds a random
+  token; the store holds its SHA-256. Over HTTPS at the root of a host the
+  cookie carries the `__Host-` prefix.
+- Every form carries a token: an HMAC keyed with the cookie's token. The
+  sign-in form, which has no session yet, gets a short-lived cookie of its
+  own for the same purpose. A post without the right `Origin` is refused
+  before the token is looked at.
+- Sign-in is throttled in memory: each user name, and each client address,
+  gets five attempts in five minutes. An attempt is counted when its
+  password check starts, so guesses sent at the same time cannot outrun the
+  limit, and a successful sign-in gives its attempt back. The address is
+  the visitor's own only where that can be known (next point). A known
+  user name can be kept locked out by someone who keeps failing on it, the
+  right password refused with the wrong ones; that is the price of a
+  limit per name, and the README says how to live with it (limit who can
+  reach the page, a spare operator account with an unguessable name, a
+  restart clears the counts, `step ca revoke` works regardless). A
+  mitigation in the code would be a device cookie: a browser that has
+  signed in as a user before gets its own allowance for that name, apart
+  from the one strangers can use up. Not built; to be decided before
+  revoking through the UI ships (M3). Names and addresses are counted in two
+  bounded tables, and a full table never drops a count that is still
+  running. With the table of names full, a name not yet in it is refused:
+  that limit is the one that bounds guessing at an account. With the table
+  of addresses full, a new address goes uncounted: addresses are cheap to
+  produce, and refusing new ones would lock every other visitor out.
+- Behind a reverse proxy every visitor arrives from the proxy's address.
+  `-trusted-proxy` lists the proxies; on a connection from one of them the
+  visitor is the rightmost address in `X-Forwarded-For` that is not itself
+  a listed proxy, so nothing a visitor writes into the header is believed.
+  From any other peer the header is ignored. Where the visitor's address
+  cannot be known, there is no per-address limit at all: one shared limit
+  would let anyone who can reach the sign-in page block everyone's
+  sign-in. That is the case for a listed proxy that sends no usable
+  header, and, under an `https` public URL, for every peer that is not a
+  listed proxy: handrail-ca does not speak TLS, so nothing but a proxy
+  connects there, and a proxy listed under the wrong address is easy to
+  have (in a container, the proxy on the same machine arrives from the
+  Docker bridge's gateway, not from 127.0.0.1). The log warns at start
+  when no proxy is listed, and once per address when requests arrive from
+  one that is not listed, naming it.
+- Tried behind nginx with TLS, with handrail-ca in a container
+  (2026-11-11): proxy on the host listed as 127.0.0.1 (the warning names
+  172.17.0.1), listed as 172.17.0.1 (the visitor's own address is
+  recorded, and an `X-Forwarded-For` the visitor sent is not believed),
+  and proxy in a container on a shared network. Only a proxy's own
+  address belongs in `-trusted-proxy`: listing a visitor's address, a NAT
+  or gateway they arrive through, or a whole network makes the walk skip
+  the real visitor and believe what the visitor wrote to its left (found
+  in review; the README had advised exactly that for two cases). Without
+  `proxy_set_header Host $http_host;` nginx sends the backend's address
+  as `Host` and every page is a 421; the log explains that once per name
+  asked for, and the README carries the configuration that works. Not
+  tried: visitors from another machine, or any proxy other than nginx.
+- A sign-in for a name that is not an account is recorded as "(unknown
+  user)", never with what was typed: people type passwords into that field.
+- History rows are never deleted, so what someone who is not signed in can
+  add to them is bounded. Failed sign-ins on a real account are always
+  rows, and the throttle caps them at five per account per five minutes.
+  Failed sign-ins for names that are not accounts become rows at most
+  twelve times an hour; the rest are counted, written to the log like every
+  other, and the next row says how many were passed over. Without this,
+  anyone able to reach the sign-in page could grow the store until the
+  disk it shares with the accounts was full.
+- At most two passwords are hashed at once (64 MiB each), and a missing
+  account costs the same hash as a wrong password.
+- A session is created only if the account still has the password hash
+  that was just checked, in one statement in the store: a password change
+  that lands while a sign-in is in flight ends that sign-in too.
+
 **Store.** Per D5: one SQLite file under the data directory (`-data`,
 `HANDRAIL_DATA`; a volume in the container), created with owner-only
 permissions. The schema carries a version and is migrated forward on start;
@@ -303,6 +392,7 @@ In use:
 | Module | For | License |
 |---|---|---|
 | `golang.org/x/crypto` | argon2id | BSD-3-Clause |
+| `golang.org/x/term` | asking for a password at the terminal without showing it | BSD-3-Clause |
 | `modernc.org/sqlite` | the store; pure Go, so the binary stays static | BSD-3-Clause |
 
 `modernc.org/sqlite` is SQLite's C source translated to Go. With it, seven
@@ -343,11 +433,15 @@ server that answers `/healthz`.
   version, roots, intermediates, provisioners, CRL presence), with
   integration tests against the development CA (`make dev-test`, in the
   same CI job as `make dev-verify`).
-- Configuration loading.
-- The store: schema, migrations, and the `user` subcommands.
-- Accounts, sessions, CSRF, roles, the page shell, and a CA status page.
-- Integration tests for each of these against the Compose environment as
-  they arrive (the CI job is advisory at first).
+- Done: the store (`internal/store`, `internal/password`): schema,
+  migrations, and the `user` subcommands.
+- Done: configuration (`-data`, `-ca-url`, `-ca-fingerprint`, `-listen`,
+  `-public-url`), sign-in and sign-out, sessions, the form token and
+  `Origin` check, the Host check, the page shell from the mockup, and the
+  CA status page, with an integration test against the development CA.
+- Left for later milestones: the operator role has nothing to gate until
+  there is something to issue or revoke (M3); `-read-only` arrives with it.
+  handrail-ca serving TLS itself is deferred: a reverse proxy does it.
 
 **M2. View.**
 - The PostgreSQL inventory source and in-memory index, with fixtures captured
@@ -355,6 +449,11 @@ server that answers `/healthz`.
 - List page: filter by status and provisioner, search subject and SANs, sort,
   paginate; default view hides expired certificates. The CA's own admin
   certificates (section 3) are hidden unless asked for.
+- A "names in use" summary: every DNS name, IP address, email address and
+  URI in the certificates the CA has issued, grouped by parent domain or
+  network. step-ca cannot produce this list, and it is what an operator
+  needs before applying a CA-wide name policy ([ca-setup.md](ca-setup.md),
+  section 2): anything the policy leaves out stops renewing.
 - Detail page: parsed fields, extensions, fingerprints, chain, PEM and DER
   download, issuing provisioner, revocation record, and the certificate's
   note and labels from the store.

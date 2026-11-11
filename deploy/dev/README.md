@@ -31,6 +31,17 @@ certificates: long-lived, expiring within half an hour, two that expire five
 minutes after the seed, one renewed (two serials), one revoked, and two
 issued over ACME.
 
+## Running handrail-ca against it
+
+```sh
+make dev-up                       # prints the root fingerprint
+export HANDRAIL_DATA=$PWD/deploy/dev/.secrets/handrail-data
+export HANDRAIL_CA_URL=https://localhost:19000
+export HANDRAIL_CA_FINGERPRINT=<the fingerprint make dev-up printed>
+go run ./cmd/handrail-ca user add -role operator dev
+go run ./cmd/handrail-ca          # http://127.0.0.1:8080
+```
+
 ## Files
 
 - `compose.yaml`: the two services, pinned by digest.

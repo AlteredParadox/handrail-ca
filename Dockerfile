@@ -20,7 +20,9 @@
 # Dockerfile frontend the same way; refresh it with the base images.
 #
 #   docker build --build-arg VERSION=$(git describe --tags --always) -t handrail-ca .
-#   docker run -d -p 127.0.0.1:8080:8080 handrail-ca
+#
+# Running it needs the CA's address and root fingerprint, the address
+# browsers will use, a volume for /data and an account: see README.md.
 
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS build
 WORKDIR /src
@@ -40,12 +42,20 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH GOTOOLCHAIN="$(cat /toolchai
     go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
     -o /out/handrail-ca ./cmd/handrail-ca \
  && go version -m /out/handrail-ca | head -1
+# The final image has no shell to make a directory with, so the empty data
+# directory is made here and copied across with its owner.
+RUN mkdir /out/data
 
 FROM gcr.io/distroless/static-debian12:nonroot@sha256:afa5c872c891853ca7fcf1f12c3edb23f7eeef36189728842dd51042ff57f7ab
 COPY --from=build /out/handrail-ca /handrail-ca
+# handrail-ca's own store (accounts, sessions, history) lives in /data,
+# owned by the nonroot user (65532) and private to it. Mount a volume here
+# or the accounts are gone with the container.
+COPY --from=build --chown=65532:65532 --chmod=700 /out/data /data
+VOLUME /data
 # Inside a container the server must listen on all interfaces to be
 # reachable through the published port.
-ENV HANDRAIL_LISTEN=0.0.0.0:8080
+ENV HANDRAIL_LISTEN=0.0.0.0:8080 HANDRAIL_DATA=/data
 EXPOSE 8080
 # Exec form: the image has no shell. The binary probes its own /healthz.
 HEALTHCHECK --interval=60s --timeout=5s --start-period=20s --retries=3 \
