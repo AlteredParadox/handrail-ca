@@ -125,6 +125,12 @@ Things to know, each checked on the development CA:
   certificate of the CA, including a serial the CA never issued.
 - Before applying it to a CA that is in use, list what your ACME clients and
   other provisioners request; anything not allowed starts failing at once.
+  handrail-ca's "Names in use" page is that list, read from the
+  certificates the CA has already issued: every name, grouped by domain
+  and network. It cannot know of a name nobody has asked for yet, and with
+  only the certificates in date counted it will not show your admin's
+  subject, whose certificates last five minutes; choose "Every
+  certificate" to see it.
 
 After setting it, test both sides with the `step` CLI before relying on it:
 a certificate for an allowed name should be issued, and one for an outside

@@ -224,6 +224,7 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("POST /account/password", s.signedIn(s.changePassword))
 	mux.HandleFunc("GET /{$}", s.signedIn(s.listPage))
 	mux.HandleFunc("POST /refresh", s.signedIn(s.refreshInventory))
+	mux.HandleFunc("GET /names", s.signedIn(s.namesPage))
 	mux.HandleFunc("GET /certificates/{serial}", s.signedIn(s.detailPage))
 	mux.HandleFunc("GET /certificates/{serial}/{form}", s.signedIn(s.certificateFile))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {

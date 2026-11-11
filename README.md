@@ -9,8 +9,10 @@ whether a revocation list is published) and the list of every certificate
 it has issued, read from its database: by status, searchable, with the
 revoked and expired ones a click away. Each certificate has a page of its
 own: what it says, who issued it, whether and why it was revoked, and the
-certificate to download as PEM, DER or with its chain. Issuing and revoking
-are not built yet; the [build plan](docs/PLAN.md) has the order.
+certificate to download as PEM, DER or with its chain. A summary lists every
+name the CA's certificates carry, by domain and network, which is what a
+name policy on the CA has to allow. Issuing and revoking are not built yet;
+the [build plan](docs/PLAN.md) has the order.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.

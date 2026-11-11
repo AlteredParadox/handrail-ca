@@ -159,6 +159,18 @@ func TestScale(t *testing.T) {
 		}
 		t.Logf("query, %s: %s for %d rows", q.name, median(took).Round(100*time.Microsecond), len(res.Rows))
 	}
+	for _, view := range []View{ViewActive, ViewAll} {
+		var took []time.Duration
+		var usage NameUsage
+		for range 5 {
+			took = append(took, timed(func() { usage = snap.NamesInUse(view, now) }))
+		}
+		names := 0
+		for _, k := range usage.Kinds {
+			names += k.Names
+		}
+		t.Logf("names in use, view %q: %s for %d names in %d certificates", view, median(took).Round(100*time.Microsecond), names, usage.Certificates)
+	}
 	var ders []time.Duration
 	for i := range 5 {
 		c := snap.Certificates[(i+1)*len(snap.Certificates)/7]

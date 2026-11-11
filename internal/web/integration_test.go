@@ -129,7 +129,18 @@ func TestIntegrationPages(t *testing.T) {
 	wantBody(t, gone, `<span class="badge bad">Revoked</span>`, "<dt>Revoked</dt>", "<dt>Reason</dt>")
 	t.Logf("the revoked certificate's record: %s", regexp.MustCompile(`(?s)<h2>Revocation</h2>.*?</dl>`).FindString(gone.Body.String()))
 
-	// Counts, whatever they are by now: at least the seed's one revocation.
+	// The names in use, from the same rows: the seed's names under their
+	// domain and network. With every certificate counted, the CA's own
+	// admin certificates bring their subject, a single-label name that a
+	// policy has to allow (docs/ca-setup.md, section 2).
+	names := b.get("/names")
+	wantStatus(t, names, http.StatusOK)
+	wantBody(t, names, `<span class="strong">handrail.test</span>`, "web1.handrail.test", "git.handrail.test", "10.20.0.0/24", "10.20.0.20")
+	if strings.Contains(names.Body.String(), "gone.handrail.test") {
+		t.Error("a revoked certificate's name is among the names of certificates that are not revoked")
+	}
+	wantBody(t, b.get("/names?view=all"), "gone.handrail.test", `<span class="strong">Single-label names</span>`, ">step</a>")
+
 	if !regexp.MustCompile(`\d+ in all: .*[1-9]\d* revoked`).MatchString(page.Body.String()) {
 		t.Error("no certificate counts on the page")
 	}

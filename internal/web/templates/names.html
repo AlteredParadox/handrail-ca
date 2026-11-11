@@ -1,0 +1,97 @@
+<!--
+handrail-ca — a lightweight web UI for step-ca.
+Copyright (C) 2026 AlteredParadox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+{{define "content"}}
+{{$base := .Base}}
+{{with .Data}}
+<div class="page-head">
+<div>
+<h1>Names in use</h1>
+{{if .Read}}
+<p class="muted">Read from the CA's database {{.LastRead}}.</p>
+{{end}}
+</div>
+</div>
+
+{{if not .Read}}
+<section class="card">
+<h2>The certificates have not been read yet</h2>
+{{if .Problem}}<p class="problem">They could not be read from the CA's database: {{.Problem}}</p>
+{{else}}<p class="muted">handrail-ca has only just started. It reads the CA's database every few seconds; try again in a moment.</p>{{end}}
+<p class="muted">The <a href="{{$base}}/status">CA status</a> page says where they come from.</p>
+</section>
+{{else}}
+
+{{if .Problem}}
+<output class="stale">This summary is as the CA's database was {{.LastRead}}: the last attempt to read it again failed. Names in certificates issued since then are not counted. {{.Problem}}</output>
+{{end}}
+
+<section class="card">
+<p>Every name in {{if .All}}every certificate the CA has issued, ended or not{{else}}the certificates that are in date and not revoked{{end}}: {{.Certificates}} certificate{{if ne .Certificates 1}}s{{end}}. step-ca has no such list.</p>
+<p class="muted">It is what a name policy on the CA has to allow. The policy applies to every provisioner, and a name it leaves out stops being issued and renewed. Once a policy allows anything, a kind of name with no rule at all is refused, so each kind below needs at least one rule.</p>
+<nav class="views" aria-label="Which certificates">
+<a href="{{.ActiveURL}}"{{if not .All}} aria-current="true"{{end}}>In date and not revoked</a>
+<a href="{{.AllURL}}"{{if .All}} aria-current="true"{{end}}>Every certificate</a>
+</nav>
+</section>
+
+{{range .Kinds}}
+<section class="card flush">
+<h2>{{.Title}} <span class="sub">{{.Names}} name{{if ne .Names 1}}s{{end}}</span></h2>
+{{with .Note}}<p class="muted pad">{{.}}</p>{{end}}
+<div class="scroll">
+<table class="names">
+<thead>
+<tr><th scope="col">{{if .Column}}{{.Column}}{{else}}Names{{end}}</th><th scope="col" class="num">Names</th><th scope="col" class="num">Certificates</th></tr>
+</thead>
+<tbody>
+{{range .Groups}}
+<tr>
+<td>
+<details>
+<summary><span class="strong">{{.Label}}</span></summary>
+<ul class="names">
+{{range .Names}}<li><a class="mono small" href="{{.URL}}">{{.Value}}</a>{{if gt .Certificates 1}} <span class="sub">in {{.Certificates}} certificates</span>{{end}}</li>
+{{end}}
+{{if .MoreNames}}<li class="sub">and {{.MoreNames}} more, not shown</li>{{end}}
+</ul>
+</details>
+</td>
+<td class="num">{{.Count}}</td>
+<td class="num">{{.Certificates}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{if .MoreGroups}}<p class="list-note">{{.MoreGroups}} more group{{if ne .MoreGroups 1}}s are{{else}} is{{end}} not shown: these are the ones with the most certificates.</p>{{end}}
+</section>
+{{else}}
+<section class="card">
+<p class="empty">No names: there are no such certificates.</p>
+</section>
+{{end}}
+
+{{if .Wildcards}}
+<section class="card">
+<p>{{.Wildcards}} of the DNS names {{if ne .Wildcards 1}}are literal wildcards{{else}}is a literal wildcard{{end}}, such as *.internal.example in a certificate. A name policy refuses those unless wildcards are allowed as well.</p>
+</section>
+{{end}}
+{{end}}
+{{end}}
+{{end}}

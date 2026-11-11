@@ -3,9 +3,9 @@
 Status: 2026-11-11. Milestone 1 is built: sign-in and a CA status page, on
 a store of its own, against a development CA. Milestone 2 is under way: the
 certificate inventory is read from the CA's database and shown as a list,
-and each certificate has a page of its own with downloads; notes and
-labels, the names-in-use summary and the size measurement are next
-(section 6).
+and each certificate has a page of its own with downloads; the names in
+use are summarised and the inventory has been measured at 100,000
+certificates. Notes and labels are next (section 6).
 Section 2 records the decisions made so far.
 
 ## 1. What we are building
@@ -510,11 +510,20 @@ server that answers `/healthz`.
   still be the one that was listed; the inventory keeps summaries only. A
   row that is not a certificate has a page that says so and nothing to
   download. No JavaScript here either.
-- A "names in use" summary: every DNS name, IP address, email address and
-  URI in the certificates the CA has issued, grouped by parent domain or
-  network. step-ca cannot produce this list, and it is what an operator
+- Done: the "names in use" page, at `/names`: every DNS name, IP address,
+  email address and URI in the certificates that are in date and not
+  revoked (or, on request, in every certificate), and each common name
+  that is not among its certificate's names, since step-ca checks those
+  against a policy too. DNS names are grouped by the domain they are one
+  label under, which is what one `*.domain` rule covers; addresses by /24
+  or /64; email addresses by domain; URIs by scheme and host. Each name
+  links to its certificates in the list, and literal wildcards are
+  counted. step-ca cannot produce this list, and it is what an operator
   needs before applying a CA-wide name policy ([ca-setup.md](ca-setup.md),
-  section 2): anything the policy leaves out stops renewing.
+  section 2): anything the policy leaves out stops renewing. Every name
+  of a certificate is counted, however many it carries. The page shows
+  the hundred groups of each kind with the most certificates and two
+  hundred names of each group, and says what it left out.
 - The certificate's note and labels, from the store, on the detail page.
 - Done: measured with 100,000 synthetic rows; the table below. **No
   on-disk cache**: the first read takes seconds, not minutes, and the
@@ -525,20 +534,24 @@ server that answers `/healthz`.
   | --- | --- |
   | First read after start (list, fetch and parse everything) | 4.3 to 4.6 s |
   | Each later read, nothing new or a hundred new | 0.25 to 0.28 s |
-  | Memory the picture holds | 69 MB, about 690 bytes a certificate |
+  | Memory the picture holds | 73 MB, about 720 bytes a certificate |
   | The process, resident, after the first read | 157 MB |
   | The process, resident, at its highest, after a sign-in and list requests | 311 MB |
   | Default list (38,000 active, by expiry), the whole page | 0.09 to 0.10 s |
   | Everything by subject or by date issued, the whole page | 0.19 to 0.26 s |
   | Search for one name or serial, the whole page | 0.06 s |
   | One certificate read for its page | under 1 ms |
+  | Names in use, of the 38,000 active certificates | 0.08 s |
+  | Names in use, of all 100,000 (130,000 names) | 0.25 s |
 
   How it was measured: the development CA's PostgreSQL on the same
   machine (two cores of a 2016 Xeon), so nothing here includes a network;
   rows written straight into the tables with random 128-bit serials, one to
   three names each, six in ten expired, one in fifty revoked. The first
-  three lines are from the inventory alone (`TestScale`); the rest are the
-  built binary, with page times taken by curl.
+  three lines and the two for names in use are from the inventory alone
+  (`TestScale`); the rest are the built binary, with page times taken by
+  curl. The two resident figures were taken before the names summary
+  added about 30 bytes a certificate to the picture.
 
   What it says:
   - Every later read lists all the keys and reads the whole revocation
@@ -551,7 +564,7 @@ server that answers `/healthz`.
     lower-case subject is now kept, and the sort takes 0.16 s.
   - The process uses several times what the picture holds: Go lets the
     heap about double before it collects, and each sign-in's password hash
-    takes 64 MB for a moment. At 690 bytes a certificate, a CA with a few
+    takes 64 MB for a moment. At 720 bytes a certificate, a CA with a few
     thousand certificates has a picture of a few megabytes, and the
     password hash is then the larger part; that is arithmetic, not a
     measurement. Not measured: anything above 100,000 rows, a small CA's

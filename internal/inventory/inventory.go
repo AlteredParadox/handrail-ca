@@ -130,6 +130,12 @@ type Certificate struct {
 	// when sorted by subject, kept so that sorting does not rebuild it for
 	// every comparison.
 	subjectKey string
+	// hasCommonName says that Subject is the subject's common name, and
+	// not the whole subject shown for want of one.
+	hasCommonName bool
+	// moreNames are the names beyond maxNames, kept so that the summary of
+	// names in use leaves none out. Nil for nearly every certificate.
+	moreNames []Name
 }
 
 // Revocation is what the CA recorded when a certificate was revoked.
@@ -525,7 +531,9 @@ func summarise(row RawCertificate) *Certificate {
 	}
 	c.NotBefore, c.NotAfter = cert.NotBefore.UTC(), cert.NotAfter.UTC()
 	c.subjectKey = strings.ToLower(c.Subject)
-	c.Names, c.MoreNames = namesOf(cert)
+	c.hasCommonName = cert.Subject.CommonName != ""
+	c.Names, c.moreNames = namesOf(cert)
+	c.MoreNames = len(c.moreNames)
 	c.haystack = haystackOf(c, cert)
 	return c
 }
@@ -574,14 +582,15 @@ func provisionerOf(data []byte) Provisioner {
 	return Provisioner{ID: clip(record.Provisioner.ID), Name: clip(record.Provisioner.Name), Type: clip(record.Provisioner.Type)}
 }
 
-// namesOf lists a certificate's subject alternative names, the first
-// maxNames of them, and counts the rest.
-func namesOf(cert *x509.Certificate) (names []Name, more int) {
+// namesOf lists a certificate's subject alternative names: the first
+// maxNames of them, and the rest apart.
+func namesOf(cert *x509.Certificate) (names, more []Name) {
 	add := func(kind NameKind, value string) {
+		name := Name{Kind: kind, Value: clip(value)}
 		if len(names) < maxNames {
-			names = append(names, Name{Kind: kind, Value: clip(value)})
+			names = append(names, name)
 		} else {
-			more++
+			more = append(more, name)
 		}
 	}
 	for _, name := range cert.DNSNames {
