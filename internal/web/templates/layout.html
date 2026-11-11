@@ -37,7 +37,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </nav>
 <div class="who">
 <span class="mono">{{.CAHost}}</span>
-<span>{{.User.Username}} ({{.User.Role}})</span>
+<span><a href="{{.Base}}/account"{{if eq .Page "account.html"}} aria-current="page"{{end}}>{{.User.Username}}</a> ({{.User.Role}})</span>
 <form method="post" action="{{.Base}}/sign-out">
 <input type="hidden" name="form_token" value="{{.FormToken}}">
 <button type="submit" class="link">Sign out</button>

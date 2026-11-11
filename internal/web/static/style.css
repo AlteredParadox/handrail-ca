@@ -338,6 +338,16 @@ dd {
   padding: 0 20px 20px;
 }
 
+.notice {
+  background: var(--ok-ground);
+  border-radius: 6px;
+  display: block;
+  color: var(--ok);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 10px 12px;
+}
+
 .alarm {
   background: var(--bad);
   color: #ffffff;

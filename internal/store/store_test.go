@@ -703,3 +703,58 @@ func TestIsBusy(t *testing.T) {
 		t.Error("an error that is not SQLite's is called busy")
 	}
 }
+
+func TestChangePassword(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	alice, _ := s.AddUser(ctx, "alice", "old-hash", RoleOperator, t0)
+	bob, _ := s.AddUser(ctx, "bob", "old-hash", RoleViewer, t0)
+	a, b := HashToken([]byte("a")), HashToken([]byte("b"))
+	if err := s.CreateSession(ctx, alice.ID, "old-hash", a, t0, t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.CreateSession(ctx, bob.ID, "old-hash", b, t0, t0.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	later := t0.Add(time.Minute)
+
+	// Not with a hash the account does not have, nor for nobody, nor to
+	// nothing.
+	if err := s.ChangePassword(ctx, alice.ID, "some-other-hash", "new-hash", later); !errors.Is(err, ErrNotFound) {
+		t.Errorf("with the wrong old hash: %v, want ErrNotFound", err)
+	}
+	if err := s.ChangePassword(ctx, 9999, "old-hash", "new-hash", later); !errors.Is(err, ErrNotFound) {
+		t.Errorf("for an account that does not exist: %v, want ErrNotFound", err)
+	}
+	if err := s.ChangePassword(ctx, alice.ID, "old-hash", "", later); err == nil {
+		t.Error("accepted an empty hash")
+	}
+	if _, hash, _ := s.Credentials(ctx, "alice"); hash != "old-hash" {
+		t.Fatalf("a refused change altered the hash to %q", hash)
+	}
+	if _, err := s.Session(ctx, a, t0); err != nil {
+		t.Fatalf("a refused change ended alice's session: %v", err)
+	}
+
+	if err := s.ChangePassword(ctx, alice.ID, "old-hash", "new-hash", later); err != nil {
+		t.Fatal(err)
+	}
+	u, hash, _ := s.Credentials(ctx, "alice")
+	if hash != "new-hash" || !u.PasswordChangedAt.Equal(later) {
+		t.Errorf("after the change: %q, %v", hash, u.PasswordChangedAt)
+	}
+	if _, err := s.Session(ctx, a, t0); !errors.Is(err, ErrNotFound) {
+		t.Errorf("alice's session survived her password change: %v", err)
+	}
+	// Nobody else is touched, same old hash or not.
+	if _, hash, _ := s.Credentials(ctx, "bob"); hash != "old-hash" {
+		t.Errorf("bob's hash is now %q", hash)
+	}
+	if _, err := s.Session(ctx, b, t0); err != nil {
+		t.Errorf("bob's session ended with alice's change: %v", err)
+	}
+	// The same request again finds the old hash gone.
+	if err := s.ChangePassword(ctx, alice.ID, "old-hash", "third-hash", later); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a repeated change: %v, want ErrNotFound", err)
+	}
+}

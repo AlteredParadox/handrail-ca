@@ -143,8 +143,16 @@ type brokenStore struct {
 	*store.Store
 	historyErr, sessionErr, createErr, credentialsErr atomic.Pointer[error]
 	// beforeCreate runs between the password check and the session being
-	// created, where a concurrent `user passwd` could land.
-	beforeCreate func()
+	// created, where a concurrent `user passwd` could land. beforeChange
+	// runs at the same point of a change of password.
+	beforeCreate, beforeChange func()
+}
+
+func (b *brokenStore) ChangePassword(ctx context.Context, id int64, oldHash, newHash string, now time.Time) error {
+	if b.beforeChange != nil {
+		b.beforeChange()
+	}
+	return b.Store.ChangePassword(ctx, id, oldHash, newHash, now)
 }
 
 func (b *brokenStore) AppendHistory(ctx context.Context, e store.Event) error {
@@ -241,6 +249,7 @@ func newSite(t *testing.T, publicURL string, trustedProxies ...string) *site {
 	// The stand-in checked for accounts that do not exist: cheap, like the
 	// real ones here.
 	s.server.dummyHash = cheapHash("nobody has this password")
+	s.server.hash = func(pw string) (string, error) { return cheapHash(pw), nil }
 	return s
 }
 
@@ -527,7 +536,7 @@ func TestSignInAndOut(t *testing.T) {
 	wantRedirect(t, b.get("/"), "/status")
 	page := b.get("/status")
 	wantStatus(t, page, http.StatusOK)
-	wantBody(t, page, "alice (operator)", "Sign out", "ca.internal.example")
+	wantBody(t, page, ">alice</a> (operator)", "Sign out", "ca.internal.example")
 	if page.Header().Get("Cache-Control") != "no-store" {
 		t.Error("a signed-in page may be cached")
 	}
@@ -1098,7 +1107,7 @@ func TestStatusPage(t *testing.T) {
 	page := b.get("/status")
 	wantStatus(t, page, http.StatusOK)
 	wantBody(t, page,
-		"bob (viewer)", `aria-current="page"`,
+		">bob</a> (viewer)", `aria-current="page"`,
 		"Reachable", "https://ca.internal.example:9000", "0.30.2", "12:00:00 UTC",
 		"Example Root CA", "2035-11-11, in 9 years", grouped(ca.Fingerprint(s.ca.root)),
 		"Example Intermediate CA", "2029-11-11, in 3 years",
@@ -1457,6 +1466,227 @@ func TestStrangersCannotFillTheHistory(t *testing.T) {
 	if last := s.history()[0]; strings.Contains(last.Detail, "more like it") {
 		t.Errorf("the count was reported twice: %+v", last)
 	}
+}
+
+const newPassword = "a brand new password"
+
+// passwordForm is what the change-password form posts.
+func passwordForm(token, current, next, again string) url.Values {
+	return url.Values{"form_token": {token}, "current_password": {current}, "new_password": {next}, "new_password_again": {again}}
+}
+
+func TestAccountPage(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	wantRedirect(t, s.browser().get("/account"), "/sign-in")
+
+	b := s.browser()
+	wantRedirect(t, b.signIn("bob", bobPassword), "/")
+	page := b.get("/account")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page, "Your account", "<dd>bob</dd>", "<dd>viewer</dd>", "<dd>2026-11-11</dd>",
+		`action="/account/password"`, `autocomplete="new-password"`, `href="/account" aria-current="page"`)
+	if strings.Contains(page.Body.String(), "Password changed") {
+		t.Error("the page claims a change that did not happen")
+	}
+	// The link to it is on every signed-in page.
+	wantBody(t, b.get("/status"), `<a href="/account">bob</a> (viewer)`)
+}
+
+func TestChangeOwnPassword(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	ctx := context.Background()
+	here, elsewhere := s.browser(), s.browser()
+	wantRedirect(t, here.signIn("alice", alicePassword), "/")
+	wantRedirect(t, elsewhere.signIn("alice", alicePassword), "/")
+	oldCookie := here.cookies[sessionCookie]
+	_, oldHash, _ := s.store.Store.Credentials(ctx, "alice")
+	s.clock.advance(time.Hour / 2)
+
+	token := tokenIn(t, here.get("/account"))
+	rec := here.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword))
+	wantRedirect(t, rec, "/account?changed=1")
+
+	// This browser stays signed in, under a new session; the other does not.
+	if here.cookies[sessionCookie] == oldCookie || here.cookies[sessionCookie] == "" {
+		t.Error("the browser kept its old session token across the change")
+	}
+	page := here.get("/account?changed=1")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page, `<output class="notice">Password changed. Every other session of this account was signed out.</output>`)
+	wantRedirect(t, elsewhere.get("/status"), "/sign-in")
+	// The old cookie is dead even in this browser.
+	stale := s.browser()
+	stale.cookies[sessionCookie] = oldCookie
+	wantRedirect(t, stale.get("/status"), "/sign-in")
+
+	u, newHash, _ := s.store.Store.Credentials(ctx, "alice")
+	if newHash == oldHash || !u.PasswordChangedAt.Equal(s.clock.Now()) {
+		t.Errorf("stored hash changed: %v, at %v", newHash != oldHash, u.PasswordChangedAt)
+	}
+	wantStatus(t, s.browser().signIn("alice", alicePassword), http.StatusUnauthorized)
+	wantRedirect(t, s.browser().signIn("alice", newPassword), "/")
+
+	var change *store.Event
+	for _, e := range s.history() {
+		if e.Action == store.ActionUserPasswd {
+			change = &e
+			break
+		}
+	}
+	if change == nil || change.Actor != "alice" || change.Outcome != store.OutcomeOK || change.Remote != "10.20.0.5" {
+		t.Errorf("history = %+v", change)
+	}
+	for _, secret := range []string{alicePassword, newPassword, here.cookies[sessionCookie]} {
+		if strings.Contains(s.log.String(), secret) {
+			t.Error("the log contains a password or a session token")
+		}
+	}
+	// A viewer can change theirs as well.
+	v := s.browser()
+	wantRedirect(t, v.signIn("bob", bobPassword), "/")
+	wantRedirect(t, v.do(http.MethodPost, "/account/password", passwordForm(tokenIn(t, v.get("/account")), bobPassword, newPassword, newPassword)), "/account?changed=1")
+}
+
+func TestChangeOwnPasswordRefusals(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	ctx := context.Background()
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	token := tokenIn(t, b.get("/account"))
+	_, hash, _ := s.store.Store.Credentials(ctx, "alice")
+
+	tests := []struct {
+		name                 string
+		current, next, again string
+		status               int
+		want                 string
+	}{
+		{"entries differ", alicePassword, newPassword, newPassword + "x", http.StatusBadRequest, "The two entries of the new password differ."},
+		{"too short", alicePassword, "short", "short", http.StatusBadRequest, "The new password has 5 characters; the minimum is 12."},
+		{"too long", alicePassword, strings.Repeat("x", 1025), strings.Repeat("x", 1025), http.StatusBadRequest, "The new password is longer than 1024 bytes."},
+		{"same as current", alicePassword, alicePassword, alicePassword, http.StatusBadRequest, "The new password is the same as the current one."},
+		{"empty", alicePassword, "", "", http.StatusBadRequest, "the minimum is 12"},
+		{"wrong current", "not alice's password", newPassword, newPassword, http.StatusForbidden, "The current password is wrong."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := b.do(http.MethodPost, "/account/password", passwordForm(token, tt.current, tt.next, tt.again))
+			wantStatus(t, rec, tt.status)
+			wantBody(t, rec, tt.want, "Change password")
+			if _, now, _ := s.store.Store.Credentials(ctx, "alice"); now != hash {
+				t.Fatal("a refused change altered the password")
+			}
+			// Still signed in, with the same session.
+			wantStatus(t, b.get("/account"), http.StatusOK)
+		})
+	}
+	// Only the wrong current password was an attempt at anything.
+	if e := s.server.limiter.names["alice"]; e == nil || e.attempts != 1 {
+		t.Errorf("attempts counted for alice: %+v, want 1", e)
+	}
+	if last := s.history()[0]; last.Action != store.ActionUserPasswd || last.Outcome != store.OutcomeFailed || last.Detail != "wrong current password" {
+		t.Errorf("history = %+v", last)
+	}
+
+	// The form needs the session's own token and origin, like every other.
+	wantStatus(t, b.do(http.MethodPost, "/account/password", passwordForm("", alicePassword, newPassword, newPassword)), http.StatusForbidden)
+	b.origin = "https://evil.example"
+	wantStatus(t, b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword)), http.StatusForbidden)
+	if _, now, _ := s.store.Store.Credentials(ctx, "alice"); now != hash {
+		t.Fatal("a forged form changed the password")
+	}
+	// And a session: without one there is nothing to change.
+	wantRedirect(t, s.browser().do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword)), "/sign-in")
+}
+
+// The form must not be a second, unthrottled place to guess a password:
+// someone at a stolen session gets the same five tries as at the sign-in
+// page, out of the same allowance.
+func TestChangePasswordIsThrottledLikeSignIn(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	token := tokenIn(t, b.get("/account"))
+	for i := range limiterAttempts {
+		rec := b.do(http.MethodPost, "/account/password", passwordForm(token, fmt.Sprintf("guess number %d", i), newPassword, newPassword))
+		wantStatus(t, rec, http.StatusForbidden)
+	}
+	rec := b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword))
+	wantStatus(t, rec, http.StatusTooManyRequests)
+	wantBody(t, rec, "Too many wrong passwords")
+	if ok := s.browser().signIn("alice", alicePassword); ok.Code != http.StatusTooManyRequests {
+		t.Errorf("sign-in after five wrong guesses in the form: %d, want 429", ok.Code)
+	}
+	// The session itself carries on, and after the window the change works.
+	wantStatus(t, b.get("/status"), http.StatusOK)
+	s.clock.advance(limiterWindow)
+	wantRedirect(t, b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword)), "/account?changed=1")
+	if e := s.server.limiter.names["alice"]; e != nil {
+		t.Errorf("the count was kept after a successful change: %+v", e)
+	}
+}
+
+func TestChangePasswordWhenTheAccountChangesMeanwhile(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	ctx := context.Background()
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	token := tokenIn(t, b.get("/account"))
+
+	// `user passwd` lands between the check of the current password and
+	// the change: its password stands, this one is dropped.
+	s.store.beforeChange = func() {
+		if err := s.store.Store.SetPassword(ctx, "alice", cheapHash("set from the command line"), t0); err != nil {
+			t.Error(err)
+		}
+	}
+	rec := b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword))
+	wantStatus(t, rec, http.StatusConflict)
+	s.store.beforeChange = nil
+	wantStatus(t, s.browser().signIn("alice", newPassword), http.StatusUnauthorized)
+	wantRedirect(t, s.browser().signIn("alice", "set from the command line"), "/")
+}
+
+func TestChangePasswordStoreFailures(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	boom := errors.New("disk on fire")
+
+	// The password cannot be read: nothing changes, and it is an error
+	// page, not "wrong password".
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	token := tokenIn(t, b.get("/account"))
+	s.store.credentialsErr.Store(&boom)
+	wantStatus(t, b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword)), http.StatusInternalServerError)
+	s.store.credentialsErr.Store(nil)
+
+	// The new password cannot be hashed.
+	s.server.hash = func(string) (string, error) { return "", boom }
+	wantStatus(t, b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword)), http.StatusInternalServerError)
+	s.server.hash = func(pw string) (string, error) { return cheapHash(pw), nil }
+	wantRedirect(t, s.browser().signIn("alice", alicePassword), "/")
+
+	// The password changes but the new session cannot be opened: the
+	// browser is sent to sign in, with the new password.
+	s.store.createErr.Store(&boom)
+	rec := b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword))
+	wantRedirect(t, rec, "/sign-in")
+	s.store.createErr.Store(nil)
+	if _, ok := b.cookies[sessionCookie]; ok {
+		t.Error("the dead session's cookie was left in place")
+	}
+	wantRedirect(t, s.browser().signIn("alice", newPassword), "/")
+}
+
+func TestAccountPageUnderABasePath(t *testing.T) {
+	s := newSite(t, "https://tools.internal.example/handrail")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/handrail/")
+	page := b.get("/handrail/account")
+	wantBody(t, page, `action="/handrail/account/password"`, `href="/handrail/account"`)
+	rec := b.do(http.MethodPost, "/handrail/account/password", passwordForm(tokenIn(t, page), alicePassword, newPassword, newPassword))
+	wantRedirect(t, rec, "/handrail/account?changed=1")
+	wantStatus(t, b.get("/handrail/account?changed=1"), http.StatusOK)
 }
 
 // A proxy listed under the wrong address must not go unnoticed: the log
