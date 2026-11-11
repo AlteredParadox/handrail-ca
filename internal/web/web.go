@@ -33,6 +33,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -111,6 +112,11 @@ type server struct {
 	dummyHash string        // checked when the user does not exist
 	status    *statusCache
 	strangers strangerBudget
+
+	// unlisted are the peers already warned about as not being listed
+	// proxies (see clientAddr).
+	unlistedMu sync.Mutex
+	unlisted   map[netip.Addr]bool
 
 	// historyBroken is set while the last history write failed; every page
 	// then says that history is not being recorded.

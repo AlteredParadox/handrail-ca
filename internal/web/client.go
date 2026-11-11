@@ -38,8 +38,12 @@ const maxForwardedHops = 16
 //     of it and is never reached.
 //   - A connection from anywhere else is the client itself, and whatever
 //     X-Forwarded-For it sent is ignored. The exception is an https public
-//     URL with no trusted proxy configured: handrail-ca does not speak TLS,
-//     so the peer is a proxy nobody told us about.
+//     URL: handrail-ca does not speak TLS, so no browser reaches it
+//     directly there, and a peer that is not a listed proxy is most likely
+//     a proxy nobody told us about, or told us the wrong address for (in
+//     a container the proxy on the same machine arrives from the Docker
+//     bridge, not from 127.0.0.1). Its address is reported but not known,
+//     and the log says once what to add to -trusted-proxy.
 func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -51,7 +55,11 @@ func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 	}
 	peer = peer.Unmap()
 	if !s.trustedProxy(peer) {
-		return peer.String(), !(s.secure && len(s.opts.TrustedProxies) == 0)
+		if s.secure {
+			s.unlistedPeer(peer)
+			return peer.String(), false
+		}
+		return peer.String(), true
 	}
 	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
 	for i := len(hops) - 1; i >= 0 && i >= len(hops)-maxForwardedHops; i-- {
@@ -64,6 +72,28 @@ func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 		}
 	}
 	return peer.String(), false
+}
+
+// maxUnlistedPeers bounds how many distinct addresses unlistedPeer
+// remembers having warned about.
+const maxUnlistedPeers = 8
+
+// unlistedPeer logs, once per address, that requests are arriving under an
+// https public URL from an address that is not a listed proxy.
+func (s *server) unlistedPeer(peer netip.Addr) {
+	s.unlistedMu.Lock()
+	defer s.unlistedMu.Unlock()
+	if s.unlisted[peer] || len(s.unlisted) >= maxUnlistedPeers {
+		return
+	}
+	if s.unlisted == nil {
+		s.unlisted = map[netip.Addr]bool{}
+	}
+	s.unlisted[peer] = true
+	s.log.Warn("requests are arriving from an address that is not in -trusted-proxy (HANDRAIL_TRUSTED_PROXIES). "+
+		"If it is your reverse proxy, add it: until then visitors cannot be told apart, sign-in attempts are limited "+
+		"per user name only, and the history records this address for everyone",
+		"address", peer.String())
 }
 
 func (s *server) trustedProxy(addr netip.Addr) bool {

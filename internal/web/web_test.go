@@ -1210,6 +1210,10 @@ func TestOneVisitorCannotLockEveryoneOutBehindAProxy(t *testing.T) {
 		"undeclared proxy": newSite(t, "https://handrail.internal.example"),
 		// Declared, but it sends no usable X-Forwarded-For.
 		"proxy without the header": newSite(t, "https://handrail.internal.example", "10.20.0.5"),
+		// Declared under an address that is not the one it arrives from, as
+		// with 127.0.0.1 for a proxy that reaches a container over Docker's
+		// bridge.
+		"proxy listed under another address": newSite(t, "https://handrail.internal.example", "127.0.0.1"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			for range limiterAttempts + 3 {
@@ -1232,7 +1236,7 @@ func TestOneVisitorCannotLockEveryoneOutBehindAProxy(t *testing.T) {
 func TestForwardedHeaderIsIgnoredFromAnUntrustedPeer(t *testing.T) {
 	for name, s := range map[string]*site{
 		"no proxies configured": newSite(t, "http://127.0.0.1:8080"),
-		"peer is not the proxy": newSite(t, "https://handrail.internal.example", "10.20.9.0/24"),
+		"peer is not the proxy": newSite(t, "http://127.0.0.1:8080", "10.20.9.0/24"),
 	} {
 		t.Run(name, func(t *testing.T) {
 			for i := range limiterAttempts {
@@ -1254,6 +1258,7 @@ func TestClientAddr(t *testing.T) {
 	behind := newSite(t, "https://handrail.internal.example", "10.20.0.5", "fd00::/8").server
 	direct := newSite(t, "http://127.0.0.1:8080").server
 	undeclared := newSite(t, "https://handrail.internal.example").server
+	directWithProxies := newSite(t, "http://127.0.0.1:8080", "10.20.0.5").server
 	tests := []struct {
 		name         string
 		s            *server
@@ -1281,7 +1286,10 @@ func TestClientAddr(t *testing.T) {
 		{"junk at the right", behind, "10.20.0.5:5000", []string{"203.0.113.7, unknown"}, "10.20.0.5", false},
 		{"junk to the left is never reached", behind, "10.20.0.5:5000", []string{"<script>, 203.0.113.7"}, "203.0.113.7", true},
 		{"a header too long to walk", behind, "10.20.0.5:5000", []string{"203.0.113.7" + strings.Repeat(", 10.20.0.5", maxForwardedHops)}, "10.20.0.5", false},
-		{"not from the proxy", behind, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", true},
+		// Under https nothing but a proxy connects: an unlisted peer is
+		// taken for one, reported, and never believed about the header.
+		{"https, not from a listed proxy", behind, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", false},
+		{"http, not from a listed proxy", directWithProxies, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1362,5 +1370,50 @@ func TestStrangersCannotFillTheHistory(t *testing.T) {
 	wantStatus(t, s.browser().signIn("not a name", "x"), http.StatusUnauthorized)
 	if last := s.history()[0]; strings.Contains(last.Detail, "more like it") {
 		t.Errorf("the count was reported twice: %+v", last)
+	}
+}
+
+// A proxy listed under the wrong address must not go unnoticed: the log
+// names the address requests really come from, once, and what that address
+// says about its visitors is still not believed.
+func TestUnlistedProxyIsReportedOnce(t *testing.T) {
+	s := newSite(t, "https://handrail.internal.example", "127.0.0.1")
+	b := s.browser()
+	b.remote = "172.17.0.1:51234"
+	b.forwardedFor = "203.0.113.7"
+	for range 3 {
+		wantStatus(t, b.signIn("alice", "wrong"), http.StatusUnauthorized)
+	}
+	log := s.log.String()
+	if n := strings.Count(log, "not in -trusted-proxy"); n != 1 {
+		t.Errorf("the warning was logged %d times, want once", n)
+	}
+	if !strings.Contains(log, "address=172.17.0.1") {
+		t.Errorf("the warning does not name the address: %s", log)
+	}
+	if last := s.history()[0]; last.Remote != "172.17.0.1" {
+		t.Errorf("history has %q as the address; the header of an unlisted peer was believed", last.Remote)
+	}
+
+	// Only so many addresses are remembered, however many turn up.
+	for i := range 3 * maxUnlistedPeers {
+		b := s.browser()
+		b.remote = fmt.Sprintf("192.0.2.%d:40000", i+1)
+		b.get("/sign-in") // no warning: nothing asks who the visitor is
+		b.signIn("not a name", "x")
+	}
+	if n := strings.Count(s.log.String(), "not in -trusted-proxy"); n != maxUnlistedPeers {
+		t.Errorf("%d warnings for many addresses, want %d", n, maxUnlistedPeers)
+	}
+
+	// Nothing of the kind over plain HTTP on loopback, or from a listed proxy.
+	quiet := newSite(t, "http://127.0.0.1:8080")
+	quiet.browser().signIn("alice", "wrong")
+	listed := newSite(t, "https://handrail.internal.example", "10.20.0.5")
+	lb := listed.browser()
+	lb.forwardedFor = "203.0.113.7"
+	lb.signIn("alice", "wrong")
+	if strings.Contains(quiet.log.String()+listed.log.String(), "not in -trusted-proxy") {
+		t.Error("a warning was logged where the peer is as expected")
 	}
 }
