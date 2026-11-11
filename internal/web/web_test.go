@@ -1426,7 +1426,7 @@ func TestChangeOwnPassword(t *testing.T) {
 	}
 	page := here.get("/account?changed=1")
 	wantStatus(t, page, http.StatusOK)
-	wantBody(t, page, "Password changed. Every other session of this account was signed out.")
+	wantBody(t, page, `<output class="notice">Password changed. Every other session of this account was signed out.</output>`)
 	wantRedirect(t, elsewhere.get("/status"), "/sign-in")
 	// The old cookie is dead even in this browser.
 	stale := s.browser()

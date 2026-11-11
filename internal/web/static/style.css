@@ -341,6 +341,7 @@ dd {
 .notice {
   background: var(--ok-ground);
   border-radius: 6px;
+  display: block;
   color: var(--ok);
   font-size: 14px;
   font-weight: 500;

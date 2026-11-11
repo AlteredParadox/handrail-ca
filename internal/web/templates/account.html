@@ -33,7 +33,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 <form class="card" method="post" action="{{.Base}}/account/password">
 <h2>Change password</h2>
-{{if .Data.Changed}}<p class="notice" role="status">Password changed. Every other session of this account was signed out.</p>{{end}}
+{{if .Data.Changed}}<output class="notice">Password changed. Every other session of this account was signed out.</output>{{end}}
 {{with .Data.Problem}}<p class="problem" role="alert">{{.}}</p>{{end}}
 <input type="hidden" name="form_token" value="{{.FormToken}}">
 <input type="hidden" name="username" value="{{.User.Username}}" autocomplete="username">
