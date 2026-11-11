@@ -51,9 +51,33 @@ forms are accepted from, cookies are marked `Secure` for it, and a path in
 it (`https://tools.example/handrail`) serves everything under that path.
 Listening beyond loopback with no account is refused.
 
+The proxy has to do two things besides TLS: pass the visitor's `Host`
+header through unchanged, and set `X-Forwarded-For`. handrail-ca answers
+only requests addressed to the name in `-public-url`; nginx by default
+sends the backend's address as `Host` instead, and every page is then
+refused with 421 (the log says so, with the name it was asked for). The
+nginx configuration this was tried with:
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name handrail.internal.example;
+    ssl_certificate     /etc/nginx/handrail.crt;
+    ssl_certificate_key /etc/nginx/handrail.key;
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+```
+
+Other proxies have not been tried here. Caddy and Traefik pass `Host`
+through and set `X-Forwarded-For` unless configured otherwise; HAProxy
+passes `Host` through and needs `option forwardfor` for the second.
+
 Tell handrail-ca which address the proxy connects from with
-`-trusted-proxy`, and have the proxy set `X-Forwarded-For`, which nginx,
-Caddy, Traefik and HAProxy's HTTP mode can all do. Behind a proxy every
+`-trusted-proxy`. Behind a proxy every
 visitor arrives from the proxy's address; with this setting handrail-ca
 reads the visitor's own address from that header, counts sign-in attempts
 for each visitor separately, and records it in the history. The header is

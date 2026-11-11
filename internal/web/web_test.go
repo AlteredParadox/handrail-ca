@@ -963,6 +963,54 @@ func TestOnlyThePublicHostIsAnswered(t *testing.T) {
 	}
 }
 
+// A reverse proxy that does not pass the visitor's Host header on makes
+// every page a 421. The log has to say why, once, and must not become a
+// place where whoever sends requests can write as much as they like.
+func TestRefusedHostIsExplainedInTheLog(t *testing.T) {
+	s := newSite(t, "https://handrail.internal.example")
+	b := s.browser()
+	b.host = "127.0.0.1:8080" // what nginx sends by default: the backend's address
+	for range 3 {
+		wantStatus(t, b.get("/sign-in"), http.StatusMisdirectedRequest)
+	}
+	log := s.log.String()
+	if n := strings.Count(log, "refused a request addressed to a host name"); n != 1 {
+		t.Fatalf("the refusal was logged %d times, want once: %s", n, log)
+	}
+	for _, want := range []string{"asked_for=127.0.0.1:8080", "answering_only=handrail.internal.example", "proxy_set_header Host"} {
+		if !strings.Contains(log, want) {
+			t.Errorf("the log line lacks %q: %s", want, log)
+		}
+	}
+
+	// Many different names, one of them very long: a bounded number of
+	// lines, each of bounded length.
+	for i := range 3 * maxDistinctWarnings {
+		b.host = fmt.Sprintf("name-%d.example", i)
+		b.get("/")
+	}
+	b.host = strings.Repeat("x", 5000) + ".example"
+	b.get("/")
+	log = s.log.String()
+	if n := strings.Count(log, "refused a request addressed to a host name"); n != maxDistinctWarnings {
+		t.Errorf("%d refusals logged, want %d", n, maxDistinctWarnings)
+	}
+	if strings.Contains(log, strings.Repeat("x", 200)) {
+		t.Error("a host name was logged at full length")
+	}
+	if got := clipHost(strings.Repeat("x", 5000)); len(got) > 110 {
+		t.Errorf("clipHost kept %d bytes", len(got))
+	}
+	// The probe, which is answered under any name, is not a refusal.
+	quiet := newSite(t, "https://handrail.internal.example")
+	qb := quiet.browser()
+	qb.host = "127.0.0.1:8080"
+	wantStatus(t, qb.get("/healthz"), http.StatusOK)
+	if strings.Contains(quiet.log.String(), "refused a request") {
+		t.Error("the health probe was logged as a refusal")
+	}
+}
+
 // A public URL written with its scheme's default port, or in capitals, is
 // still the address browsers send: no port, lower case.
 func TestPublicURLIsNormalized(t *testing.T) {
@@ -1396,14 +1444,14 @@ func TestUnlistedProxyIsReportedOnce(t *testing.T) {
 	}
 
 	// Only so many addresses are remembered, however many turn up.
-	for i := range 3 * maxUnlistedPeers {
+	for i := range 3 * maxDistinctWarnings {
 		b := s.browser()
 		b.remote = fmt.Sprintf("192.0.2.%d:40000", i+1)
 		b.get("/sign-in") // no warning: nothing asks who the visitor is
 		b.signIn("not a name", "x")
 	}
-	if n := strings.Count(s.log.String(), "not in -trusted-proxy"); n != maxUnlistedPeers {
-		t.Errorf("%d warnings for many addresses, want %d", n, maxUnlistedPeers)
+	if n := strings.Count(s.log.String(), "not in -trusted-proxy"); n != maxDistinctWarnings {
+		t.Errorf("%d warnings for many addresses, want %d", n, maxDistinctWarnings)
 	}
 
 	// Nothing of the kind over plain HTTP on loopback, or from a listed proxy.
