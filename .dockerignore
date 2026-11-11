@@ -1,0 +1,32 @@
+# Only what the Go build needs reaches the builder: sources, go.mod/go.sum,
+# the embedded front-end, LICENSE and THIRD_PARTY_LICENSES.md (legal.go).
+.git
+.github
+.claude
+data
+dist
+bin
+docs
+handrail-ca
+*.db
+*.db-*
+*.test
+coverage.out
+gpt_review_*.md
+sonar-project.properties
+# Local secrets never reach a (possibly remote) builder.
+.env
+.env.*
+*.pem
+*.key
+*.jwk
+.ssh
+id_*
+secret
+.agents
+.codex
+.aws
+.docker
+.gnupg
+.netrc
+.step
