@@ -229,6 +229,21 @@ Neither limits revocation: any JWK provisioner can revoke any serial. The
 decrypted key lives only in memory. Tokens are minted per request with a
 random `jti` and a one-minute lifetime, and are never logged.
 
+- *Issue:* the CSR is parsed and shown back (subject, SANs, key type) for
+  confirmation before anything is signed; the token is built from exactly
+  what was shown. The token subject is the CSR's common name, or for a CSR
+  without one its first SAN (DNS names first, then IP addresses, email
+  addresses, URIs); a CSR with neither is refused. Because the CA takes the
+  certificate's common name from the token, the confirmation step shows the
+  common name the certificate will carry, including when it was filled in
+  from a SAN. Requested validity is bounded by the provisioner's claims
+  before the request is sent.
+- *Revoke:* offered only on certificates in the inventory, behind a
+  confirmation that names the certificate, with a reason code. The page says
+  what passive revocation means and whether the CA publishes a CRL. After a
+  timeout or an ambiguous answer, the revocation table is re-read before
+  anything is retried.
+
 **Access to handrail-ca.** Per D2: local accounts, argon2id, login rate
 limiting, server-side sessions (random 256-bit cookie, `HttpOnly`,
 `SameSite=Strict`, `Secure` behind TLS), a CSRF token plus `Origin` check on
