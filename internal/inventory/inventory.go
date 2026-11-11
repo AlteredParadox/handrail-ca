@@ -29,6 +29,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -219,9 +220,14 @@ type Snapshot struct {
 	// Certificates are sorted by the end of their validity, latest first;
 	// unreadable rows come last.
 	Certificates []*Certificate
+	bySerial     map[string]*Certificate
 	revoked      map[string]*Revocation
 	window       time.Duration
 }
+
+// Certificate returns the summary of the certificate with a serial (in
+// decimal, the CA's key for it), nil if the inventory has none.
+func (s *Snapshot) Certificate(serial string) *Certificate { return s.bySerial[serial] }
 
 // Revocation returns the revocation recorded for a serial, nil if none.
 func (s *Snapshot) Revocation(serial string) *Revocation { return s.revoked[serial] }
@@ -335,8 +341,48 @@ func (inv *Inventory) Refresh(ctx context.Context) error {
 	}
 	state.LoadedAt, state.Problem, state.RevocationsKnown, state.OrphanRevocations = attempted, "", true, orphans
 	inv.certs = certs
-	inv.current = &Snapshot{State: state, Certificates: sorted(certs), revoked: revoked, window: inv.window}
+	inv.current = &Snapshot{State: state, Certificates: sorted(certs), bySerial: certs, revoked: revoked, window: inv.window}
 	return nil
+}
+
+// Errors of DER.
+var (
+	// ErrNotFound: the inventory has no certificate with that serial.
+	ErrNotFound = errors.New("no such certificate in the inventory")
+	// ErrUnreadable: there is a row with that serial, but what is stored
+	// in it is not a certificate, or not that certificate.
+	ErrUnreadable = errors.New("the stored value is not that certificate")
+)
+
+// DER returns a certificate as the CA stored it, for showing it in full
+// and for downloading. Only certificates of the inventory can be asked
+// for: the serial has to be one the last read listed. What comes back is
+// checked again, since it is fetched again: it must parse and carry the
+// serial it was asked for by.
+func (inv *Inventory) DER(ctx context.Context, serial string) ([]byte, error) {
+	known := inv.Snapshot().Certificate(serial)
+	if known == nil {
+		return nil, ErrNotFound
+	}
+	if known.Problem != "" {
+		return nil, fmt.Errorf("%w: %s", ErrUnreadable, known.Problem)
+	}
+	rows, err := inv.src.Certificates(ctx, []string{serial})
+	if err != nil {
+		return nil, fmt.Errorf("reading the certificate: %w", err)
+	}
+	for _, row := range rows {
+		if row.Serial != serial {
+			continue
+		}
+		cert, err := x509.ParseCertificate(row.DER)
+		if err != nil || cert.SerialNumber == nil || cert.SerialNumber.String() != serial {
+			return nil, ErrUnreadable
+		}
+		return row.DER, nil
+	}
+	// Listed a moment ago, gone now.
+	return nil, ErrNotFound
 }
 
 // read builds the next picture from the Source and the summaries already

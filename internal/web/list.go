@@ -180,7 +180,9 @@ type listRow struct {
 	// Serial is the hexadecimal serial shortened for the column; SerialFull
 	// the whole of it.
 	Serial, SerialFull string
-	Problem            string
+	// URL is the certificate's own page.
+	URL     string
+	Problem string
 }
 
 // statusLook is how each status is shown.
@@ -310,7 +312,9 @@ func (s *server) fillPage(data *listData, q listQuery, rows []inventory.Row, now
 		data.NextURL = q.with(func(c *listQuery) { c.Page = page + 1 }).href(s.base)
 	}
 	for _, row := range rows[start:end] {
-		data.Rows = append(data.Rows, newListRow(row, now))
+		out := newListRow(row, now)
+		out.URL = s.base + "/certificates/" + url.PathEscape(row.Serial)
+		data.Rows = append(data.Rows, out)
 	}
 }
 

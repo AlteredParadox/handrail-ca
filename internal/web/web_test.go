@@ -71,6 +71,7 @@ func (c *clock) advance(d time.Duration) {
 // error.
 type fakeCA struct {
 	root, inter *x509.Certificate
+	inters      []*x509.Certificate // nil means inter alone
 	published   []*x509.Certificate // nil means the root
 	provs       []ca.Provisioner
 	crl         ca.CRL
@@ -99,6 +100,9 @@ func (f *fakeCA) Roots(context.Context) ([]*x509.Certificate, error) {
 	return []*x509.Certificate{f.root}, f.rootsErr
 }
 func (f *fakeCA) Intermediates(context.Context) ([]*x509.Certificate, error) {
+	if f.inters != nil {
+		return f.inters, f.intersErr
+	}
 	return []*x509.Certificate{f.inter}, f.intersErr
 }
 func (f *fakeCA) Provisioners(context.Context) ([]ca.Provisioner, error) { return f.provs, f.provsErr }

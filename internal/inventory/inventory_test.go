@@ -685,3 +685,80 @@ func waitFor(t *testing.T, ok func() bool) {
 	}
 	t.Fatal("timed out waiting")
 }
+
+func TestDER(t *testing.T) {
+	f, src := loadFixture(t)
+	src.add(RawCertificate{Serial: "5005", DER: []byte("junk")})
+	now := f.Captured
+	inv := newInventory(src, &now)
+	ctx := context.Background()
+
+	// Nothing can be fetched that the inventory has not listed.
+	if _, err := inv.DER(ctx, f.Certificates[0].Serial); !errors.Is(err, ErrNotFound) {
+		t.Errorf("before the first read: %v", err)
+	}
+	if err := inv.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	snap := inv.Snapshot()
+	web1 := bySubject(snap)["web1.handrail.test"][0]
+	if got := snap.Certificate(web1.Serial); got != web1 {
+		t.Error("Certificate(serial) is not the summary in the list")
+	}
+	if snap.Certificate("12345") != nil || snap.Certificate("") != nil {
+		t.Error("a summary out of nowhere")
+	}
+
+	der, err := inv.DER(ctx, web1.Serial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil || cert.Subject.CommonName != "web1.handrail.test" || cert.SerialNumber.String() != web1.Serial {
+		t.Fatalf("DER is not web1's certificate: %v", err)
+	}
+
+	for _, serial := range []string{"12345", "", "not-a-serial", web1.Serial + "0", "' OR 1=1 --"} {
+		if _, err := inv.DER(ctx, serial); !errors.Is(err, ErrNotFound) {
+			t.Errorf("DER(%q) = %v, want ErrNotFound", serial, err)
+		}
+	}
+	// A row that is not a certificate: said so, with the reason.
+	if _, err := inv.DER(ctx, "5005"); !errors.Is(err, ErrUnreadable) || !strings.Contains(err.Error(), "is not a certificate") {
+		t.Errorf("DER of an unreadable row: %v", err)
+	}
+
+	// What is fetched is checked again. If the row now holds something
+	// else than the certificate that was listed, it is not handed out.
+	src.mu.Lock()
+	other := bySubject(snap)["web2.handrail.test"][0]
+	swapped := src.certs[other.Serial]
+	swapped.Serial = web1.Serial
+	original := src.certs[web1.Serial]
+	src.certs[web1.Serial] = swapped
+	src.mu.Unlock()
+	if _, err := inv.DER(ctx, web1.Serial); !errors.Is(err, ErrUnreadable) {
+		t.Errorf("another certificate stored under the serial: %v, want ErrUnreadable", err)
+	}
+	src.mu.Lock()
+	src.certs[web1.Serial] = RawCertificate{Serial: web1.Serial, DER: []byte("junk")}
+	src.mu.Unlock()
+	if _, err := inv.DER(ctx, web1.Serial); !errors.Is(err, ErrUnreadable) {
+		t.Errorf("junk stored under the serial: %v, want ErrUnreadable", err)
+	}
+	// The row has gone since it was listed.
+	src.mu.Lock()
+	delete(src.certs, web1.Serial)
+	src.mu.Unlock()
+	if _, err := inv.DER(ctx, web1.Serial); !errors.Is(err, ErrNotFound) {
+		t.Errorf("a row that has gone: %v, want ErrNotFound", err)
+	}
+	// The database cannot be asked.
+	src.mu.Lock()
+	src.certs[web1.Serial] = original
+	src.certsErr = errors.New("connection refused")
+	src.mu.Unlock()
+	if _, err := inv.DER(ctx, web1.Serial); err == nil || errors.Is(err, ErrNotFound) || errors.Is(err, ErrUnreadable) || !strings.Contains(err.Error(), "connection refused") {
+		t.Errorf("with the database down: %v", err)
+	}
+}

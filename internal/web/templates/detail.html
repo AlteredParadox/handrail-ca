@@ -1,0 +1,137 @@
+<!--
+handrail-ca — a lightweight web UI for step-ca.
+Copyright (C) 2026 AlteredParadox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+{{define "content"}}
+{{$base := .Base}}
+{{with .Data}}
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$base}}/">Certificates</a> <span aria-hidden="true">/</span> <span>{{.Title}}</span></nav>
+
+<div class="page-head">
+<div>
+<div class="title"><h1>{{.Title}}</h1><span class="badge {{.Badge}}">{{.StatusLabel}}</span></div>
+{{with .Summary}}<p class="muted">{{.}}</p>{{end}}
+</div>
+{{if not .Problem}}
+<div class="actions">
+<a class="button" href="{{$base}}/certificates/{{.Serial}}/pem">Download PEM</a>
+<a class="button" href="{{$base}}/certificates/{{.Serial}}/chain">Download chain</a>
+<a class="button" href="{{$base}}/certificates/{{.Serial}}/der">Download DER</a>
+</div>
+{{end}}
+</div>
+
+{{if .Problem}}
+<section class="card">
+<h2>This row is not a certificate</h2>
+<p class="problem">The CA's database has a row under this serial number that could not be read as a certificate: {{.Problem}}</p>
+<dl>
+<dt>Row key</dt><dd class="mono small">{{.Serial}}</dd>
+{{if .Provisioner}}<dt>Provisioner</dt><dd>{{.Provisioner}} <span class="sub">{{.ProvisionerType}}</span></dd>{{end}}
+</dl>
+<p class="muted">handrail-ca shows it so that it is not silently missing from the list. It cannot say whether the CA issued a certificate with this serial number.</p>
+</section>
+{{else}}
+
+{{if not .RevocationsKnown}}
+<output class="stale">The CA's revocation records have not been read, so this page cannot say whether this certificate has been revoked. The <a href="{{$base}}/status">CA status</a> page says why.</output>
+{{end}}
+
+<div class="grid pair">
+
+<section class="card">
+<h2>Subject and names</h2>
+<dl>
+<dt>Common name</dt><dd>{{if .CommonName}}{{.CommonName}}{{else}}<span class="muted">None</span>{{end}}</dd>
+<dt>Subject</dt><dd>{{if .Subject}}{{.Subject}}{{else}}<span class="muted">Empty</span>{{end}}</dd>
+{{range .Names}}
+<dt>{{.Label}}</dt><dd><ul class="names">{{range .Values}}<li class="mono small">{{.}}</li>{{end}}</ul>{{if .More}}<div class="sub">and {{.More}} more, in the downloaded certificate</div>{{end}}</dd>
+{{else}}
+<dt>Other names</dt><dd><span class="muted">None</span></dd>
+{{end}}
+</dl>
+</section>
+
+<section class="card">
+<h2>Validity</h2>
+<dl>
+<dt>Not before</dt><dd>{{.NotBefore}}</dd>
+<dt>Not after</dt><dd>{{.NotAfter}}</dd>
+<dt>Lifetime</dt><dd>{{.Lifetime}}</dd>
+</dl>
+{{if .Total}}<progress max="{{.Total}}" value="{{.Used}}" aria-label="How much of the lifetime has passed"></progress>{{end}}
+</section>
+
+<section class="card">
+<h2>Issuance</h2>
+<dl>
+<dt>Provisioner</dt><dd>{{if .Provisioner}}{{.Provisioner}} <span class="sub">{{.ProvisionerType}}</span>{{else}}<span class="muted">Not recorded by the CA</span>{{end}}</dd>
+<dt>Issuer</dt><dd>{{.Issuer}}</dd>
+<dt>Serial (hex)</dt><dd class="mono small">{{.SerialHex}}</dd>
+<dt>Serial (decimal)</dt><dd class="mono small">{{.SerialDecimal}}</dd>
+</dl>
+</section>
+
+<section class="card">
+<h2>Key and extensions</h2>
+<dl>
+<dt>Public key</dt><dd>{{.PublicKey}}</dd>
+<dt>Signature</dt><dd>{{.Signature}}</dd>
+<dt>Key usage</dt><dd>{{if .KeyUsage}}{{.KeyUsage}}{{else}}<span class="muted">None stated</span>{{end}}</dd>
+<dt>Extended usage</dt><dd>{{if .ExtendedUsage}}{{.ExtendedUsage}}{{else}}<span class="muted">None stated</span>{{end}}</dd>
+<dt>Authority</dt><dd>{{.Authority}}</dd>
+<dt>SHA-256</dt><dd class="mono small">{{.SHA256}}</dd>
+<dt>Extensions</dt><dd><ul class="names">{{range .Extensions}}<li>{{if .Name}}{{.Name}} <span class="sub mono">{{.OID}}</span>{{else}}<span class="mono small">{{.OID}}</span>{{end}}{{if .Critical}} <span class="sub">critical</span>{{end}}</li>{{else}}<li class="muted">None</li>{{end}}</ul></dd>
+</dl>
+</section>
+
+</div>
+{{end}}
+
+<section class="card">
+<div class="card-head">
+<h2>Revocation</h2>
+{{if .Revocation}}<span class="badge bad">Revoked</span>
+{{else if .RevocationsKnown}}<span class="badge ok">Not revoked</span>
+{{else}}<span class="badge unknown">Not known</span>{{end}}
+</div>
+{{with .Revocation}}
+{{if .Problem}}
+<p class="problem">The CA has a revocation record for this serial number, so it treats the certificate as revoked, but the record could not be read: {{.Problem}}</p>
+{{else}}
+<dl>
+<dt>Revoked</dt><dd>{{if .When}}{{.When}}{{else}}<span class="muted">Time not recorded</span>{{end}}</dd>
+<dt>Reason</dt><dd>{{.Reason}}{{with .Detail}} <span class="sub">“{{.}}”</span>{{end}}</dd>
+<dt>How</dt><dd>{{.How}}</dd>
+{{with .By}}<dt>Provisioner</dt><dd>{{.}}</dd>{{end}}
+</dl>
+{{end}}
+<p class="muted">The CA will not renew a revoked certificate. Whether systems that trust it learn of the revocation depends on the CA publishing a revocation list; the <a href="{{$base}}/status">CA status</a> page says whether it does.</p>
+{{else}}
+{{if .RevocationsKnown}}<p class="muted">The CA has no revocation record for this certificate{{with .LastRead}}, as of {{.}}{{end}}.</p>
+{{else}}<p class="problem">The CA's revocation records have not been read. This certificate may have been revoked.</p>{{end}}
+{{end}}
+</section>
+
+{{with .PEM}}
+<section class="card">
+<h2>Certificate (PEM)</h2>
+<pre class="pem">{{.}}</pre>
+</section>
+{{end}}
+{{end}}
+{{end}}
