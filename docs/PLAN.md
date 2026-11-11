@@ -299,8 +299,15 @@ As built in milestone 1:
   password check starts, so guesses sent at the same time cannot outrun the
   limit, and a successful sign-in gives its attempt back. The address is
   the visitor's own only where that can be known (next point). A known
-  user name can be kept locked out by someone who keeps failing on it; that
-  is the price of any lockout. Names and addresses are counted in two
+  user name can be kept locked out by someone who keeps failing on it, the
+  right password refused with the wrong ones; that is the price of a
+  limit per name, and the README says how to live with it (limit who can
+  reach the page, a spare operator account with an unguessable name, a
+  restart clears the counts, `step ca revoke` works regardless). A
+  mitigation in the code would be a device cookie: a browser that has
+  signed in as a user before gets its own allowance for that name, apart
+  from the one strangers can use up. Not built; to be decided before
+  revoking through the UI ships (M3). Names and addresses are counted in two
   bounded tables, and a full table never drops a count that is still
   running. With the table of names full, a name not yet in it is refused:
   that limit is the one that bounds guessing at an account. With the table

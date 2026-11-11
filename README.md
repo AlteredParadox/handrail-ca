@@ -91,6 +91,24 @@ the user name. Sessions end after an hour unused or twelve hours in all.
 Each user name, and each visitor's address where it is known, gets five
 sign-in attempts in five minutes; a successful sign-in does not count.
 
+**A user name can be locked out by someone else.** The limit per name
+counts attempts on that name from anywhere. After five wrong passwords for
+`alice`, every sign-in as `alice` is refused, the right password included,
+until five minutes after the first of them; someone who knows the name and
+can reach the sign-in page can repeat that for as long as they like. This
+is what stops password guessing, and its cost. Sessions already open are
+not affected. Plan for it:
+
+- Limit who can reach the sign-in page: a VPN, or an address allow-list on
+  the reverse proxy. For a tool beside a CA this is worth doing anyway.
+- Keep a second operator account under a name nobody would guess. The
+  sign-in page answers the same for a name that exists and one that does
+  not, so a name is only known to those you tell.
+- The counts are in the running server's memory. Restarting handrail-ca
+  clears them; `user passwd` does not.
+- Nothing about the CA depends on handrail-ca. If you are locked out when
+  it matters, `step ca revoke` on the CA still works.
+
 ### As a container
 
 ```sh
