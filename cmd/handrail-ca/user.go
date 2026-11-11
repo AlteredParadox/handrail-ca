@@ -84,16 +84,16 @@ func userCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 	}
 	defer st.Close()
 
-	u := userAdmin{ctx: ctx, store: st, stdin: stdin, stdout: stdout, stderr: stderr, now: time.Now()}
+	u := userAdmin{store: st, stdin: stdin, stdout: stdout, stderr: stderr, now: time.Now()}
 	switch verb {
 	case "add":
-		err = u.add(fs.Arg(0), *role, *passwordFile)
+		err = u.add(ctx, fs.Arg(0), *role, *passwordFile)
 	case "passwd":
-		err = u.passwd(fs.Arg(0), *passwordFile)
+		err = u.passwd(ctx, fs.Arg(0), *passwordFile)
 	case "remove":
-		err = u.remove(fs.Arg(0))
+		err = u.remove(ctx, fs.Arg(0))
 	case "list":
-		err = u.list()
+		err = u.list(ctx)
 	}
 	if err != nil {
 		fmt.Fprintf(stderr, "handrail-ca user %s: %v\n", verb, err)
@@ -103,14 +103,13 @@ func userCommand(ctx context.Context, args []string, stdin io.Reader, stdout, st
 }
 
 type userAdmin struct {
-	ctx            context.Context
 	store          *store.Store
 	stdin          io.Reader
 	stdout, stderr io.Writer
 	now            time.Time
 }
 
-func (u userAdmin) add(name, roleName, passwordFile string) error {
+func (u userAdmin) add(ctx context.Context, name, roleName, passwordFile string) error {
 	role, err := store.ParseRole(roleName)
 	if err != nil {
 		return err
@@ -129,21 +128,21 @@ func (u userAdmin) add(name, roleName, passwordFile string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := u.store.AddUser(u.ctx, name, hash, role, u.now); err != nil {
+	if _, err := u.store.AddUser(ctx, name, hash, role, u.now); err != nil {
 		return err
 	}
-	u.record(store.ActionUserAdd, fmt.Sprintf("%s (%s)", name, role))
+	u.record(ctx, store.ActionUserAdd, fmt.Sprintf("%s (%s)", name, role))
 	fmt.Fprintf(u.stdout, "Added %s %s.\n", role, name)
 	u.show(pw, generated)
 	return nil
 }
 
-func (u userAdmin) passwd(name, passwordFile string) error {
+func (u userAdmin) passwd(ctx context.Context, name, passwordFile string) error {
 	name, err := store.NormalizeUsername(name)
 	if err != nil {
 		return err
 	}
-	if _, _, err := u.store.Credentials(u.ctx, name); err != nil {
+	if _, _, err := u.store.Credentials(ctx, name); err != nil {
 		return notFound(err, name)
 	}
 	pw, generated, err := u.password(passwordFile)
@@ -154,30 +153,30 @@ func (u userAdmin) passwd(name, passwordFile string) error {
 	if err != nil {
 		return err
 	}
-	if err := u.store.SetPassword(u.ctx, name, hash, u.now); err != nil {
+	if err := u.store.SetPassword(ctx, name, hash, u.now); err != nil {
 		return notFound(err, name)
 	}
-	u.record(store.ActionUserPasswd, name)
+	u.record(ctx, store.ActionUserPasswd, name)
 	fmt.Fprintf(u.stdout, "Changed the password of %s and signed them out everywhere.\n", name)
 	u.show(pw, generated)
 	return nil
 }
 
-func (u userAdmin) remove(name string) error {
+func (u userAdmin) remove(ctx context.Context, name string) error {
 	name, err := store.NormalizeUsername(name)
 	if err != nil {
 		return err
 	}
-	if err := u.store.RemoveUser(u.ctx, name); err != nil {
+	if err := u.store.RemoveUser(ctx, name); err != nil {
 		return notFound(err, name)
 	}
-	u.record(store.ActionUserRemove, name)
+	u.record(ctx, store.ActionUserRemove, name)
 	fmt.Fprintf(u.stdout, "Removed %s. Their history is kept.\n", name)
 	return nil
 }
 
-func (u userAdmin) list() error {
-	users, err := u.store.Users(u.ctx)
+func (u userAdmin) list(ctx context.Context) error {
+	users, err := u.store.Users(ctx)
 	if err != nil {
 		return err
 	}
@@ -234,8 +233,8 @@ func (u userAdmin) show(pw string, generated bool) {
 // record writes the change to the history. Per the plan's audit rule a
 // history that cannot be written does not undo or block the change: it is
 // reported, loudly, and the command still succeeds.
-func (u userAdmin) record(action, detail string) {
-	err := u.store.AppendHistory(u.ctx, store.Event{
+func (u userAdmin) record(ctx context.Context, action, detail string) {
+	err := u.store.AppendHistory(ctx, store.Event{
 		At: u.now, Actor: store.ActorCommandLine, Action: action, Outcome: store.OutcomeOK, Detail: detail,
 	})
 	if err != nil {
