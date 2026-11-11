@@ -41,7 +41,7 @@ make notices        # regenerate THIRD_PARTY_LICENSES.md after a dependency chan
 ```
 
 Changes land through pull requests; `main` requires the `check`, `vuln` and
-`image` CI jobs.
+`image` CI jobs and the SonarQube Cloud `scan`.
 
 ## License
 
