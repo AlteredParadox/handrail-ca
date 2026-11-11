@@ -1347,6 +1347,7 @@ func TestClientAddr(t *testing.T) {
 	direct := newSite(t, "http://127.0.0.1:8080").server
 	undeclared := newSite(t, "https://handrail.internal.example").server
 	directWithProxies := newSite(t, "http://127.0.0.1:8080", "10.20.0.5").server
+	gatewayListed := newSite(t, "https://handrail.internal.example", "10.20.0.5", "172.17.0.1").server
 	tests := []struct {
 		name         string
 		s            *server
@@ -1376,6 +1377,12 @@ func TestClientAddr(t *testing.T) {
 		{"a header too long to walk", behind, "10.20.0.5:5000", []string{"203.0.113.7" + strings.Repeat(", 10.20.0.5", maxForwardedHops)}, "10.20.0.5", false},
 		// Under https nothing but a proxy connects: an unlisted peer is
 		// taken for one, reported, and never believed about the header.
+		// Why only a proxy's own address may be listed: with the address
+		// visitors arrive from (a NAT, a Docker gateway) listed as well, the
+		// walk steps over the real visitor and believes what that visitor
+		// wrote in the header. README.md warns against it.
+		{"a visitor's gateway listed as a proxy", gatewayListed, "10.20.0.5:5000", []string{"203.0.113.99, 172.17.0.1"}, "203.0.113.99", true},
+		{"the same, with only the proxy listed", behind, "10.20.0.5:5000", []string{"203.0.113.99, 172.17.0.1"}, "172.17.0.1", true},
 		{"https, not from a listed proxy", behind, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", false},
 		{"http, not from a listed proxy", directWithProxies, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", true},
 	}
