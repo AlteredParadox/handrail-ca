@@ -11,7 +11,7 @@ cd "$(dirname "$0")"
 mkdir -p .secrets
 chmod 700 .secrets
 for name in ca_password pg_stepca_password handrail_provisioner_password handrail_db_password; do
-	if [ ! -s ".secrets/$name" ]; then
+	if [[ ! -s ".secrets/$name" ]]; then
 		od -An -tx1 -N20 /dev/urandom | tr -d ' \n' >".secrets/$name"
 	fi
 	chmod 644 ".secrets/$name"

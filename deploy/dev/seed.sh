@@ -54,7 +54,10 @@ issue() {
 	quiet step ca certificate "$name" "$name.crt" "$name.key" "${HANDRAIL[@]}" --force "$@"
 }
 
-serial() { step certificate inspect "$1" --format json | jq -r .serial_number; }
+serial() {
+	local cert=$1
+	step certificate inspect "$cert" --format json | jq -r .serial_number
+}
 
 echo "seed: certificates"
 issue web1.handrail.test --not-after 2160h

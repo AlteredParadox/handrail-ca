@@ -12,10 +12,15 @@ set -uo pipefail
 cd "$(dirname "$0")"
 
 failed=0
-ok() { printf '  ok    %s\n' "$1"; }
+ok() {
+	local desc=$1
+	printf '  ok    %s\n' "$desc"
+}
+# bad <description> [detail]
 bad() {
-	printf '  FAIL  %s\n' "$1"
-	[ -n "${2:-}" ] && printf '        %s\n' "$2"
+	local desc=$1 detail=${2:-}
+	printf '  FAIL  %s\n' "$desc"
+	if [[ -n "$detail" ]]; then printf '        %s\n' "$detail"; fi
 	failed=$((failed + 1))
 }
 # check <description> <command...>: passes when the command succeeds.
@@ -25,13 +30,26 @@ check() {
 	if "$@" >/dev/null 2>&1; then ok "$desc"; else bad "$desc"; fi
 }
 # same <description> <got> <want>
-same() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "got: $2 | want: $3"; fi; }
+same() {
+	local desc=$1 got=$2 want=$3
+	if [[ "$got" == "$want" ]]; then ok "$desc"; else bad "$desc" "got: $got | want: $want"; fi
+}
 
-inca() { docker compose exec -T ca bash -c "cd /tmp/verify && $1"; }
-sql() { docker compose exec -T db psql -U stepca -d stepca -At -c "$1"; }
+# inca <script>: run it in the CA container, in a scratch directory.
+inca() {
+	local script=$1
+	docker compose exec -T ca bash -c "cd /tmp/verify && $script"
+}
+sql() {
+	local query=$1
+	docker compose exec -T db psql -U stepca -d stepca -At -c "$query"
+}
 # As handrail-ca's role, over the local socket (the grants are what is being
 # checked, not the password).
-rosql() { docker compose exec -T db psql -U handrail -d stepca -At -c "$1"; }
+rosql() {
+	local query=$1
+	docker compose exec -T db psql -U handrail -d stepca -At -c "$query"
+}
 
 docker compose exec -T ca bash -c 'rm -rf /tmp/verify && mkdir -p /tmp/verify'
 HP='--provisioner handrail --provisioner-password-file /run/secrets/handrail_provisioner_password'
@@ -96,8 +114,15 @@ same "any serial can be marked revoked, issued or not" \
 	"$(inca "t=\$(step ca token $ghost --revoke $HP 2>/dev/null) && step ca revoke $ghost --token \"\$t\" >/dev/null 2>&1; echo \$?")" "0"
 
 echo "Limits (docs/ca-setup.md, sections 1 and 2)"
-refused() { inca "! step ca certificate $1 x.crt x.key $HP --force ${2:-}"; }
-allowed() { inca "step ca certificate $1 x.crt x.key $HP --force ${2:-}"; }
+# refused|allowed <name> [extra step ca certificate flags]
+refused() {
+	local name=$1 flags=${2:-}
+	inca "! step ca certificate $name x.crt x.key $HP --force $flags"
+}
+allowed() {
+	local name=$1 flags=${2:-}
+	inca "step ca certificate $name x.crt x.key $HP --force $flags"
+}
 check "a name one label under the allowed domain is issued" allowed inside.handrail.test
 check "an outside name is refused" refused outside.example.org
 check "a name two labels under the allowed domain is refused" refused a.apps.handrail.test
@@ -125,7 +150,7 @@ done
 check "handrail cannot write" bash -c "! docker compose exec -T db psql -U handrail -d stepca -At -c \"delete from x509_certs where nkey = convert_to('0', 'UTF8')\""
 
 echo
-if [ "$failed" -eq 0 ]; then
+if [[ "$failed" -eq 0 ]]; then
 	echo "verify: all checks passed"
 else
 	echo "verify: $failed check(s) FAILED"

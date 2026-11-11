@@ -11,7 +11,7 @@ set -euo pipefail
 STEPPATH=$(step path)
 config="$STEPPATH/config/ca.json"
 
-if [ ! -f "$config" ]; then
+if [[ ! -f "$config" ]]; then
 	# The image prints the admin password it was given; keep it out of logs.
 	/bin/bash /entrypoint.sh true | grep -v 'administrative password is'
 	pw=$(cat /run/secrets/pg_stepca_password)
