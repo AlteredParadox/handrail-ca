@@ -286,12 +286,13 @@ In use:
 | `golang.org/x/crypto` | argon2id | BSD-3-Clause |
 | `modernc.org/sqlite` | the store; pure Go, so the binary stays static | BSD-3-Clause |
 
-`modernc.org/sqlite` is SQLite's C source translated to Go and links six
-more modules into the binary: `modernc.org/libc`, `modernc.org/memory` and
-`modernc.org/mathutil` (BSD-3-Clause, same authors), `golang.org/x/sys` and
-`github.com/google/uuid` (BSD-3-Clause), `github.com/dustin/go-humanize`
-(MIT) and `github.com/remyoudompheng/bigfft` (BSD-3-Clause). It took the
-stripped binary from 7.7 MB to 12.0 MB. `THIRD_PARTY_LICENSES.md` carries
+`modernc.org/sqlite` is SQLite's C source translated to Go. With it, seven
+more modules are linked into the binary: `modernc.org/libc`,
+`modernc.org/memory` and `modernc.org/mathutil` (BSD-3-Clause, same
+authors), `golang.org/x/sys` and `github.com/google/uuid` (BSD-3-Clause),
+`github.com/dustin/go-humanize` (MIT) and `github.com/remyoudompheng/bigfft`
+(BSD-3-Clause). The two additions together took the stripped binary from
+7.7 MB to 12.0 MB. `THIRD_PARTY_LICENSES.md` carries
 all of their notices.
 
 Planned, each to be confirmed when it is added:
