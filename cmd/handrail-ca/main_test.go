@@ -19,13 +19,25 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"io"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"handrail-ca/internal/store"
 )
 
 func listenLoopback(t *testing.T) net.Listener {
@@ -59,12 +71,50 @@ func TestRunBadFlag(t *testing.T) {
 	}
 }
 
+// rootFile writes a CA certificate to a file, to stand for root_ca.crt.
+func rootFile(t *testing.T) string {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1), Subject: pkix.Name{CommonName: "Test Root CA"},
+		NotBefore: time.Now().Add(-time.Hour), NotAfter: time.Now().Add(time.Hour),
+		IsCA: true, BasicConstraintsValid: true, KeyUsage: x509.KeyUsageCertSign,
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "root_ca.crt")
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// serverArgs is a complete configuration: a fresh data directory, a CA
+// address nothing listens on, and a root certificate.
+func serverArgs(t *testing.T, listen string, more ...string) []string {
+	t.Helper()
+	clearEnv(t)
+	return append([]string{"-listen", listen, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-root", rootFile(t)}, more...)
+}
+
+func clearEnv(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_ROOT", "HANDRAIL_PUBLIC_URL"} {
+		t.Setenv(name, "")
+	}
+}
+
 func TestRunListenFailure(t *testing.T) {
 	// The port is taken for the length of the test, so the listen must fail.
 	ln := listenLoopback(t)
 	defer ln.Close()
 	var errOut bytes.Buffer
-	code := run(context.Background(), []string{"-listen", ln.Addr().String()}, nil, io.Discard, &errOut)
+	code := run(context.Background(), serverArgs(t, ln.Addr().String()), nil, io.Discard, &errOut)
 	if code != 1 {
 		t.Errorf("exit code = %d, want 1", code)
 	}
@@ -73,31 +123,159 @@ func TestRunListenFailure(t *testing.T) {
 	}
 }
 
-// A cancelled context is the SIGTERM path: run binds, serves and exits 0.
-func TestRunStopsOnCancel(t *testing.T) {
+// An empty store on loopback starts, and says what to do next. Cancelling
+// the context is the SIGTERM path: run drains and exits 0.
+func TestRunStartsWithoutAccountsOnLoopback(t *testing.T) {
+	addr := freeAddr(t)
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var errOut syncBuffer
+	done := make(chan int, 1)
+	args := serverArgs(t, addr)
+	go func() { done <- run(ctx, args, nil, io.Discard, &errOut) }()
+	waitForHealth(t, addr, &errOut)
 	cancel()
-	if code := run(ctx, []string{"-listen", "127.0.0.1:0"}, nil, io.Discard, io.Discard); code != 0 {
-		t.Errorf("exit code = %d, want 0", code)
+	if code := <-done; code != 0 {
+		t.Errorf("exit code = %d, want 0: %s", code, errOut.String())
+	}
+	if !strings.Contains(errOut.String(), "no accounts yet") {
+		t.Errorf("no hint about adding an account: %s", errOut.String())
 	}
 }
 
-func TestServeAndHealthcheck(t *testing.T) {
+// waitForHealth returns once the server at addr answers its health probe.
+func waitForHealth(t *testing.T, addr string, log *syncBuffer) {
+	t.Helper()
+	var err error
+	for range 200 {
+		var resp *http.Response
+		if resp, err = http.Get("http://" + addr + "/healthz"); err == nil {
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ok"`) {
+				t.Fatalf("GET /healthz = %d %q", resp.StatusCode, body)
+			}
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the server did not come up: %v\n%s", err, log.String())
+}
+
+func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
+	root := rootFile(t)
+	notACert := filepath.Join(t.TempDir(), "junk")
+	if err := os.WriteFile(notACert, []byte("not a certificate"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	huge := filepath.Join(t.TempDir(), "huge")
+	if err := os.WriteFile(huge, bytes.Repeat([]byte("x"), 1<<20+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dataIsAFile := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(dataIsAFile, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	data := t.TempDir()
+	clearEnv(t)
+	tests := []struct {
+		name string
+		args []string
+		code int
+		want string
+	}{
+		{"nothing", nil, 2, "not configured: -data (HANDRAIL_DATA), -ca-url (HANDRAIL_CA_URL), -ca-root (HANDRAIL_CA_ROOT)"},
+		{"no CA", []string{"-data", data}, 2, "not configured: -ca-url (HANDRAIL_CA_URL), -ca-root"},
+		{"stray argument", []string{"-data", data, "serve"}, 2, `unexpected argument "serve"`},
+		{"data directory is a file", []string{"-data", dataIsAFile, "-ca-url", "https://ca.invalid", "-ca-root", root}, 1, "opening the store"},
+		{"no root file", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", filepath.Join(data, "none")}, 1, "reading the CA's root certificate"},
+		{"root file too large", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", huge}, 1, "is larger than"},
+		{"root is not a certificate", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", notACert}, 1, "no PEM certificate"},
+		{"CA over plain HTTP", []string{"-data", data, "-ca-url", "http://ca.invalid", "-ca-root", root}, 1, "must start with https://"},
+		{"bad public URL", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-public-url", "handrail.example"}, 1, "-public-url"},
+		{"beyond loopback without a public URL", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root}, 1, "-public-url (HANDRAIL_PUBLIC_URL) is required"},
+		{"beyond loopback without an account", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-public-url", "https://handrail.example"}, 1, "no accounts yet"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var errOut bytes.Buffer
+			code := run(context.Background(), tt.args, nil, io.Discard, &errOut)
+			if code != tt.code || !strings.Contains(errOut.String(), tt.want) {
+				t.Errorf("exit %d, stderr %q; want %d and %q", code, errOut.String(), tt.code, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolvePublicURL(t *testing.T) {
+	loopback := &net.TCPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 8080}
+	v6 := &net.TCPAddr{IP: net.IPv6loopback, Port: 8080}
+	anywhere := &net.TCPAddr{IP: net.IPv4zero, Port: 8080}
+	tests := []struct {
+		name, configured string
+		addr             net.Addr
+		want             string
+	}{
+		{"loopback default", "", loopback, "http://127.0.0.1:8080"},
+		{"IPv6 loopback default", "", v6, "http://[::1]:8080"},
+		{"configured on loopback", "https://handrail.example/ca/", loopback, "https://handrail.example/ca/"},
+		{"configured beyond loopback", "https://handrail.example", anywhere, "https://handrail.example"},
+		{"required beyond loopback", "", anywhere, ""},
+		{"no scheme", "handrail.example", anywhere, ""},
+		{"with credentials", "https://u:p@handrail.example", anywhere, ""},
+		{"with query", "https://handrail.example/?a=b", anywhere, ""},
+		{"unparseable", "https://handrail.example:port", anywhere, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			u, err := config{publicURL: tt.configured}.resolvePublicURL(tt.addr)
+			if tt.want == "" {
+				if err == nil {
+					t.Fatalf("accepted, as %v", u)
+				}
+				return
+			}
+			if err != nil || u.String() != tt.want {
+				t.Fatalf("got %v, %v; want %s", u, err, tt.want)
+			}
+		})
+	}
+}
+
+// freeAddr returns a loopback address that was free a moment ago.
+func freeAddr(t *testing.T) string {
+	t.Helper()
 	ln := listenLoopback(t)
 	addr := ln.Addr().String()
+	ln.Close()
+	return addr
+}
+
+// The whole program: configure, add an account, serve, probe, stop.
+func TestRunServesAndHealthcheck(t *testing.T) {
+	addr := freeAddr(t)
+	args := serverArgs(t, addr)
+	data := args[3]
+	if code := run(context.Background(), []string{"user", "add", "-data", data, "alice"}, nil, io.Discard, io.Discard); code != 0 {
+		t.Fatalf("user add = %d", code)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	var errOut syncBuffer
 	done := make(chan int, 1)
-	go func() { done <- serve(ctx, ln, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
+	go func() { done <- run(ctx, args, nil, io.Discard, &errOut) }()
 
-	resp, err := http.Get("http://" + addr + "/healthz")
+	waitForHealth(t, addr, &errOut)
+	// The pages are there, and want a sign-in.
+	resp, err := http.Get("http://" + addr + "/")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), `"status":"ok"`) {
-		t.Fatalf("GET /healthz = %d %q", resp.StatusCode, body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "Sign in") || !strings.Contains(string(body), "ca.invalid") {
+		t.Errorf("GET / ended at %d %q", resp.StatusCode, resp.Request.URL)
 	}
 
 	if code := healthcheck([]string{"-listen", addr}, io.Discard); code != 0 {
@@ -109,32 +287,73 @@ func TestServeAndHealthcheck(t *testing.T) {
 	if code := healthcheck([]string{"-listen", "0.0.0.0:" + port}, io.Discard); code != 0 {
 		t.Errorf("healthcheck with a wildcard listen address = %d, want 0", code)
 	}
+	if strings.Contains(errOut.String(), "no accounts yet") {
+		t.Error("warned about accounts although one exists")
+	}
 
 	cancel()
 	select {
 	case code := <-done:
 		if code != 0 {
-			t.Errorf("serve returned %d after cancel, want 0", code)
+			t.Errorf("run returned %d after cancel, want 0", code)
 		}
 	case <-time.After(15 * time.Second):
-		t.Fatal("serve did not return after cancel")
+		t.Fatal("run did not return after cancel")
 	}
 
-	var errOut bytes.Buffer
-	if code := healthcheck([]string{"-listen", addr}, &errOut); code != 1 {
+	var probeErr bytes.Buffer
+	if code := healthcheck([]string{"-listen", addr}, &probeErr); code != 1 {
 		t.Errorf("healthcheck against a stopped server = %d, want 1", code)
 	}
-	if !strings.Contains(errOut.String(), "healthcheck:") {
-		t.Errorf("stderr %q does not report the failure", errOut.String())
+	if !strings.Contains(probeErr.String(), "healthcheck:") {
+		t.Errorf("stderr %q does not report the failure", probeErr.String())
 	}
+}
+
+// syncBuffer is a buffer the server's log can write to while the test reads.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
 }
 
 // serve reports a listener that fails underneath it rather than hanging.
 func TestServeListenerClosed(t *testing.T) {
 	ln := listenLoopback(t)
 	ln.Close()
-	if code := serve(context.Background(), ln, slog.New(slog.NewTextHandler(io.Discard, nil))); code != 1 {
+	if code := serve(context.Background(), ln, http.NotFoundHandler(), slog.New(slog.NewTextHandler(io.Discard, nil))); code != 1 {
 		t.Errorf("serve on a closed listener = %d, want 1", code)
+	}
+}
+
+func TestSweepSessionsStopsWithTheContext(t *testing.T) {
+	st, err := store.Open(context.Background(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		sweepSessions(ctx, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the sweep did not stop")
 	}
 }
 

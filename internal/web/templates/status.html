@@ -1,0 +1,116 @@
+<!--
+handrail-ca — a lightweight web UI for step-ca.
+Copyright (C) 2026 AlteredParadox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+{{define "content"}}
+{{with .Data}}
+<h1>CA status</h1>
+
+<div class="grid">
+
+<section class="card">
+<div class="card-head">
+<h2>Certificate authority</h2>
+{{if .Reachable}}<span class="badge ok">Reachable</span>{{else}}<span class="badge bad">Not reachable</span>{{end}}
+</div>
+<dl>
+<dt>Address</dt><dd class="mono">{{.Address}}</dd>
+<dt>step-ca version</dt><dd>{{if .VersionProblem}}<span class="muted">Not known</span>{{else}}{{.Version}}{{end}}</dd>
+<dt>Last checked</dt><dd>{{.CheckedAt}}</dd>
+</dl>
+{{with .HealthProblem}}<p class="problem">The CA did not answer its health check: {{.}}</p>{{end}}
+</section>
+
+{{$rootsProblem := .RootsProblem}}
+{{range .Trusted}}
+<section class="card">
+<div class="card-head">
+<h2>Root certificate</h2>
+{{if .Expired}}<span class="badge bad">Expired</span>{{end}}
+</div>
+<dl>
+<dt>Subject</dt><dd>{{.Subject}}</dd>
+<dt>Expires</dt><dd>{{.Expires}}</dd>
+<dt>SHA-256</dt><dd class="mono small">{{.Fingerprint}}</dd>
+</dl>
+<p class="muted">This is the certificate handrail-ca was configured with. Every connection to the CA is verified against it.</p>
+{{if $rootsProblem}}<p class="problem">Whether the CA still publishes this root could not be checked: {{$rootsProblem}}</p>
+{{else if not .Listed}}<p class="problem">The CA does not list this certificate among its roots.</p>{{end}}
+</section>
+{{end}}
+
+{{range .Intermediates}}
+<section class="card">
+<div class="card-head">
+<h2>Intermediate certificate</h2>
+{{if .Expired}}<span class="badge bad">Expired</span>{{end}}
+</div>
+<dl>
+<dt>Subject</dt><dd>{{.Subject}}</dd>
+<dt>Expires</dt><dd>{{.Expires}}</dd>
+<dt>SHA-256</dt><dd class="mono small">{{.Fingerprint}}</dd>
+</dl>
+</section>
+{{end}}
+{{with .IntermediatesProblem}}
+<section class="card">
+<div class="card-head"><h2>Intermediate certificate</h2><span class="badge unknown">Not known</span></div>
+<p class="problem">The CA's intermediate certificates could not be read: {{.}}</p>
+</section>
+{{end}}
+
+</div>
+
+<section class="card">
+<div class="card-head">
+<h2>Revocation publishing</h2>
+{{if .CRLProblem}}<span class="badge unknown">Not known</span>
+{{else if .CRL.Published}}<span class="badge ok">Revocation list published</span>
+{{else}}<span class="badge warn">No revocation list</span>{{end}}
+</div>
+{{if .CRLProblem}}
+<p class="problem">Whether the CA publishes a revocation list could not be determined: {{.CRLProblem}}</p>
+{{else if .CRL.Published}}
+<p>The CA publishes a certificate revocation list with {{.CRL.Entries}} revoked certificate{{if ne .CRL.Entries 1}}s{{end}}{{with .CRLNext}}; next update {{.}}{{end}}. Systems that fetch and check it learn of revocations; systems that do not are not told.</p>
+{{else}}
+<p>The CA is not publishing a certificate revocation list. Revoking a certificate stops the CA renewing it, but systems that already trust it are not told. To publish one, enable <span class="mono">crl</span> in the CA's configuration.</p>
+{{end}}
+</section>
+
+<section class="card flush" aria-label="Provisioners">
+<h2>Provisioners</h2>
+{{if .ProvisionersProblem}}
+<p class="problem pad">The CA's provisioners could not be read: {{.ProvisionersProblem}}</p>
+{{else}}
+<div class="scroll">
+<table>
+<thead>
+<tr><th scope="col">Name</th><th scope="col">Type</th><th scope="col">Default validity</th><th scope="col">Longest validity</th></tr>
+</thead>
+<tbody>
+{{range .Provisioners}}
+<tr><td class="strong">{{.Name}}</td><td>{{.Type}}</td><td>{{.Default}}</td><td>{{.Longest}}</td></tr>
+{{else}}
+<tr><td colspan="4" class="muted">The CA has no provisioners.</td></tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{end}}
+</section>
+{{end}}
+{{end}}

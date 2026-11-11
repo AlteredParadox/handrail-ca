@@ -1,0 +1,455 @@
+// handrail-ca — a lightweight web UI for step-ca.
+// Copyright (C) 2026 AlteredParadox
+//
+// This program is free software: you can redistribute it and/or modify it
+// under the terms of the GNU Affero General Public License as published by
+// the Free Software Foundation, either version 3 of the License, or (at your
+// option) any later version.
+//
+// This program is distributed in the hope that it will be useful, but WITHOUT
+// ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+// FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+// for more details.
+//
+// You should have received a copy of the GNU Affero General Public License
+// along with this program. If not, see <https://www.gnu.org/licenses/>.
+
+package web
+
+import (
+	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"errors"
+	"net"
+	"net/http"
+	"strconv"
+	"sync"
+	"time"
+
+	"handrail-ca/internal/password"
+	"handrail-ca/internal/store"
+)
+
+const (
+	// A session ends twelve hours after sign-in, or after an hour unused,
+	// whichever comes first.
+	sessionLifetime = 12 * time.Hour
+	sessionIdle     = SessionIdle
+	// last_seen is written at most this often, not on every request.
+	sessionTouchEvery = time.Minute
+
+	// The sign-in form's own cookie, which exists only to bind the form
+	// token to the browser that was shown the form.
+	formLifetime = time.Hour
+
+	tokenBytes = 32
+	// maxForm bounds a posted form: two short fields and a token.
+	maxForm = 8 << 10
+	// maxConcurrentHashes bounds password hashing, which takes 64 MiB each.
+	maxConcurrentHashes = 2
+)
+
+// SessionIdle is how long a session may go unused before it ends. Exported
+// for the sweep that removes ended sessions from the store.
+const SessionIdle = time.Hour
+
+// Cookie names. With HTTPS at the root of a host the session cookie takes
+// the __Host- prefix, which makes the browser refuse it unless it is Secure,
+// host-only and for the whole host.
+const (
+	sessionCookie = "handrail_session"
+	formCookie    = "handrail_form"
+)
+
+func (s *server) cookieName(name string) string {
+	if s.secure && s.base == "" {
+		return "__Host-" + name
+	}
+	return name
+}
+
+func (s *server) setCookie(w http.ResponseWriter, name, value string, maxAge time.Duration) {
+	c := &http.Cookie{
+		Name:     s.cookieName(name),
+		Value:    value,
+		Path:     s.base + "/",
+		HttpOnly: true,
+		Secure:   s.secure,
+		SameSite: http.SameSiteStrictMode,
+		MaxAge:   int(maxAge / time.Second),
+	}
+	if value == "" {
+		c.MaxAge = -1 // delete
+	}
+	http.SetCookie(w, c)
+}
+
+// cookieToken returns the random token a cookie carries, or nil if the
+// cookie is missing or is not one of ours.
+func (s *server) cookieToken(r *http.Request, name string) []byte {
+	c, err := r.Cookie(s.cookieName(name))
+	if err != nil {
+		return nil
+	}
+	token, err := base64.RawURLEncoding.DecodeString(c.Value)
+	if err != nil || len(token) != tokenBytes {
+		return nil
+	}
+	return token
+}
+
+func newToken() (raw []byte, encoded string, err error) {
+	raw = make([]byte, tokenBytes)
+	if _, err := rand.Read(raw); err != nil {
+		return nil, "", err
+	}
+	return raw, base64.RawURLEncoding.EncodeToString(raw), nil
+}
+
+// formToken is the value a form must carry back: an HMAC keyed with the
+// cookie's token. Another site can make the browser send the cookie but can
+// neither read it nor compute this.
+func formToken(cookieToken []byte) string {
+	mac := hmac.New(sha256.New, cookieToken)
+	mac.Write([]byte("handrail-ca form token"))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
+func validFormToken(cookieToken []byte, posted string) bool {
+	return cookieToken != nil && hmac.Equal([]byte(formToken(cookieToken)), []byte(posted))
+}
+
+// signedInUser is what the session middleware leaves in the request context.
+type signedInUser struct {
+	user  store.User
+	token []byte // the session cookie's token, for the form token
+}
+
+type contextKey struct{}
+
+func currentUser(r *http.Request) *signedInUser {
+	u, _ := r.Context().Value(contextKey{}).(*signedInUser)
+	return u
+}
+
+// session returns the signed-in user for a request, or nil if there is no
+// valid session. An error means the store could not be asked.
+func (s *server) session(r *http.Request) (*signedInUser, error) {
+	token := s.cookieToken(r, sessionCookie)
+	if token == nil {
+		return nil, nil
+	}
+	hash := store.HashToken(token)
+	now := s.opts.Now()
+	sess, err := s.opts.Store.Session(r.Context(), hash, now)
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if now.Sub(sess.LastSeenAt) >= sessionIdle {
+		// Best effort: an idle session is refused whether or not the row
+		// could be removed just now.
+		_ = s.opts.Store.DeleteSession(r.Context(), hash)
+		return nil, nil
+	}
+	if now.Sub(sess.LastSeenAt) >= sessionTouchEvery {
+		if err := s.opts.Store.TouchSession(r.Context(), hash, now); err != nil {
+			s.log.Warn("could not record session use", "err", err)
+		}
+	}
+	return &signedInUser{user: sess.User, token: token}, nil
+}
+
+// signedIn wraps a handler that needs a session. Without one the browser
+// is sent to the sign-in page. A posted form must also carry the session's
+// form token.
+func (s *server) signedIn(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		u, err := s.session(r)
+		if err != nil {
+			s.log.Error("reading the session", "err", err)
+			s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not read its own store, so it cannot tell who you are. The log has the details.")
+			return
+		}
+		if u == nil {
+			http.Redirect(w, r, s.base+"/sign-in", http.StatusSeeOther)
+			return
+		}
+		r = r.WithContext(context.WithValue(r.Context(), contextKey{}, u))
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			r.Body = http.MaxBytesReader(w, r.Body, maxForm)
+			if err := r.ParseForm(); err != nil || !validFormToken(u.token, r.PostForm.Get("form_token")) {
+				s.errorPage(w, r, http.StatusForbidden, "This form was not sent from a page of your current session. Go back, reload the page and try again.")
+				return
+			}
+		}
+		next(w, r)
+	}
+}
+
+type signInData struct {
+	FormToken string
+	Username  string
+	Problem   string
+}
+
+// signInForm shows the sign-in page, or moves on if already signed in.
+func (s *server) signInForm(w http.ResponseWriter, r *http.Request) {
+	if u, err := s.session(r); err == nil && u != nil {
+		http.Redirect(w, r, s.base+"/", http.StatusSeeOther)
+		return
+	}
+	s.renderSignIn(w, r, http.StatusOK, "", "")
+}
+
+// renderSignIn writes the form with a form token bound to this browser by
+// a cookie, reusing the cookie the browser already has.
+func (s *server) renderSignIn(w http.ResponseWriter, r *http.Request, status int, username, problem string) {
+	w.Header().Set("Cache-Control", "no-store")
+	token := s.cookieToken(r, formCookie)
+	if token == nil {
+		var encoded string
+		var err error
+		if token, encoded, err = newToken(); err != nil {
+			s.log.Error("no randomness for a form token", "err", err)
+			s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not prepare the sign-in form.")
+			return
+		}
+		s.setCookie(w, formCookie, encoded, formLifetime)
+	}
+	s.render(w, r, status, "signin.html", "Sign in", signInData{FormToken: formToken(token), Username: username, Problem: problem})
+}
+
+const wrongCredentials = "Wrong user name or password."
+
+// signIn checks a posted user name and password and opens a session.
+func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxForm)
+	if err := r.ParseForm(); err != nil {
+		s.errorPage(w, r, http.StatusBadRequest, "The sign-in form could not be read.")
+		return
+	}
+	typed := r.PostForm.Get("username")
+	if !validFormToken(s.cookieToken(r, formCookie), r.PostForm.Get("form_token")) {
+		s.renderSignIn(w, r, http.StatusForbidden, "", "The sign-in form had expired. Please try again.")
+		return
+	}
+	remote := remoteHost(r)
+	// A name that could not be an account is refused like a wrong
+	// password, without a lookup.
+	username, err := store.NormalizeUsername(typed)
+	if err != nil {
+		s.limiter.fail(s.opts.Now(), "addr:"+remote)
+		s.recordSignIn(r, "", false, "no such user")
+		s.renderSignIn(w, r, http.StatusUnauthorized, "", wrongCredentials)
+		return
+	}
+	keys := []string{"user:" + username, "addr:" + remote}
+	if wait := s.limiter.blocked(s.opts.Now(), keys...); wait > 0 {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait/time.Second)+1))
+		s.renderSignIn(w, r, http.StatusTooManyRequests, "", "Too many failed sign-ins. Wait a few minutes and try again.")
+		return
+	}
+
+	user, ok, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"))
+	if err != nil {
+		s.log.Error("checking a password", "err", err)
+		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not check the password. The log has the details.")
+		return
+	}
+	if !ok {
+		s.limiter.fail(s.opts.Now(), keys...)
+		// Only the name of a real account is recorded: what people type
+		// into a user-name field by mistake includes passwords.
+		s.recordSignIn(r, user.Username, false, "wrong password or no such user")
+		s.renderSignIn(w, r, http.StatusUnauthorized, "", wrongCredentials)
+		return
+	}
+
+	// A fresh token for every sign-in: nothing set before authentication
+	// carries over into the session.
+	raw, encoded, err := newToken()
+	now := s.opts.Now()
+	if err == nil {
+		err = s.opts.Store.CreateSession(r.Context(), user.ID, store.HashToken(raw), now, now.Add(sessionLifetime))
+	}
+	if err != nil {
+		s.log.Error("opening a session", "err", err)
+		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not open a session. The log has the details.")
+		return
+	}
+	s.limiter.reset("user:" + username)
+	s.setCookie(w, sessionCookie, encoded, sessionLifetime)
+	s.setCookie(w, formCookie, "", 0)
+	s.recordSignIn(r, user.Username, true, "")
+	http.Redirect(w, r, s.base+"/", http.StatusSeeOther)
+}
+
+// checkPassword reports whether pw opens the account. It takes about as
+// long whether or not the account exists, and at most maxConcurrentHashes
+// run at once. The returned user is zero unless the account exists.
+func (s *server) checkPassword(ctx context.Context, username, pw string) (store.User, bool, error) {
+	select {
+	case s.hashSlots <- struct{}{}:
+		defer func() { <-s.hashSlots }()
+	case <-ctx.Done():
+		return store.User{}, false, ctx.Err()
+	}
+	user, hash, err := s.opts.Store.Credentials(ctx, username)
+	if errors.Is(err, store.ErrNotFound) {
+		_, _ = password.Verify(s.dummyHash, pw)
+		return store.User{}, false, nil
+	}
+	if err != nil {
+		return store.User{}, false, err
+	}
+	ok, err := password.Verify(hash, pw)
+	return user, ok, err
+}
+
+// dummyPasswordHash is a hash of a password nobody has, with the current
+// parameters, so that a sign-in for a missing account costs the same work.
+func dummyPasswordHash() (string, error) {
+	pw, err := password.Generate()
+	if err != nil {
+		return "", err
+	}
+	return password.Hash(pw)
+}
+
+func (s *server) signOut(w http.ResponseWriter, r *http.Request) {
+	u := currentUser(r)
+	if err := s.opts.Store.DeleteSession(r.Context(), store.HashToken(u.token)); err != nil {
+		// The cookie is still cleared; the session then ends by itself
+		// when it goes idle.
+		s.log.Error("ending a session", "err", err)
+	}
+	s.setCookie(w, sessionCookie, "", 0)
+	s.record(r, store.Event{Actor: u.user.Username, Action: store.ActionSignOut, Outcome: store.OutcomeOK})
+	http.Redirect(w, r, s.base+"/sign-in", http.StatusSeeOther)
+}
+
+const unknownActor = "(unknown user)"
+
+func (s *server) recordSignIn(r *http.Request, username string, ok bool, detail string) {
+	e := store.Event{Actor: username, Action: store.ActionSignIn, Outcome: store.OutcomeFailed, Detail: detail}
+	if username == "" {
+		e.Actor = unknownActor
+	}
+	if ok {
+		e.Outcome = store.OutcomeOK
+	}
+	s.record(r, e)
+}
+
+// record writes an event to the log and to the history. Per the audit rule
+// a history that cannot be written never blocks the action: the failure is
+// logged and every page says so until a write succeeds again.
+func (s *server) record(r *http.Request, e store.Event) {
+	e.At = s.opts.Now()
+	e.Remote = remoteHost(r)
+	s.log.Info("audit", "actor", e.Actor, "action", e.Action, "outcome", e.Outcome,
+		"serial", e.Serial, "subject", e.Subject, "detail", e.Detail, "remote", e.Remote)
+	// Not the request's context: the event is recorded even if the browser
+	// has already gone away.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	defer cancel()
+	if err := s.opts.Store.AppendHistory(ctx, e); err != nil {
+		s.historyBroken.Store(true)
+		s.log.Error("history is NOT being recorded", "err", err)
+		return
+	}
+	s.historyBroken.Store(false)
+}
+
+// remoteHost is the address the connection came from. Behind a reverse
+// proxy that is the proxy; forwarded headers are not trusted.
+func remoteHost(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// limiter slows password guessing: after limiterFailures failed sign-ins
+// for one key (a user name, or a client address) within limiterWindow,
+// further attempts for that key are refused until the window has passed.
+// It is in memory: a restart forgets it, which costs an attacker a restart
+// they cannot cause.
+type limiter struct {
+	mu      sync.Mutex
+	entries map[string]*limiterEntry
+}
+
+type limiterEntry struct {
+	failures int
+	start    time.Time
+}
+
+const (
+	limiterFailures = 5
+	limiterWindow   = 5 * time.Minute
+	// limiterEntries bounds the table; when it is full, finished windows
+	// are dropped, and failing that the table is cleared.
+	limiterEntries = 10000
+)
+
+func newLimiter() *limiter { return &limiter{entries: map[string]*limiterEntry{}} }
+
+// blocked returns how long the caller must still wait, zero if not at all.
+func (l *limiter) blocked(now time.Time, keys ...string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	var wait time.Duration
+	for _, key := range keys {
+		e := l.entries[key]
+		if e == nil || e.failures < limiterFailures {
+			continue
+		}
+		if left := e.start.Add(limiterWindow).Sub(now); left > wait {
+			wait = left
+		}
+	}
+	return wait
+}
+
+func (l *limiter) fail(now time.Time, keys ...string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, key := range keys {
+		e := l.entries[key]
+		if e == nil || now.Sub(e.start) >= limiterWindow {
+			if len(l.entries) >= limiterEntries {
+				l.prune(now)
+			}
+			e = &limiterEntry{start: now}
+			l.entries[key] = e
+		}
+		e.failures++
+	}
+}
+
+func (l *limiter) reset(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.entries, key)
+}
+
+func (l *limiter) prune(now time.Time) {
+	for key, e := range l.entries {
+		if now.Sub(e.start) >= limiterWindow {
+			delete(l.entries, key)
+		}
+	}
+	if len(l.entries) >= limiterEntries {
+		clear(l.entries)
+	}
+}

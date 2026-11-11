@@ -26,12 +26,16 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	legal "handrail-ca"
+	"handrail-ca/internal/ca"
+	"handrail-ca/internal/store"
 	"handrail-ca/internal/web"
 )
 
@@ -40,7 +44,8 @@ import (
 // reports "dev".
 var version = "dev"
 
-// defaultListen is loopback: nothing here is authenticated yet.
+// defaultListen is loopback: reaching handrail-ca from another machine is
+// a decision (a public URL, usually a reverse proxy with TLS), not a default.
 const defaultListen = "127.0.0.1:8080"
 
 func main() {
@@ -64,32 +69,189 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return userCommand(ctx, args[1:], stdin, stdout, stderr)
 		}
 	}
-	fs := flag.NewFlagSet("handrail-ca", flag.ContinueOnError)
-	fs.SetOutput(stderr)
-	listen := fs.String("listen", envOr("HANDRAIL_LISTEN", defaultListen), "address to listen on (or set HANDRAIL_LISTEN)")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	cfg, code := parseConfig(args, stderr)
+	if code != 0 {
+		return code
 	}
-
 	log := slog.New(slog.NewTextHandler(stderr, nil))
-	ln, err := net.Listen("tcp", *listen)
+
+	st, err := store.Open(ctx, cfg.dataDir)
 	if err != nil {
-		log.Error("listen", "addr", *listen, "err", err)
+		log.Error("opening the store", "err", err)
 		return 1
 	}
-	log.Info("handrail-ca listening", "addr", ln.Addr().String(), "version", version)
-	return serve(ctx, ln, log)
+	defer st.Close()
+
+	rootPEM, err := readSmallFile(cfg.caRoot)
+	if err != nil {
+		log.Error("reading the CA's root certificate", "err", err)
+		return 1
+	}
+	client, err := ca.New(ca.Config{URL: cfg.caURL, RootPEM: rootPEM, UserAgent: "handrail-ca/" + version})
+	if err != nil {
+		log.Error("CA configuration", "err", err)
+		return 1
+	}
+
+	ln, err := net.Listen("tcp", cfg.listen)
+	if err != nil {
+		log.Error("listen", "addr", cfg.listen, "err", err)
+		return 1
+	}
+	defer ln.Close()
+
+	publicURL, err := cfg.resolvePublicURL(ln.Addr())
+	if err != nil {
+		log.Error("configuration", "err", err)
+		return 1
+	}
+	accounts, err := st.CountUsers(ctx)
+	if err != nil {
+		log.Error("reading the store", "err", err)
+		return 1
+	}
+	if accounts == 0 {
+		// With no account nobody can sign in, so nothing is exposed; but a
+		// server reachable from elsewhere that nobody can use is a
+		// misconfiguration, and it is better to say so than to wait.
+		if !isLoopback(ln.Addr()) {
+			log.Error("no accounts yet: add one with `handrail-ca user add -role operator NAME` before listening beyond this host")
+			return 1
+		}
+		log.Warn("no accounts yet: add one with `handrail-ca user add -role operator NAME`")
+	}
+
+	handler, err := web.New(web.Options{
+		Version:            version,
+		License:            legal.License,
+		ThirdPartyLicenses: legal.ThirdPartyLicenses,
+		Store:              st,
+		CA:                 client,
+		PublicURL:          publicURL,
+		Log:                log,
+	})
+	if err != nil {
+		log.Error("starting", "err", err)
+		return 1
+	}
+	go sweepSessions(ctx, st, log)
+
+	log.Info("handrail-ca listening", "addr", ln.Addr().String(), "url", publicURL.String(), "ca", client.URL(), "version", version)
+	return serve(ctx, ln, handler, log)
+}
+
+// config is what the server is started with. Secrets are never flags: the
+// only file named here is the CA's root certificate, which is public.
+type config struct {
+	listen    string
+	dataDir   string
+	caURL     string
+	caRoot    string
+	publicURL string
+}
+
+func parseConfig(args []string, stderr io.Writer) (config, int) {
+	var cfg config
+	fs := flag.NewFlagSet("handrail-ca", flag.ContinueOnError)
+	fs.SetOutput(stderr)
+	fs.StringVar(&cfg.listen, "listen", envOr("HANDRAIL_LISTEN", defaultListen), "address to listen on (or set HANDRAIL_LISTEN)")
+	fs.StringVar(&cfg.dataDir, "data", os.Getenv("HANDRAIL_DATA"), "directory for handrail-ca's own store (or set HANDRAIL_DATA)")
+	fs.StringVar(&cfg.caURL, "ca-url", os.Getenv("HANDRAIL_CA_URL"), "the CA's address, https://host[:port] (or set HANDRAIL_CA_URL)")
+	fs.StringVar(&cfg.caRoot, "ca-root", os.Getenv("HANDRAIL_CA_ROOT"), "file holding the CA's root certificate, a copy of root_ca.crt (or set HANDRAIL_CA_ROOT)")
+	fs.StringVar(&cfg.publicURL, "public-url", os.Getenv("HANDRAIL_PUBLIC_URL"), "the address browsers use, http(s)://host[:port][/path]; needed unless listening on loopback (or set HANDRAIL_PUBLIC_URL)")
+	if err := fs.Parse(args); err != nil {
+		return cfg, 2
+	}
+	if fs.NArg() > 0 {
+		fmt.Fprintf(stderr, "handrail-ca: unexpected argument %q\n", fs.Arg(0))
+		return cfg, 2
+	}
+	var missing []string
+	for _, need := range []struct{ value, name string }{
+		{cfg.dataDir, "-data (HANDRAIL_DATA)"},
+		{cfg.caURL, "-ca-url (HANDRAIL_CA_URL)"},
+		{cfg.caRoot, "-ca-root (HANDRAIL_CA_ROOT)"},
+	} {
+		if need.value == "" {
+			missing = append(missing, need.name)
+		}
+	}
+	if len(missing) > 0 {
+		fmt.Fprintf(stderr, "handrail-ca: not configured: %s. Run with -h for what each one is.\n", strings.Join(missing, ", "))
+		return cfg, 2
+	}
+	return cfg, 0
+}
+
+// resolvePublicURL returns the address browsers use. On a loopback listener
+// it defaults to that listener; anywhere else it has to be said, because
+// the server cannot know what name, scheme or proxy sits in front of it,
+// and cookies and the Host check depend on it.
+func (c config) resolvePublicURL(listening net.Addr) (*url.URL, error) {
+	raw := c.publicURL
+	if raw == "" {
+		if !isLoopback(listening) {
+			return nil, errors.New("-public-url (HANDRAIL_PUBLIC_URL) is required when not listening on a loopback address")
+		}
+		raw = "http://" + listening.String()
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, fmt.Errorf("-public-url: %w", err)
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return nil, errors.New("-public-url: want http(s)://host[:port][/path]")
+	}
+	return u, nil
+}
+
+func isLoopback(addr net.Addr) bool {
+	tcp, ok := addr.(*net.TCPAddr)
+	return ok && tcp.IP.IsLoopback()
+}
+
+// readSmallFile reads a configuration file that has no business being
+// large.
+func readSmallFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	const limit = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > limit {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, limit)
+	}
+	return data, nil
+}
+
+// sweepSessions removes ended sessions from the store now and then. They
+// are refused whether or not they have been swept; this only keeps the
+// table small.
+func sweepSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
+	ticker := time.NewTicker(10 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			if _, err := st.DeleteExpiredSessions(ctx, now, now.Add(-web.SessionIdle)); err != nil && ctx.Err() == nil {
+				log.Warn("sweeping ended sessions", "err", err)
+			}
+		}
+	}
 }
 
 // serve answers on ln until ctx is cancelled, then drains in-flight
 // requests for up to ten seconds.
-func serve(ctx context.Context, ln net.Listener, log *slog.Logger) int {
+func serve(ctx context.Context, ln net.Listener, handler http.Handler, log *slog.Logger) int {
 	srv := &http.Server{
-		Handler: web.New(web.Options{
-			Version:            version,
-			License:            legal.License,
-			ThirdPartyLicenses: legal.ThirdPartyLicenses,
-		}),
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      60 * time.Second,

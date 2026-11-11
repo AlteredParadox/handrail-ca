@@ -16,23 +16,10 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 -->
 
-<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>handrail-ca</title>
-  <link rel="stylesheet" href="style.css">
-</head>
-<body>
-  <main>
-    <h1>handrail-ca</h1>
-    <p>A lightweight web UI for step-ca. Nothing to see yet: the build is under way.</p>
-  </main>
-  <footer>
-    <a href="source">Source</a>
-    <a href="license">License (AGPL-3.0-or-later)</a>
-    <a href="third-party-licenses">Third-party licenses</a>
-  </footer>
-</body>
-</html>
+{{define "content"}}
+<section class="card narrow">
+<h1>{{.Data.Heading}}</h1>
+<p>{{.Data.Message}}</p>
+<p><a href="{{.Base}}/">Back to handrail-ca</a></p>
+</section>
+{{end}}

@@ -92,19 +92,32 @@ jobs:
           cache-to: type=gha,mode=max
       # Smoke test: the distroless image starts as nonroot, hardened
       # (read-only root filesystem, every capability dropped,
-      # no-new-privileges), reports the stamped version, serves the license
-      # the AGPL requires it to offer, and its own HEALTHCHECK turns healthy.
+      # no-new-privileges), with its store on the /data volume; it reports
+      # the stamped version, serves the license the AGPL requires it to
+      # offer and the sign-in page, and its own HEALTHCHECK turns healthy.
+      # The CA here is a made-up root and an address nothing answers on:
+      # handrail-ca starts without its CA and says so on the status page.
       - name: Run image
         run: |
           docker run --rm handrail-ca:ci version | grep -qx 'handrail-ca ci' || { echo "version stamp missing"; exit 1; }
+          openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout /dev/null \
+            -subj "/CN=Smoke Test Root" -days 1 -out "$RUNNER_TEMP/root_ca.crt" 2>/dev/null
+          docker volume create smoke-data >/dev/null
+          # Listening beyond loopback with no account is refused, so one is
+          # added first, the way an operator would.
+          docker run --rm -v smoke-data:/data handrail-ca:ci user add -role operator smoke | grep -q '^Added operator smoke' || { echo "user add failed"; exit 1; }
           docker run -d --name smoke --read-only --cap-drop ALL --security-opt no-new-privileges \
-            --health-interval 2s -p 127.0.0.1:8080:8080 handrail-ca:ci
+            --health-interval 2s -p 127.0.0.1:8080:8080 \
+            -v smoke-data:/data -v "$RUNNER_TEMP/root_ca.crt:/etc/handrail/root_ca.crt:ro" \
+            -e HANDRAIL_CA_URL=https://ca.invalid:9000 -e HANDRAIL_CA_ROOT=/etc/handrail/root_ca.crt \
+            -e HANDRAIL_PUBLIC_URL=http://127.0.0.1:8080 handrail-ca:ci
           for i in $(seq 1 30); do
             if out=$(curl -sf http://127.0.0.1:8080/healthz); then break; fi
             sleep 1
           done
           echo "$out" | grep -q '"version":"ci"' || { docker logs smoke; exit 1; }
           curl -sf http://127.0.0.1:8080/license | grep -q 'GNU AFFERO GENERAL PUBLIC LICENSE' || { echo "/license missing"; docker logs smoke; exit 1; }
+          curl -sfL http://127.0.0.1:8080/ | grep -q '<h1>Sign in</h1>' || { echo "sign-in page missing"; docker logs smoke; exit 1; }
           for i in $(seq 1 30); do
             health=$(docker inspect -f '{{.State.Health.Status}}' smoke)
             [ "$health" = healthy ] && break
