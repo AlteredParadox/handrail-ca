@@ -3,8 +3,9 @@
 handrail-ca is a web UI for step-ca: it shows issued certificates and issues
 and revokes them on an operator's behalf. It holds credentials that can mint
 certificates, so treat every change as a change to something that sits next
-to a certificate authority. Read the nearby code before changing behavior.
-Keep these principles practical and proportionate to the task.
+to a certificate authority. Read [docs/PLAN.md](docs/PLAN.md) and the nearby
+code before changing behavior. Keep these principles practical and
+proportionate to the task.
 
 ## Keep it simple
 

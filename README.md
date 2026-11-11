@@ -4,8 +4,8 @@ A lightweight web UI for [step-ca](https://github.com/smallstep/certificates):
 view, issue and revoke certificates from a browser.
 
 **Status: early development.** The repository currently holds the project
-skeleton (build, CI, release and licensing plumbing). Nothing here manages
-certificates yet.
+skeleton (build, CI, release and licensing plumbing) and the
+[build plan](docs/PLAN.md). Nothing here manages certificates yet.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.
