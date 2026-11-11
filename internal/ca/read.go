@@ -110,14 +110,15 @@ type Provisioner struct {
 	Claims Claims
 }
 
-// Claims are a provisioner's own X.509 limits. A zero duration means the
-// provisioner does not set that limit and the CA's default applies.
+// Claims are a provisioner's own X.509 validity limits. A zero duration
+// means the provisioner does not set that limit and the CA's default
+// applies. The answer carries more claims (renewal, SSH); they are left
+// unread until something uses them, and the renewal ones are optional
+// booleans whose absence means "as the CA is configured", not false.
 type Claims struct {
-	MinTLSCertDuration      time.Duration
-	MaxTLSCertDuration      time.Duration
-	DefaultTLSCertDuration  time.Duration
-	DisableRenewal          bool
-	AllowRenewalAfterExpiry bool
+	MinTLSCertDuration     time.Duration
+	MaxTLSCertDuration     time.Duration
+	DefaultTLSCertDuration time.Duration
 }
 
 // Provisioners lists every provisioner on the CA, following its paging.
@@ -162,11 +163,9 @@ func parseProvisioner(raw json.RawMessage) (Provisioner, error) {
 			KeyID string `json:"kid"`
 		} `json:"key"`
 		Claims *struct {
-			Min                     string `json:"minTLSCertDuration"`
-			Max                     string `json:"maxTLSCertDuration"`
-			Default                 string `json:"defaultTLSCertDuration"`
-			DisableRenewal          bool   `json:"disableRenewal"`
-			AllowRenewalAfterExpiry bool   `json:"allowRenewalAfterExpiry"`
+			Min     string `json:"minTLSCertDuration"`
+			Max     string `json:"maxTLSCertDuration"`
+			Default string `json:"defaultTLSCertDuration"`
 		} `json:"claims"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
@@ -182,8 +181,6 @@ func parseProvisioner(raw json.RawMessage) (Provisioner, error) {
 	if in.Claims == nil {
 		return p, nil
 	}
-	p.Claims.DisableRenewal = in.Claims.DisableRenewal
-	p.Claims.AllowRenewalAfterExpiry = in.Claims.AllowRenewalAfterExpiry
 	for _, d := range []struct {
 		field string
 		text  string
