@@ -1,7 +1,7 @@
 # handrail-ca build plan
 
-Status: **draft for review**, 2026-11-11. Nothing below is built yet except
-the scaffold (PR #1). Section 2 records the decisions made so far.
+Status: 2026-11-11. The scaffold is merged; nothing else below is built yet.
+Section 2 records the decisions made so far.
 
 ## 1. What we are building
 
@@ -17,7 +17,7 @@ A static Go binary that gives an operator a browser view of a
   revocation does and does not achieve.
 
 "Lightweight" is a requirement, not a mood: one binary, an embedded front end
-with no build step, no database of its own in the first release, and a short
+with no build step, one SQLite file for its own records, and a short
 dependency list (section 5).
 
 Not in scope for the first release: SSH certificates, managing provisioners
@@ -44,9 +44,11 @@ tables with a read-only account and changes nothing in the CA's database.
   that was considered for it is recorded in section 9.
 - MySQL uses the same table layout and follows as a second SQL source.
 
-**D2. Sign-in: local accounts.** Accounts come from a file (username and an
-argon2id hash), with server-side sessions and two roles, viewer and
-operator. OIDC is a later milestone.
+**D2. Sign-in: local accounts.** Usernames with argon2id password hashes,
+server-side sessions and two roles, viewer and operator. With the store (D5)
+the accounts live there and are managed from the command line on the host
+(`handrail-ca user add`, `passwd`, `remove`, `list`); there is no account
+management in the web UI in the first release. OIDC is a later milestone.
 
 **D3. Key generation: offered, as the second path.** Pasting a CSR is the
 default and keeps the private key with the requester. "Generate a key for
@@ -60,21 +62,23 @@ without JavaScript. A first-pass mockup of the six screens (list, detail,
 issue, revoke, CA status, sign-in) exists as a design canvas outside this
 repository and is the starting point for the UI milestones.
 
-**D5. handrail-ca keeps no database of its own in the first release**
-(proposed; not yet confirmed by the owner). The question is whether
-handrail-ca needs to save anything to disk between restarts. It does not:
-everything it shows comes from the CA and can be read again.
+**D5. handrail-ca has a small store of its own.** One SQLite file in a data
+directory, for the things that are handrail-ca's and not the CA's:
 
-- The certificate list is rebuilt from the CA's database each time
-  handrail-ca starts.
-- Sign-in sessions are held in memory, so a restart signs everyone out.
-- The record of who issued or revoked what goes to the log, where the host's
-  normal log handling keeps it.
+- **History:** every sign-in, issue and revoke, attempted and completed: who,
+  when, which certificate, the outcome. Shown on a history page and on each
+  certificate's page. The same events still go to the log.
+- **Notes on certificates:** a free-text note and labels per serial, for what
+  the CA does not record (what the certificate is for, where it is
+  installed, who asked for it).
+- **Accounts and sessions:** see D2. Sessions survive a restart; only a hash
+  of each session token is stored.
 
-What this buys is that there is nothing to back up, migrate or corrupt, and
-deleting handrail-ca leaves no trace. What it rules out, until a store is
-added, is anything that is handrail-ca's own data: notes or labels on
-certificates, a history page inside the UI, saved filters.
+What never goes into it: the provisioner key or its password, one-time
+tokens, private keys generated for a user, and certificates themselves. The
+CA's database remains the only source for what was issued and revoked; the
+store refers to certificates by serial. Losing the file loses history, notes
+and accounts, and nothing about the certificates.
 
 ## 3. What step-ca provides
 
@@ -228,14 +232,24 @@ one-minute lifetime, and are never logged.
 limiting, server-side sessions (random 256-bit cookie, `HttpOnly`,
 `SameSite=Strict`, `Secure` behind TLS), a CSRF token plus `Origin` check on
 every state-changing request, a Host-header allow-list, and the security
-headers already in the scaffold. Viewers read; operators issue and revoke. A
-`-read-only` mode needs no provisioner at all and refuses both actions.
-Starting on a non-loopback address without accounts configured is an error.
-TLS is terminated by a reverse proxy or by handrail-ca itself (certificate
-and key files); a base-path option supports serving under a sub-path.
+headers already in the scaffold. Viewers read; operators issue, revoke and
+edit notes. A `-read-only` mode needs no provisioner at all and refuses
+issuing and revoking. Starting on a non-loopback address with no account in
+the store is an error. TLS is terminated by a reverse proxy or by
+handrail-ca itself (certificate and key files); a base-path option supports
+serving under a sub-path.
 
-**Audit.** Every sign-in, issue and revoke, attempted and completed, is one
-structured log line: who, what, serial, subject, outcome. No secrets.
+**Store.** Per D5: one SQLite file under the data directory (`-data`,
+`HANDRAIL_DATA`; a volume in the container), created with owner-only
+permissions. The schema carries a version and is migrated forward on start;
+a binary older than the file refuses to open it. History rows are only ever
+appended. A backup is a copy of the file taken with SQLite's own backup
+command, which the deployment notes will give.
+
+**Audit.** Every sign-in, issue and revoke, attempted and completed, is
+written to the store's history and as one structured log line: who, what,
+serial, subject, outcome. No secrets. An action whose history row cannot be
+written is not carried out.
 
 **Configuration.** Flags with `HANDRAIL_*` environment equivalents. Secrets
 (provisioner password, accounts, database credentials) are given as file
@@ -250,6 +264,7 @@ The scaffold has none. Planned, each to be confirmed when it is added:
 | `github.com/go-jose/go-jose/v4` | open the provisioner key (PBES2 JWE), sign tokens | Apache-2.0 |
 | `github.com/jackc/pgx/v5` | read the CA's PostgreSQL database | MIT |
 | `golang.org/x/crypto` | argon2id | BSD-3-Clause |
+| `modernc.org/sqlite` | the store; pure Go, so the binary stays static | BSD-3-Clause |
 
 Certificate and CSR handling is `crypto/x509` from the standard library.
 
@@ -273,6 +288,7 @@ server that answers `/healthz`.
 - Re-verify section 3 against it and correct this document where it differs.
 - Configuration loading; the CA client's read side (root pinning, health,
   version, roots, intermediates, provisioners, CRL presence).
+- The store: schema, migrations, and the `user` subcommands.
 - Accounts, sessions, CSRF, roles, the page shell, and a CA status page.
 - An `integration` test suite against the Compose environment, as its own CI
   job (advisory at first).
@@ -283,7 +299,8 @@ server that answers `/healthz`.
 - List page: filter by status and provisioner, search subject and SANs, sort,
   paginate; default view hides expired certificates.
 - Detail page: parsed fields, extensions, fingerprints, chain, PEM and DER
-  download, issuing provisioner, revocation record.
+  download, issuing provisioner, revocation record, and the certificate's
+  note and labels from the store.
 - Measure start-up scan time, refresh time and memory with 100,000 synthetic
   rows and record the results here; decide then whether an on-disk cache is
   needed.
@@ -291,7 +308,8 @@ server that answers `/healthz`.
 
 **M3. Revoke.**
 - Provisioner key loading, token minting, the write side of the CA client.
-- The revoke flow, the audit log, outcome verification, read-only mode.
+- The revoke flow, history (store and log) with its page, outcome
+  verification, read-only mode.
 
 **M4. Issue.**
 - CSR path: parse, confirm, sign, download certificate and chain. The
@@ -304,14 +322,15 @@ server that answers `/healthz`.
 **M5. First release, v0.1.0.**
 - Deployment documentation: creating the provisioner with its name policy
   and lifetime cap, the read-only database account (`GRANT SELECT` on three
-  tables), reverse proxy and container examples, what revocation means.
+  tables), reverse proxy and container examples, backing up the store, what
+  revocation means. [ca-setup.md](ca-setup.md) is the start of it.
 - A security review of the whole tree before the tag; `scan` added to the
   required checks if it is not already.
 - Screenshots, release notes, the GHCR image.
 
 **Later, unordered:** the MySQL inventory source; OIDC sign-in; expiry notifications and a Prometheus endpoint; SSH certificates;
 ACME order and account views; provisioner management through the admin API;
-a store of its own for notes and history; several CAs.
+account management in the web UI; several CAs.
 
 ## 7. Risks
 
@@ -324,6 +343,10 @@ a store of its own for notes and history; several CAs.
   interface. Mitigations: read-only access to three tables, strict parsing
   that fails visibly, the integration suite pinned to a step-ca version, and
   running it against each new step-ca release before raising the pin.
+- **State of its own to protect.** The store holds password hashes, session
+  token hashes and the history. Mitigations: owner-only file permissions, an
+  unprivileged account, nothing in it that can mint a certificate, and a
+  documented backup.
 - **Table growth.** Short-lived certificates and no pruning mean the tables
   only grow. M2 measures this instead of assuming it is fine.
 - **Revocation is weaker than the word suggests.** Without a CRL a revoked
