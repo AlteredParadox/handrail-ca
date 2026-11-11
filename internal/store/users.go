@@ -134,6 +134,37 @@ func (s *Store) SetPassword(ctx context.Context, username, passwordHash string, 
 	return tx.Commit()
 }
 
+// ChangePassword replaces the password hash of the account that currently
+// has oldHash, and signs it out everywhere, in one transaction. It is for a
+// user changing their own password: oldHash is the hash their current
+// password was just checked against, so a change made elsewhere in the
+// meantime (`user passwd`, or the same form in another window) is not
+// overwritten. ErrNotFound if the account is gone or no longer has oldHash.
+func (s *Store) ChangePassword(ctx context.Context, userID int64, oldHash, newHash string, now time.Time) error {
+	if newHash == "" {
+		return errors.New("no password hash")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }() // no effect after Commit
+
+	res, err := tx.ExecContext(ctx,
+		`UPDATE users SET password_hash = ?, password_changed_at = ? WHERE id = ? AND password_hash = ?`,
+		newHash, now.Unix(), userID, oldHash)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrNotFound
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // RemoveUser deletes an account and its sessions. Its history stays.
 func (s *Store) RemoveUser(ctx context.Context, username string) error {
 	res, err := s.db.ExecContext(ctx, `DELETE FROM users WHERE username = ?`, strings.ToLower(username))

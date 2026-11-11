@@ -49,14 +49,19 @@ tables with a read-only account and changes nothing in the CA's database.
 **D2. Sign-in: local accounts.** Usernames with argon2id password hashes,
 server-side sessions and two roles, viewer and operator. With the store (D5)
 the accounts live there and are managed from the command line on the host
-(`handrail-ca user add`, `passwd`, `remove`, `list`); there is no account
-management in the web UI in the first release. `add` and `passwd` set a
+(`handrail-ca user add`, `passwd`, `remove`, `list`); in the first release
+the web UI manages nothing about accounts except a user's own password
+(below). `add` and `passwd` set a
 password one of three ways: typed at the terminal, unseen and twice
 (owner's request, 2026-11-11); generated and printed once (`-generate`, an
 empty entry at the prompt, or no terminal); or read from a file. Changing a
 password ends that account's sessions. There is no way to read a password
-back and none for a user to change their own from the browser; the second
-is a candidate for later. OIDC is a later milestone.
+back. A signed-in user can change their own from the browser (owner's
+decision, 2026-11-11): the account page asks for the current password
+again, throttles those checks out of the same allowance as sign-ins, ends
+every session of the account and opens a new one for that browser. Adding
+and removing accounts, roles, and resetting a forgotten password stay on
+the command line. OIDC is a later milestone.
 
 **D3. Key generation: offered, as the second path.** Pasting a CSR is the
 default and keeps the private key with the requester. "Generate a key for
@@ -303,11 +308,12 @@ As built in milestone 1:
   right password refused with the wrong ones; that is the price of a
   limit per name, and the README says how to live with it (limit who can
   reach the page, a spare operator account with an unguessable name, a
-  restart clears the counts, `step ca revoke` works regardless). A
-  mitigation in the code would be a device cookie: a browser that has
-  signed in as a user before gets its own allowance for that name, apart
-  from the one strangers can use up. Not built; to be decided before
-  revoking through the UI ships (M3). Names and addresses are counted in two
+  restart clears the counts, `step ca revoke` works regardless). The
+  mitigation in the code is a device cookie: a browser that has signed in
+  as a user before gets its own allowance for that name, apart from the
+  one strangers can use up. It is to be built alongside M3, before
+  revoking through the UI ships (owner's decision, 2026-11-11). Names and
+  addresses are counted in two
   bounded tables, and a full table never drops a count that is still
   running. With the table of names full, a name not yet in it is refused:
   that limit is the one that bounds guessing at an account. With the table
@@ -438,6 +444,10 @@ server that answers `/healthz`.
 - Provisioner key loading, token minting, the write side of the CA client.
 - The revoke flow, history (store and log) with its page, outcome
   verification, read-only mode.
+- A device cookie, as its own change: a browser that has signed in as a
+  user before keeps a sign-in allowance of its own for that name, so that
+  someone hammering a known user name cannot keep its owner out of the UI
+  at the moment a certificate has to be revoked (section 4, access).
 
 **M4. Issue.**
 - CSR path: parse, confirm, sign, download certificate and chain. The

@@ -1,0 +1,57 @@
+<!--
+handrail-ca — a lightweight web UI for step-ca.
+Copyright (C) 2026 AlteredParadox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+{{define "content"}}
+<h1>Your account</h1>
+
+<div class="grid">
+
+<section class="card">
+<h2>Account</h2>
+<dl>
+<dt>User name</dt><dd>{{.User.Username}}</dd>
+<dt>Role</dt><dd>{{.User.Role}}</dd>
+<dt>Password set</dt><dd>{{.Data.PasswordSet}}</dd>
+</dl>
+<p class="muted">Accounts are added, removed and given roles with <span class="mono">handrail-ca user</span> on the host. If you have forgotten your password, it is reset there too.</p>
+</section>
+
+<form class="card" method="post" action="{{.Base}}/account/password">
+<h2>Change password</h2>
+{{if .Data.Changed}}<p class="notice" role="status">Password changed. Every other session of this account was signed out.</p>{{end}}
+{{with .Data.Problem}}<p class="problem" role="alert">{{.}}</p>{{end}}
+<input type="hidden" name="form_token" value="{{.FormToken}}">
+<input type="hidden" name="username" value="{{.User.Username}}" autocomplete="username">
+<div class="field">
+<label for="current_password">Current password</label>
+<input id="current_password" name="current_password" type="password" autocomplete="current-password" maxlength="1024" required>
+</div>
+<div class="field">
+<label for="new_password">New password</label>
+<input id="new_password" name="new_password" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+</div>
+<div class="field">
+<label for="new_password_again">New password, again</label>
+<input id="new_password_again" name="new_password_again" type="password" autocomplete="new-password" minlength="12" maxlength="1024" required>
+</div>
+<p class="muted">12 to 1,024 characters. Changing it signs this account out everywhere else.</p>
+<button type="submit" class="primary">Change password</button>
+</form>
+
+</div>
+{{end}}

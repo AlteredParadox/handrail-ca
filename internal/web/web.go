@@ -37,6 +37,7 @@ import (
 	"time"
 
 	"handrail-ca/internal/ca"
+	"handrail-ca/internal/password"
 	"handrail-ca/internal/store"
 )
 
@@ -65,6 +66,7 @@ type CA interface {
 type Store interface {
 	Credentials(ctx context.Context, username string) (store.User, string, error)
 	CreateSession(ctx context.Context, userID int64, passwordHash string, token store.TokenHash, now, expires time.Time) error
+	ChangePassword(ctx context.Context, userID int64, oldHash, newHash string, now time.Time) error
 	Session(ctx context.Context, token store.TokenHash, now time.Time) (store.Session, error)
 	TouchSession(ctx context.Context, token store.TokenHash, now time.Time) error
 	DeleteSession(ctx context.Context, token store.TokenHash) error
@@ -109,6 +111,8 @@ type server struct {
 	limiter   *limiter
 	hashSlots chan struct{} // bounds concurrent password hashing
 	dummyHash string        // checked when the user does not exist
+	// hash makes the stored form of a new password (password.Hash).
+	hash      func(pw string) (string, error)
 	status    *statusCache
 	strangers strangerBudget
 
@@ -170,6 +174,7 @@ func build(opts Options) (*server, http.Handler, error) {
 		limiter:   newLimiter(),
 		hashSlots: make(chan struct{}, maxConcurrentHashes),
 		dummyHash: dummy,
+		hash:      password.Hash,
 		status:    &statusCache{},
 	}
 
@@ -192,6 +197,8 @@ func build(opts Options) (*server, http.Handler, error) {
 	// Signed-in users only.
 	mux.HandleFunc("POST /sign-out", s.signedIn(s.signOut))
 	mux.HandleFunc("GET /status", s.signedIn(s.statusPage))
+	mux.HandleFunc("GET /account", s.signedIn(s.accountPage))
+	mux.HandleFunc("POST /account/password", s.signedIn(s.changePassword))
 	mux.HandleFunc("GET /{$}", s.signedIn(func(w http.ResponseWriter, r *http.Request) {
 		// The certificate list will live here; until it exists, the one
 		// page there is.

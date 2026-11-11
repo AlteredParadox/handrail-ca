@@ -67,7 +67,8 @@ It starts whether or not the CA is up; the CA status page says which.
 ### Accounts
 
 Accounts are kept in the store and managed from the command line on the
-host. There is no account management in the browser.
+host. The one thing an account does for itself in the browser is change
+its own password, on the page behind its name in the top bar.
 
 ```sh
 ./handrail-ca user add -role operator alice  # asks for a password, typed unseen
@@ -84,7 +85,9 @@ once. `-generate` skips the question, and is what happens when there is no
 terminal to ask on (a script, or `docker run` without `-it`).
 `-password-file` reads it from a file, or from standard input with `-`. A
 password is 12 to 1,024 characters. Nobody can read an existing password
-back: resetting one means setting a new one with `passwd`.
+back: resetting a forgotten one means setting a new one with `passwd`.
+Someone who knows theirs changes it in the browser instead; that asks for
+the current password, and signs the account out everywhere else.
 
 A viewer reads; an operator will also issue and revoke. Flags come before
 the user name. Sessions end after an hour unused or twelve hours in all.

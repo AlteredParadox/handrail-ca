@@ -47,8 +47,10 @@ const (
 	formLifetime = time.Hour
 
 	tokenBytes = 32
-	// maxForm bounds a posted form: two short fields and a token.
-	maxForm = 8 << 10
+	// maxForm bounds a posted form. The largest is the change of password:
+	// three passwords of up to 1,024 bytes, each of which a browser may
+	// send as three bytes of percent-encoding.
+	maxForm = 16 << 10
 	// maxConcurrentHashes bounds password hashing, which takes 64 MiB each.
 	maxConcurrentHashes = 2
 )
