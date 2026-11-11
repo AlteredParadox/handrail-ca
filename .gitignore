@@ -1,0 +1,28 @@
+# binaries
+/handrail-ca
+/bin/
+/dist/
+# local data
+/data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+# local secrets: provisioner keys, passwords, CA material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.jwk
+secret
+# editor / os
+.DS_Store
+*.swp
+
+# test and release artifacts
+*.test
+coverage.out
+
+# external review notes (local only)
+gpt_review_*.md
