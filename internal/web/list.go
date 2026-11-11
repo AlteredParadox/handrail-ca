@@ -104,10 +104,16 @@ func (q listQuery) href(base string) string {
 	return base + "/"
 }
 
+// firstPage is q on its first page.
+func (q listQuery) firstPage() listQuery {
+	q.Page = 1
+	return q
+}
+
 // with returns q changed by change, on its first page: a different filter
 // or order starts from the top.
 func (q listQuery) with(change func(*listQuery)) listQuery {
-	q.Page = 1
+	q = q.firstPage()
 	change(&q)
 	return q
 }
@@ -202,7 +208,7 @@ func (s *server) listPage(w http.ResponseWriter, r *http.Request) {
 		IncludeAdmin: q.IncludeAdmin,
 		View:         string(q.View),
 		Sort:         string(q.Order),
-		Filtered:     len(q.with(func(*listQuery) {}).values()) > 0,
+		Filtered:     len(q.firstPage().values()) > 0,
 		ClearURL:     listQuery{}.href(s.base),
 	}
 	if q.Reverse {
@@ -215,10 +221,19 @@ func (s *server) listPage(w http.ResponseWriter, r *http.Request) {
 	data.LastRead = span(now.Sub(st.LoadedAt)) + " ago"
 
 	res := snap.Select(q.Query, now)
-	data.Total = len(res.Rows)
 	data.AdminHidden = res.AdminHidden
 	data.AdminURL = q.with(func(c *listQuery) { c.IncludeAdmin = true }).href(s.base)
+	data.Views = s.viewLinks(q, res.InView)
+	data.Provisioners = provisionerOptions(snap.Provisioners(), q.Provisioner)
+	data.Columns = s.columnLinks(q)
+	s.fillPage(&data, q, res.Rows, now)
+	s.render(w, r, http.StatusOK, "list.html", "Certificates", data)
+}
 
+// viewLinks are the buttons that choose a view, each with how many
+// certificates it would show for the rest of the query.
+func (s *server) viewLinks(q listQuery, inView map[inventory.View]int) []viewLink {
+	var links []viewLink
 	for _, v := range []struct {
 		view  inventory.View
 		label string
@@ -227,31 +242,41 @@ func (s *server) listPage(w http.ResponseWriter, r *http.Request) {
 		{inventory.ViewRevoked, "Revoked"}, {inventory.ViewUnreadable, "Unreadable"}, {inventory.ViewAll, "All"},
 	} {
 		// Unreadable rows are an anomaly: offered only when there are some.
-		if v.view == inventory.ViewUnreadable && res.InView[v.view] == 0 && q.View != v.view {
+		if v.view == inventory.ViewUnreadable && inView[v.view] == 0 && q.View != v.view {
 			continue
 		}
-		data.Views = append(data.Views, viewLink{
-			Label: v.label, Count: res.InView[v.view], Current: q.View == v.view,
+		links = append(links, viewLink{
+			Label: v.label, Count: inView[v.view], Current: q.View == v.view,
 			URL: q.with(func(c *listQuery) { c.View = v.view }).href(s.base),
 		})
 	}
+	return links
+}
 
+// provisionerOptions are the choices of the provisioner menu, with the one
+// asked for selected.
+func provisionerOptions(provisioners []inventory.ProvisionerCount, asked string) []provisionerOption {
+	var options []provisionerOption
 	known := false
-	for _, p := range snap.Provisioners() {
+	for _, p := range provisioners {
 		label := p.Name
 		if p.Type != "" {
 			label += " (" + p.Type + ")"
 		}
-		data.Provisioners = append(data.Provisioners, provisionerOption{Name: p.Name, Label: label, Selected: p.Name == q.Provisioner})
-		known = known || p.Name == q.Provisioner
+		options = append(options, provisionerOption{Name: p.Name, Label: label, Selected: p.Name == asked})
+		known = known || p.Name == asked
 	}
-	if q.Provisioner != "" && !known {
+	if asked != "" && !known {
 		// Asked for by address, not from the menu: keep it selected, so
 		// that the form says what the empty list is filtered by.
-		data.Provisioners = append(data.Provisioners, provisionerOption{Name: q.Provisioner, Label: q.Provisioner, Selected: true})
+		options = append(options, provisionerOption{Name: asked, Label: asked, Selected: true})
 	}
+	return options
+}
 
-	data.Columns = map[string]columnLink{}
+// columnLinks are the sortable column headings.
+func (s *server) columnLinks(q listQuery) map[string]columnLink {
+	columns := map[string]columnLink{}
 	for _, order := range []inventory.Order{inventory.BySubject, inventory.ByIssued, inventory.ByExpiry} {
 		col := columnLink{URL: q.with(func(c *listQuery) { c.Order, c.Reverse = order, false }).href(s.base)}
 		if q.Order == order {
@@ -262,10 +287,15 @@ func (s *server) listPage(w http.ResponseWriter, r *http.Request) {
 			}
 			col.URL = q.with(func(c *listQuery) { c.Reverse = !q.Reverse }).href(s.base)
 		}
-		data.Columns[string(order)] = col
+		columns[string(order)] = col
 	}
+	return columns
+}
 
-	// One page of it. A page number past the end shows the last page.
+// fillPage puts one page of the rows into data, with the links to the
+// pages either side. A page number past the end shows the last page.
+func (s *server) fillPage(data *listData, q listQuery, rows []inventory.Row, now time.Time) {
+	data.Total = len(rows)
 	pages := max((data.Total+listPageSize-1)/listPageSize, 1)
 	page := min(q.Page, pages)
 	start := (page - 1) * listPageSize
@@ -279,10 +309,9 @@ func (s *server) listPage(w http.ResponseWriter, r *http.Request) {
 	if page < pages {
 		data.NextURL = q.with(func(c *listQuery) { c.Page = page + 1 }).href(s.base)
 	}
-	for _, row := range res.Rows[start:end] {
+	for _, row := range rows[start:end] {
 		data.Rows = append(data.Rows, newListRow(row, now))
 	}
-	s.render(w, r, http.StatusOK, "list.html", "Certificates", data)
 }
 
 func newListRow(row inventory.Row, now time.Time) listRow {

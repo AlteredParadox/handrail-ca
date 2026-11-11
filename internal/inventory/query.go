@@ -131,14 +131,10 @@ type Result struct {
 
 // Select runs a query against the snapshot, with statuses as of now.
 func (s *Snapshot) Select(q Query, now time.Time) Result {
-	needle := strings.ToLower(strings.TrimSpace(q.Search))
+	needle := searchNeedle(q.Search)
 	res := Result{InView: map[View]int{}}
-	views := []View{ViewActive, ViewExpiring, ViewExpired, ViewRevoked, ViewUnreadable, ViewAll}
 	for _, c := range s.Certificates {
-		if q.Provisioner != "" && c.Provisioner.Name != q.Provisioner {
-			continue
-		}
-		if needle != "" && !c.matches(needle) {
+		if !c.matches(q.Provisioner, needle) {
 			continue
 		}
 		if c.Provisioner.Name == AdminProvisioner && !q.IncludeAdmin && q.Provisioner != AdminProvisioner {
@@ -146,7 +142,7 @@ func (s *Snapshot) Select(q Query, now time.Time) Result {
 			continue
 		}
 		status := s.Status(c, now)
-		for _, v := range views {
+		for _, v := range allViews {
 			if v.includes(status) {
 				res.InView[v]++
 			}
@@ -159,18 +155,27 @@ func (s *Snapshot) Select(q Query, now time.Time) Result {
 	return res
 }
 
-// matches reports whether a lower-case needle occurs in what a certificate
-// can be searched by.
-func (c *Certificate) matches(needle string) bool {
-	if strings.Contains(strings.ToLower(c.Subject), needle) || strings.Contains(c.Serial, needle) || strings.Contains(c.SerialHex, needle) {
-		return true
+var allViews = []View{ViewActive, ViewExpiring, ViewExpired, ViewRevoked, ViewUnreadable, ViewAll}
+
+// searchNeedle prepares search text for matching: lower case, trimmed, and
+// on one line, since what it is matched against keeps one item to a line
+// and a match must not run from one item into the next.
+func searchNeedle(search string) string {
+	needle := strings.ToLower(strings.TrimSpace(search))
+	if i := strings.IndexAny(needle, "\r\n"); i >= 0 {
+		needle = strings.TrimSpace(needle[:i])
 	}
-	for _, n := range c.Names {
-		if strings.Contains(strings.ToLower(n.Value), needle) {
-			return true
-		}
+	return needle
+}
+
+// matches reports whether a certificate is from the provisioner asked for
+// (any, if none is) and contains the needle (anything, if it is empty) in
+// its serial, its subject or any of its names.
+func (c *Certificate) matches(provisioner, needle string) bool {
+	if provisioner != "" && c.Provisioner.Name != provisioner {
+		return false
 	}
-	return false
+	return needle == "" || strings.Contains(c.haystack, needle)
 }
 
 // sortRows orders rows; ties, and rows without the field sorted by

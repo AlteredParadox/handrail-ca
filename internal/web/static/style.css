@@ -399,6 +399,7 @@ tbody tr:last-child td {
   background: var(--warn-ground);
   border-radius: 8px;
   color: var(--warn);
+  display: block;
   font-size: 14px;
   overflow-wrap: anywhere;
   padding: 12px 16px;

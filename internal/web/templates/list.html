@@ -48,7 +48,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{else}}
 
 {{if .Problem}}
-<p class="stale" role="status">This list is as it was {{.LastRead}}: the last attempt to read the CA's database again failed. Certificates issued or revoked since then are not shown. {{.Problem}}</p>
+<output class="stale">This list is as it was {{.LastRead}}: the last attempt to read the CA's database again failed. Certificates issued or revoked since then are not shown. {{.Problem}}</output>
 {{end}}
 
 <form class="card filters" method="get" action="{{$base}}/">

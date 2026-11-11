@@ -20,6 +20,9 @@ import (
 	"context"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
+	"net"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -229,6 +232,63 @@ func TestParseViewAndOrder(t *testing.T) {
 	for _, s := range []Status{StatusExpired, StatusRevoked, StatusUnreadable} {
 		if ViewActive.includes(s) {
 			t.Errorf("the active view includes %v", s)
+		}
+	}
+}
+
+// A certificate with more names than the list keeps for display must still
+// be found by every one of them, of whatever kind. Being told that no
+// certificate matches a name the CA has issued one for would be a wrong
+// answer, not a short one.
+func TestSearchFindsNamesBeyondTheOnesKept(t *testing.T) {
+	u, _ := url.Parse("spiffe://handrail.test/workload/far-down-the-list")
+	src := &fakeSource{certs: map[string]RawCertificate{}}
+	src.certs["4001"] = RawCertificate{Serial: "4001", DER: newDER(t, "4001", func(c *x509.Certificate) {
+		c.Subject = pkix.Name{CommonName: "Many.Names.Handrail.Test"}
+		for i := range maxNames + 30 {
+			c.DNSNames = append(c.DNSNames, fmt.Sprintf("Host-%03d.handrail.test", i))
+		}
+		c.IPAddresses = []net.IP{net.ParseIP("10.20.99.7"), net.ParseIP("2001:db8::99")}
+		c.EmailAddresses = []string{"Ops@Handrail.Test"}
+		c.URIs = []*url.URL{u}
+	})}
+	src.certs["4002"] = newRow(t, "4002", "other.handrail.test")
+	src.certs["4003"] = RawCertificate{Serial: "4003", DER: []byte("junk")}
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	snap := snapshotOf(t, src, now)
+	found := func(search string) string {
+		var serials []string
+		for _, r := range snap.Select(Query{Search: search, View: ViewAll}, now).Rows {
+			serials = append(serials, r.Serial)
+		}
+		return strings.Join(serials, " ")
+	}
+
+	many := snap.Select(Query{Search: "many.names", View: ViewAll}, now).Rows[0]
+	if len(many.Names) != maxNames || many.MoreNames != 30+4 {
+		t.Fatalf("%d names kept, %d more", len(many.Names), many.MoreNames)
+	}
+	for search, want := range map[string]string{
+		"host-000.handrail.test": "4001", // among the names kept
+		"host-049":               "4001", // the last of them
+		"host-050":               "4001", // the first one left out
+		"HOST-079.handrail.test": "4001", // the last DNS name
+		"10.20.99.7":             "4001", // other kinds, all past the cut
+		"2001:db8::99":           "4001",
+		"ops@handrail.test":      "4001",
+		"far-down-the-list":      "4001",
+		"host-080":               "",
+		"handrail.test":          "4001 4002",
+		// An unreadable row can be found by its key.
+		"4003": "4003",
+		// A match does not run from one name into the next, and a second
+		// line of search text is dropped.
+		"host-001.handrail.test\nhost-002": "4001",
+		"test\nhost":                       "4001 4002",
+		"000.handrail.testhost-001":        "",
+	} {
+		if got := found(search); got != want {
+			t.Errorf("search %q found %q, want %q", search, got, want)
 		}
 	}
 }
