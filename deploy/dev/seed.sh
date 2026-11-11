@@ -7,15 +7,25 @@
 # It prepares the CA the way docs/ca-setup.md tells an operator to (so that
 # page's commands are exercised on every fresh environment) and then issues
 # a small, varied set of certificates for the UI to show. Run once per
-# environment; a second run does nothing.
+# environment: a second run does nothing, and a run after an interrupted one
+# stops and says how to start over.
 set -euo pipefail
 
 ADMIN=(--admin-subject step --admin-provisioner "Admin JWK" --admin-password-file /home/step/secrets/password)
 HANDRAIL=(--provisioner handrail --provisioner-password-file /run/secrets/handrail_provisioner_password)
 
-if step ca provisioner list | jq -e '.[] | select(.name == "handrail")' >/dev/null; then
-	echo "seed: the handrail provisioner exists; already seeded"
+# Written as the last step, in the CA's volume. The handrail provisioner is
+# created first, so its presence alone does not mean the seed finished.
+marker=/home/step/.handrail-dev-seeded
+
+if [[ -f "$marker" ]]; then
+	echo "seed: already seeded"
 	exit 0
+fi
+if step ca provisioner list | jq -e '.[] | select(.name == "handrail")' >/dev/null; then
+	echo "seed: an earlier run stopped part-way: the handrail provisioner exists but the seed never finished." >&2
+	echo "seed: the steps are not safe to repeat one by one. Start again with: make dev-down && make dev-up" >&2
+	exit 1
 fi
 
 work=$(mktemp -d)
@@ -88,4 +98,5 @@ for name in acme1.handrail.test acme2.handrail.test; do
 	quiet step ca certificate "$name" "$name.crt" "$name.key" --provisioner acme --standalone --force
 done
 
+: >"$marker"
 echo "seed: done"
