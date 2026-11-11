@@ -46,6 +46,7 @@ A throwaway step-ca on PostgreSQL for development is one command away; see
 ```sh
 make dev-up         # start and seed the development CA
 make dev-verify     # check step-ca's behavior against what the docs say
+make dev-test       # run the integration tests against it
 make dev-down       # remove it
 ```
 
