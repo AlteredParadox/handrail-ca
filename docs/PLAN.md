@@ -251,8 +251,24 @@ be read, status is shown as unknown rather than valid.
 **Acting on the CA.** handrail-ca is configured with one JWK provisioner
 (name, key ID, password file). The recommended setup is a provisioner created
 for handrail-ca alone, so its limits are set in one place on the CA and its
-certificates are identifiable by provisioner name. The decrypted key lives
-only in memory. Tokens are minted per request with a random `jti` and a
+certificates are identifiable by provisioner name. That provisioner should
+also carry, on the CA:
+
+- a name policy (step-ca's allow-list) limited to the owner's own domains
+  and address ranges, so that a stolen provisioner key cannot be used to
+  mint a certificate for an outside name that machines trusting this CA
+  would accept. In step-ca `v0.30.2` a provisioner's policy is set through
+  remote management and is checked on every JWK sign request
+  (`newX509NamePolicyValidator` in `jwk.go`); it cannot be written in
+  `ca.json`.
+- a maximum lifetime no longer than the longest interval the owner is
+  willing to renew by hand. Without a published revocation list a
+  mis-issued certificate is trusted until it expires, so this cap is the
+  real limit on the damage; too short a cap defeats the purpose of manual
+  issuance for devices that cannot renew themselves.
+
+Neither limits revocation: any JWK provisioner can revoke any serial. The
+decrypted key lives only in memory. Tokens are minted per request with a random `jti` and a
 one-minute lifetime, and are never logged.
 
 - *Issue:* the CSR is parsed and shown back (subject, SANs, key type) for
@@ -352,7 +368,8 @@ server that answers `/healthz`.
 - Validity limits from the provisioner's claims.
 
 **M5. First release, v0.1.0.**
-- Deployment documentation: creating the provisioner, installing the
+- Deployment documentation: creating the provisioner with its name policy
+  and lifetime cap, installing the
   exporter and its timer on the CA's host, reverse proxy and container
   examples, what revocation means.
 - The release carries both binaries; the container image carries the web UI.
@@ -387,8 +404,9 @@ a store of its own for notes and history; several CAs.
   certificate keeps working until it expires. The UI states this on the
   revoke page instead of leaving the operator to assume otherwise.
 - **A credential that mints certificates.** The provisioner key is the most
-  valuable thing handrail-ca holds. Mitigations: a dedicated provisioner
-  with tight claims on the CA side, the key in memory only, short
+  valuable thing handrail-ca holds, and the CA's hardware-held signing key
+  does not limit what it can ask the CA to sign. Mitigations: a dedicated
+  provisioner with a name policy and a lifetime cap on the CA side, the key in memory only, short
   single-use tokens, roles, an audit trail, and read-only mode for
   deployments that only need the view.
 
