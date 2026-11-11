@@ -198,8 +198,14 @@ type site struct {
 	public  *url.URL
 }
 
-func newSite(t *testing.T, publicURL string) *site {
+// newSite builds a site at publicURL, with the given addresses or ranges
+// as its trusted proxies.
+func newSite(t *testing.T, publicURL string, trustedProxies ...string) *site {
 	t.Helper()
+	proxies, err := ParseTrustedProxies(strings.Join(trustedProxies, ","))
+	if err != nil {
+		t.Fatal(err)
+	}
 	st, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -219,7 +225,7 @@ func newSite(t *testing.T, publicURL string) *site {
 	s := &site{t: t, store: &brokenStore{Store: st}, ca: newFakeCA(t), clock: &clock{now: t0}, log: &bytes.Buffer{}, public: u}
 	s.server, s.handler, err = build(Options{
 		Version: "v1.2.3", License: []byte("LICENSE TEXT"), ThirdPartyLicenses: []byte("NOTICES TEXT"),
-		Store: s.store, CA: s.ca, PublicURL: u, Now: s.clock.Now,
+		Store: s.store, CA: s.ca, PublicURL: u, TrustedProxies: proxies, Now: s.clock.Now,
 		Log: slog.New(slog.NewTextHandler(&syncWriter{buf: s.log}, nil)),
 	})
 	if err != nil {
@@ -259,6 +265,10 @@ type browser struct {
 	// origin replaces the Origin sent on posts; "-" sends none.
 	origin string
 	host   string
+	// remote is the address the connection comes from (10.20.0.5 if not
+	// set), and forwardedFor the X-Forwarded-For header sent with it.
+	remote       string
+	forwardedFor string
 }
 
 func (s *site) browser() *browser {
@@ -279,6 +289,12 @@ func (b *browser) do(method, path string, form url.Values) *httptest.ResponseRec
 		req.Host = b.host
 	}
 	req.RemoteAddr = "10.20.0.5:40000"
+	if b.remote != "" {
+		req.RemoteAddr = b.remote
+	}
+	if b.forwardedFor != "" {
+		req.Header.Set("X-Forwarded-For", b.forwardedFor)
+	}
 	if method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 		switch b.origin {
@@ -1051,6 +1067,154 @@ func TestSourceURL(t *testing.T) {
 	for _, tt := range tests {
 		if got := SourceURL(tt.version); got != tt.want {
 			t.Errorf("SourceURL(%q) = %q, want %q", tt.version, got, tt.want)
+		}
+	}
+}
+
+// Behind a declared proxy each visitor is throttled by their own address,
+// taken from the header the proxy sets.
+func TestThrottlePerVisitorBehindATrustedProxy(t *testing.T) {
+	s := newSite(t, "https://handrail.internal.example", "10.20.0.5", "10.20.9.0/24")
+	visitor := func(forwardedFor string) *browser {
+		b := s.browser()
+		b.forwardedFor = forwardedFor
+		return b
+	}
+	for range limiterAttempts {
+		wantStatus(t, visitor("203.0.113.7").signIn("alice", "wrong"), http.StatusUnauthorized)
+	}
+	// That visitor has used their attempts, for any name.
+	wantStatus(t, visitor("203.0.113.7").signIn("bob", bobPassword), http.StatusTooManyRequests)
+	// Putting other addresses in front of the header does not help: the
+	// proxy appends the real one, and only what the proxy wrote is read.
+	wantStatus(t, visitor("198.51.100.1, 203.0.113.7").signIn("bob", bobPassword), http.StatusTooManyRequests)
+	wantStatus(t, visitor("10.20.0.5, 203.0.113.7").signIn("bob", bobPassword), http.StatusTooManyRequests)
+	// Through a second trusted proxy, the same visitor is still that visitor.
+	wantStatus(t, visitor("203.0.113.7, 10.20.9.4").signIn("bob", bobPassword), http.StatusTooManyRequests)
+
+	// Another visitor is not affected, and the history has their address,
+	// not the proxy's.
+	wantRedirect(t, visitor("203.0.113.8").signIn("bob", bobPassword), "/")
+	if last := s.history()[0]; last.Actor != "bob" || last.Remote != "203.0.113.8" {
+		t.Errorf("history = %+v", last)
+	}
+}
+
+// The regression this guards: behind a proxy every visitor arrives from the
+// proxy's address. Counted as one visitor, five wrong sign-ins by anyone
+// would block everyone's.
+func TestOneVisitorCannotLockEveryoneOutBehindAProxy(t *testing.T) {
+	for name, s := range map[string]*site{
+		// HTTPS means a proxy is in front; none has been declared.
+		"undeclared proxy": newSite(t, "https://handrail.internal.example"),
+		// Declared, but it sends no usable X-Forwarded-For.
+		"proxy without the header": newSite(t, "https://handrail.internal.example", "10.20.0.5"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for range limiterAttempts + 3 {
+				s.browser().signIn("nobody-"+name[:5], "wrong")
+				s.browser().signIn("not a name", "wrong")
+			}
+			wantRedirect(t, s.browser().signIn("bob", bobPassword), "/")
+			// The limit per user name still holds.
+			for range limiterAttempts {
+				wantStatus(t, s.browser().signIn("alice", "wrong"), http.StatusUnauthorized)
+			}
+			wantStatus(t, s.browser().signIn("alice", alicePassword), http.StatusTooManyRequests)
+			wantRedirect(t, s.browser().signIn("bob", bobPassword), "/")
+		})
+	}
+}
+
+// Without a trusted proxy in the path the header is the visitor's own
+// words, and is not believed.
+func TestForwardedHeaderIsIgnoredFromAnUntrustedPeer(t *testing.T) {
+	for name, s := range map[string]*site{
+		"no proxies configured": newSite(t, "http://127.0.0.1:8080"),
+		"peer is not the proxy": newSite(t, "https://handrail.internal.example", "10.20.9.0/24"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			for i := range limiterAttempts {
+				b := s.browser()
+				b.forwardedFor = fmt.Sprintf("203.0.113.%d", i)
+				wantStatus(t, b.signIn("nobody", "wrong"), http.StatusUnauthorized)
+			}
+			b := s.browser()
+			b.forwardedFor = "203.0.113.99"
+			wantStatus(t, b.signIn("bob", bobPassword), http.StatusTooManyRequests)
+			if last := s.history()[0]; last.Remote != "10.20.0.5" {
+				t.Errorf("history has %q as the address, want the connection's", last.Remote)
+			}
+		})
+	}
+}
+
+func TestClientAddr(t *testing.T) {
+	behind := newSite(t, "https://handrail.internal.example", "10.20.0.5", "fd00::/8").server
+	direct := newSite(t, "http://127.0.0.1:8080").server
+	undeclared := newSite(t, "https://handrail.internal.example").server
+	tests := []struct {
+		name         string
+		s            *server
+		remote       string
+		forwardedFor []string
+		addr         string
+		known        bool
+	}{
+		{"direct", direct, "192.0.2.4:5000", nil, "192.0.2.4", true},
+		{"direct, header ignored", direct, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", true},
+		{"direct IPv6", direct, "[2001:db8::4]:5000", nil, "2001:db8::4", true},
+		{"direct, IPv4 written as IPv6", direct, "[::ffff:192.0.2.4]:5000", nil, "192.0.2.4", true},
+		{"no port", direct, "192.0.2.4", nil, "192.0.2.4", true},
+		{"not an address", direct, "@", nil, "@", false},
+		{"undeclared proxy", undeclared, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", false},
+		{"through the proxy", behind, "10.20.0.5:5000", []string{"203.0.113.7"}, "203.0.113.7", true},
+		{"rightmost untrusted", behind, "10.20.0.5:5000", []string{"198.51.100.1, 203.0.113.7"}, "203.0.113.7", true},
+		{"two proxies", behind, "[fd00::1]:5000", []string{"203.0.113.7, 10.20.0.5"}, "203.0.113.7", true},
+		{"several headers", behind, "10.20.0.5:5000", []string{"198.51.100.1", "203.0.113.7"}, "203.0.113.7", true},
+		{"with a port", behind, "10.20.0.5:5000", []string{"203.0.113.7:4444"}, "203.0.113.7", true},
+		{"IPv6 in brackets", behind, "10.20.0.5:5000", []string{"[2001:db8::7]"}, "2001:db8::7", true},
+		{"IPv6 with a port", behind, "10.20.0.5:5000", []string{"[2001:db8::7]:4444"}, "2001:db8::7", true},
+		{"no header", behind, "10.20.0.5:5000", nil, "10.20.0.5", false},
+		{"only proxies in the header", behind, "10.20.0.5:5000", []string{"10.20.0.5"}, "10.20.0.5", false},
+		{"junk at the right", behind, "10.20.0.5:5000", []string{"203.0.113.7, unknown"}, "10.20.0.5", false},
+		{"junk to the left is never reached", behind, "10.20.0.5:5000", []string{"<script>, 203.0.113.7"}, "203.0.113.7", true},
+		{"a header too long to walk", behind, "10.20.0.5:5000", []string{"203.0.113.7" + strings.Repeat(", 10.20.0.5", maxForwardedHops)}, "10.20.0.5", false},
+		{"not from the proxy", behind, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/", nil)
+			r.RemoteAddr = tt.remote
+			for _, v := range tt.forwardedFor {
+				r.Header.Add("X-Forwarded-For", v)
+			}
+			addr, known := tt.s.clientAddr(r)
+			if addr != tt.addr || known != tt.known {
+				t.Errorf("clientAddr = %q, %v; want %q, %v", addr, known, tt.addr, tt.known)
+			}
+		})
+	}
+}
+
+func TestParseTrustedProxies(t *testing.T) {
+	got, err := ParseTrustedProxies(" 10.20.0.5, 10.20.9.7/24 ,fd00::1,, ::ffff:192.0.2.1 ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var texts []string
+	for _, p := range got {
+		texts = append(texts, p.String())
+	}
+	if want := "10.20.0.5/32 10.20.9.0/24 fd00::1/128 192.0.2.1/32"; strings.Join(texts, " ") != want {
+		t.Errorf("got %v, want %s", texts, want)
+	}
+	if got, err := ParseTrustedProxies(""); err != nil || got != nil {
+		t.Errorf("an empty list: %v, %v", got, err)
+	}
+	for _, bad := range []string{"proxy.internal.example", "10.20.0.5/40", "10.20.0", "10.20.0.5 10.20.0.6"} {
+		if _, err := ParseTrustedProxies(bad); err == nil || !strings.Contains(err.Error(), "IP address or CIDR range") {
+			t.Errorf("ParseTrustedProxies(%q): %v", bad, err)
 		}
 	}
 }

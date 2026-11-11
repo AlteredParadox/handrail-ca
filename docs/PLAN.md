@@ -295,11 +295,18 @@ As built in milestone 1:
   gets five attempts in five minutes. An attempt is counted when its
   password check starts, so guesses sent at the same time cannot outrun the
   limit, and a successful sign-in gives its attempt back. The address is
-  the connection's; forwarded headers are not
-  trusted, so behind a reverse proxy the per-address limit is one limit for
-  everybody, and a known user name can be kept locked out by someone who
-  keeps failing on it. A trusted-proxy setting would sharpen the first;
-  the second is the price of any lockout.
+  the visitor's own only where that can be known (next point). A known
+  user name can be kept locked out by someone who keeps failing on it; that
+  is the price of any lockout.
+- Behind a reverse proxy every visitor arrives from the proxy's address.
+  `-trusted-proxy` lists the proxies; on a connection from one of them the
+  visitor is the rightmost address in `X-Forwarded-For` that is not itself
+  a listed proxy, so nothing a visitor writes into the header is believed.
+  From any other peer the header is ignored. Where the visitor's address
+  cannot be known (an `https` public URL with no proxy listed, or a listed
+  proxy that sends no usable header), there is no per-address limit at
+  all: one shared limit would let anyone who can reach the sign-in page
+  block everyone's sign-in. handrail-ca warns at start in the first case.
 - A sign-in for a name that is not an account is recorded as "(unknown
   user)", never with what was typed: people type passwords into that field.
 - At most two passwords are hashed at once (64 MiB each), and a missing

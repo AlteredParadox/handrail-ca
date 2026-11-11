@@ -104,7 +104,7 @@ func serverArgs(t *testing.T, listen string, more ...string) []string {
 
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_ROOT", "HANDRAIL_PUBLIC_URL"} {
+	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_ROOT", "HANDRAIL_PUBLIC_URL", "HANDRAIL_TRUSTED_PROXIES"} {
 		t.Setenv(name, "")
 	}
 }
@@ -140,6 +140,38 @@ func TestRunStartsWithoutAccountsOnLoopback(t *testing.T) {
 	}
 	if !strings.Contains(errOut.String(), "no accounts yet") {
 		t.Errorf("no hint about adding an account: %s", errOut.String())
+	}
+}
+
+// An https public URL means a proxy is in front. Without being told which,
+// handrail-ca says at start what that costs; told, it does not.
+func TestRunWarnsAboutAnUndeclaredProxy(t *testing.T) {
+	const warning = "no -trusted-proxy"
+	for name, tt := range map[string]struct {
+		more []string
+		want bool
+	}{
+		"undeclared": {[]string{"-public-url", "https://handrail.example"}, true},
+		"declared":   {[]string{"-public-url", "https://handrail.example", "-trusted-proxy", "127.0.0.1, 10.20.0.0/16"}, false},
+		"plain HTTP": {nil, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			addr := freeAddr(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var errOut syncBuffer
+			done := make(chan int, 1)
+			args := serverArgs(t, addr, tt.more...)
+			go func() { done <- run(ctx, args, nil, io.Discard, &errOut) }()
+			waitForHealth(t, addr, &errOut)
+			cancel()
+			if code := <-done; code != 0 {
+				t.Fatalf("exit code = %d: %s", code, errOut.String())
+			}
+			if got := strings.Contains(errOut.String(), warning); got != tt.want {
+				t.Errorf("warning present = %v, want %v: %s", got, tt.want, errOut.String())
+			}
+		})
 	}
 }
 
@@ -186,6 +218,7 @@ func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
 	}{
 		{"nothing", nil, 2, "not configured: -data (HANDRAIL_DATA), -ca-url (HANDRAIL_CA_URL), -ca-root (HANDRAIL_CA_ROOT)"},
 		{"no CA", []string{"-data", data}, 2, "not configured: -ca-url (HANDRAIL_CA_URL), -ca-root"},
+		{"trusted proxy by name", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", root, "-trusted-proxy", "proxy.internal.example"}, 2, "-trusted-proxy: invalid IP address or CIDR range: proxy.internal.example"},
 		{"stray argument", []string{"-data", data, "serve"}, 2, `unexpected argument "serve"`},
 		{"data directory is a file", []string{"-data", dataIsAFile, "-ca-url", "https://ca.invalid", "-ca-root", root}, 1, "opening the store"},
 		{"no root file", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-root", filepath.Join(data, "none")}, 1, "reading the CA's root certificate"},

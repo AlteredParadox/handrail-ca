@@ -29,6 +29,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strings"
@@ -86,7 +87,11 @@ type Options struct {
 	// forms are accepted from, its scheme decides whether cookies are
 	// marked Secure, and its path is the prefix every page is served under.
 	PublicURL *url.URL
-	Log       *slog.Logger
+	// TrustedProxies are the reverse proxies in front of handrail-ca. Only
+	// a connection from one of them has its X-Forwarded-For header read to
+	// learn the client's address.
+	TrustedProxies []netip.Prefix
+	Log            *slog.Logger
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 }

@@ -42,6 +42,7 @@ export HANDRAIL_CA_ROOT=/etc/handrail-ca/root_ca.crt
 | `-ca-root` | `HANDRAIL_CA_ROOT` | File with the CA's root certificate. Every connection to the CA is verified against it and nothing else. |
 | `-listen` | `HANDRAIL_LISTEN` | Listen address; `127.0.0.1:8080` unless set. |
 | `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. |
+| `-trusted-proxy` | `HANDRAIL_TRUSTED_PROXIES` | Addresses or CIDR ranges of the reverse proxies in front, comma-separated. Set it whenever there is one. |
 
 handrail-ca serves plain HTTP. To reach it from another machine, put a
 reverse proxy with TLS in front and set `-public-url` to the proxy's
@@ -49,6 +50,17 @@ reverse proxy with TLS in front and set `-public-url` to the proxy's
 forms are accepted from, cookies are marked `Secure` for it, and a path in
 it (`https://tools.example/handrail`) serves everything under that path.
 Listening beyond loopback with no account is refused.
+
+Tell handrail-ca where the proxy is with `-trusted-proxy` (for a proxy on
+the same machine, `127.0.0.1`), and have the proxy set `X-Forwarded-For`,
+which nginx, Caddy, Traefik and HAProxy's HTTP mode can all do. Behind a
+proxy every visitor arrives from the proxy's address; with this setting
+handrail-ca reads the visitor's own address from that header, counts
+sign-in attempts for each visitor separately, and records it in the
+history. The header is believed only on connections from the listed
+addresses. Without the setting handrail-ca still runs, and says so at
+start: sign-in attempts are then limited per user name only, and the
+history shows the proxy's address.
 
 It starts whether or not the CA is up; the CA status page says which.
 
@@ -67,8 +79,8 @@ host. There is no account management in the browser.
 
 A viewer reads; an operator will also issue and revoke. Flags come before
 the user name. Sessions end after an hour unused or twelve hours in all.
-Each user name, and each client address, gets five sign-in attempts in five
-minutes; a successful sign-in does not count.
+Each user name, and each visitor's address where it is known, gets five
+sign-in attempts in five minutes; a successful sign-in does not count.
 
 ### As a container
 

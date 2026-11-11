@@ -24,7 +24,6 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"errors"
-	"net"
 	"net/http"
 	"strconv"
 	"sync"
@@ -241,12 +240,19 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 		s.renderSignIn(w, r, http.StatusForbidden, "", "The sign-in form had expired. Please try again.")
 		return
 	}
-	remote := remoteHost(r)
+	// The client's address is a throttle key only when it is known: behind
+	// a proxy that does not say who it speaks for, the one address there is
+	// belongs to every visitor, and five wrong sign-ins by anyone would
+	// lock out everyone.
+	var addrKeys []string
+	if addr, known := s.clientAddr(r); known {
+		addrKeys = []string{"addr:" + addr}
+	}
 	// A name that could not be an account is refused like a wrong
 	// password, without a lookup.
 	username, err := store.NormalizeUsername(typed)
 	if err != nil {
-		if wait := s.limiter.begin(s.opts.Now(), "addr:"+remote); wait > 0 {
+		if wait := s.limiter.begin(s.opts.Now(), addrKeys...); wait > 0 {
 			s.tooManySignIns(w, r, wait)
 			return
 		}
@@ -254,15 +260,16 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 		s.renderSignIn(w, r, http.StatusUnauthorized, "", wrongCredentials)
 		return
 	}
-	userKey, addrKey := "user:"+username, "addr:"+remote
+	userKey := "user:" + username
+	keys := append([]string{userKey}, addrKeys...)
 	// Refused here without waiting for a hashing slot; checkPassword asks
 	// again, and counts, once it has one.
-	if wait := s.limiter.blocked(s.opts.Now(), userKey, addrKey); wait > 0 {
+	if wait := s.limiter.blocked(s.opts.Now(), keys...); wait > 0 {
 		s.tooManySignIns(w, r, wait)
 		return
 	}
 
-	checked, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"), userKey, addrKey)
+	checked, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"), keys...)
 	if err != nil {
 		s.log.Error("checking a password", "err", err)
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not check the password. The log has the details.")
@@ -301,7 +308,9 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.limiter.forget(userKey)
-	s.limiter.refund(addrKey)
+	for _, key := range addrKeys {
+		s.limiter.refund(key)
+	}
 	s.setCookie(w, sessionCookie, encoded, sessionLifetime)
 	s.setCookie(w, formCookie, "", 0)
 	s.recordSignIn(r, checked.user.Username, true, "")
@@ -391,7 +400,7 @@ func (s *server) recordSignIn(r *http.Request, username string, ok bool, detail 
 // logged and every page says so until a write succeeds again.
 func (s *server) record(r *http.Request, e store.Event) {
 	e.At = s.opts.Now()
-	e.Remote = remoteHost(r)
+	e.Remote, _ = s.clientAddr(r)
 	s.log.Info("audit", "actor", e.Actor, "action", e.Action, "outcome", e.Outcome,
 		"serial", e.Serial, "subject", e.Subject, "detail", e.Detail, "remote", e.Remote)
 	// Not the request's context: the event is recorded even if the browser
@@ -404,16 +413,6 @@ func (s *server) record(r *http.Request, e store.Event) {
 		return
 	}
 	s.historyBroken.Store(false)
-}
-
-// remoteHost is the address the connection came from. Behind a reverse
-// proxy that is the proxy; forwarded headers are not trusted.
-func remoteHost(r *http.Request) string {
-	host, _, err := net.SplitHostPort(r.RemoteAddr)
-	if err != nil {
-		return r.RemoteAddr
-	}
-	return host
 }
 
 // limiter slows password guessing: each key (a user name, or a client

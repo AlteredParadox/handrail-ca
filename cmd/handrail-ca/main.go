@@ -26,6 +26,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -128,11 +129,18 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		Store:              st,
 		CA:                 client,
 		PublicURL:          publicURL,
+		TrustedProxies:     cfg.trustedProxies,
 		Log:                log,
 	})
 	if err != nil {
 		log.Error("starting", "err", err)
 		return 1
+	}
+	if publicURL.Scheme == "https" && len(cfg.trustedProxies) == 0 {
+		// handrail-ca does not speak TLS, so an https address means a
+		// proxy is in front, and every visitor arrives from its address.
+		log.Warn("no -trusted-proxy (HANDRAIL_TRUSTED_PROXIES) is set: visitors cannot be told apart, " +
+			"so sign-in attempts are limited per user name only and the history records the proxy's address")
 	}
 	go sweepSessions(ctx, st, log)
 
@@ -148,6 +156,8 @@ type config struct {
 	caURL     string
 	caRoot    string
 	publicURL string
+	// trustedProxies is the -trusted-proxy list, parsed.
+	trustedProxies []netip.Prefix
 }
 
 func parseConfig(args []string, stderr io.Writer) (config, int) {
@@ -159,7 +169,13 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 	fs.StringVar(&cfg.caURL, "ca-url", os.Getenv("HANDRAIL_CA_URL"), "the CA's address, https://host[:port] (or set HANDRAIL_CA_URL)")
 	fs.StringVar(&cfg.caRoot, "ca-root", os.Getenv("HANDRAIL_CA_ROOT"), "file holding the CA's root certificate, a copy of root_ca.crt (or set HANDRAIL_CA_ROOT)")
 	fs.StringVar(&cfg.publicURL, "public-url", os.Getenv("HANDRAIL_PUBLIC_URL"), "the address browsers use, http(s)://host[:port][/path]; needed unless listening on loopback (or set HANDRAIL_PUBLIC_URL)")
+	proxies := fs.String("trusted-proxy", os.Getenv("HANDRAIL_TRUSTED_PROXIES"), "addresses or CIDR ranges of the reverse proxies in front, comma-separated; only they are believed about who a visitor is (or set HANDRAIL_TRUSTED_PROXIES)")
 	if err := fs.Parse(args); err != nil {
+		return cfg, 2
+	}
+	var err error
+	if cfg.trustedProxies, err = web.ParseTrustedProxies(*proxies); err != nil {
+		fmt.Fprintf(stderr, "handrail-ca: -trusted-proxy: %v\n", err)
 		return cfg, 2
 	}
 	if fs.NArg() > 0 {
