@@ -702,7 +702,7 @@ func TestDER(t *testing.T) {
 	}
 	snap := inv.Snapshot()
 	web1 := bySubject(snap)["web1.handrail.test"][0]
-	if got := snap.Certificate(web1.Serial); got != web1 {
+	if snap.Certificate(web1.Serial) != web1 {
 		t.Error("Certificate(serial) is not the summary in the list")
 	}
 	if snap.Certificate("12345") != nil || snap.Certificate("") != nil {

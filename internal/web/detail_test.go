@@ -246,6 +246,50 @@ func TestDetailWhenTheRowHasChanged(t *testing.T) {
 	}
 }
 
+// When the last read of the CA's database failed, the page is an old
+// picture and says so: a certificate that was not revoked then is not
+// called "not revoked" now.
+func TestDetailWhenTheInventoryIsStale(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := signedIn(t, s)
+	fresh := b.get("/certificates/101")
+	wantBody(t, fresh, `<span class="badge ok">Not revoked</span>`)
+	if strings.Contains(fresh.Body.String(), `class="stale"`) {
+		t.Error("a page from a current picture carries the stale notice")
+	}
+
+	// A read fails, ten minutes on; the certificate itself can still be
+	// fetched afterwards.
+	s.clock.advance(10 * time.Minute)
+	s.rows.fail(errors.New("reading revocations: connection reset by peer"))
+	if err := s.inv.Refresh(context.Background()); err == nil {
+		t.Fatal("the refresh succeeded against a failing source")
+	}
+	s.rows.fail(nil)
+
+	page := b.get("/certificates/101")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page, `class="stale"`, "This page is as the CA's database was 10 minutes ago", "If this certificate has been revoked since then, that is not shown here.",
+		"connection reset by peer", `<span class="badge warn">Not revoked 10 minutes ago</span>`, "a revocation after that would not show here")
+	for _, absent := range []string{`<span class="badge ok">Not revoked</span>`, "The CA has no revocation record for this certificate"} {
+		if strings.Contains(page.Body.String(), absent) {
+			t.Errorf("a page from an old picture says %q", absent)
+		}
+	}
+	// A revoked certificate stays revoked, with the same notice; so does
+	// the page of a row that is not a certificate.
+	wantBody(t, b.get("/certificates/103"), `class="stale"`, `<span class="badge bad">Revoked</span>`, "Key compromise")
+	wantBody(t, b.get("/certificates/104"), `class="stale"`, "This row is not a certificate")
+
+	// The next read works: the notice goes.
+	if err := s.inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if again := b.get("/certificates/101"); strings.Contains(again.Body.String(), `class="stale"`) || !strings.Contains(again.Body.String(), `<span class="badge ok">Not revoked</span>`) {
+		t.Error("the stale notice outlived the failure")
+	}
+}
+
 func parsePEM(t *testing.T, data []byte) []*x509.Certificate {
 	t.Helper()
 	var certs []*x509.Certificate

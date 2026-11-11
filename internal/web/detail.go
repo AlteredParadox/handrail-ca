@@ -77,6 +77,10 @@ type detailData struct {
 	// RevocationsKnown is false when no revocation table has been read.
 	RevocationsKnown bool
 	LastRead         string
+	// Stale is why the last attempt to read the CA's database failed,
+	// empty if it did not. With it set, everything here is as it was at
+	// LastRead: a revocation since then is not on the page.
+	Stale string
 
 	PEM string
 }
@@ -154,7 +158,7 @@ func (s *server) detailPage(w http.ResponseWriter, r *http.Request) {
 	data := detailData{
 		Serial: summary.Serial, Title: summary.Subject, Badge: look.badge, StatusLabel: look.label,
 		Provisioner: summary.Provisioner.Name, ProvisionerType: summary.Provisioner.Type,
-		RevocationsKnown: snap.State.RevocationsKnown,
+		RevocationsKnown: snap.State.RevocationsKnown, Stale: snap.State.Problem,
 	}
 	if !snap.State.LoadedAt.IsZero() {
 		data.LastRead = span(now.Sub(snap.State.LoadedAt)) + " ago"
