@@ -21,11 +21,9 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
-	"encoding/hex"
 	"encoding/json"
 	"encoding/pem"
 	"errors"
@@ -102,20 +100,34 @@ func pemOf(cert *x509.Certificate) string {
 	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw}))
 }
 
-// fakeCA is a TLS server with the PKI's server certificate, for a test to
-// hang step-ca's routes on.
+// fakeCA is a TLS server with the PKI's server certificate that serves the
+// PKI's root at /root/{fingerprint}, as step-ca does. A test hangs the
+// other routes it needs on mux.
 type fakeCA struct {
 	pki  *testPKI
 	mux  *http.ServeMux
 	srv  *httptest.Server
-	hits atomic.Int64
+	hits atomic.Int64 // requests other than the fetch of the root
+	// rootFetches counts requests for /root/...
+	rootFetches atomic.Int64
 }
 
 func newFakeCA(t *testing.T) *fakeCA {
 	t.Helper()
 	f := &fakeCA{pki: newTestPKI(t), mux: http.NewServeMux()}
+	f.mux.HandleFunc("GET /root/{sum}", func(w http.ResponseWriter, r *http.Request) {
+		if r.PathValue("sum") != Fingerprint(f.pki.root) {
+			writeJSON(w, http.StatusNotFound, map[string]any{"status": 404, "message": "root certificate was not found"})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"ca": pemOf(f.pki.root)})
+	})
 	f.srv = httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		f.hits.Add(1)
+		if strings.HasPrefix(r.URL.Path, "/root/") {
+			f.rootFetches.Add(1)
+		} else {
+			f.hits.Add(1)
+		}
 		f.mux.ServeHTTP(w, r)
 	}))
 	f.srv.TLS = &tls.Config{Certificates: []tls.Certificate{f.pki.serverCert}}
@@ -126,7 +138,13 @@ func newFakeCA(t *testing.T) *fakeCA {
 
 func (f *fakeCA) client(t *testing.T) *Client {
 	t.Helper()
-	c, err := New(Config{URL: f.srv.URL, RootPEM: []byte(pemOf(f.pki.root)), Timeout: 5 * time.Second, UserAgent: "handrail-ca/test"})
+	return f.clientFor(t, Fingerprint(f.pki.root))
+}
+
+// clientFor is a client for this server configured with some fingerprint.
+func (f *fakeCA) clientFor(t *testing.T, fingerprint string) *Client {
+	t.Helper()
+	c, err := New(Config{URL: f.srv.URL, Fingerprint: fingerprint, Timeout: 5 * time.Second, UserAgent: "handrail-ca/test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,138 +171,218 @@ func wantErr(t *testing.T, err error, contains string) {
 	}
 }
 
-func TestNewRejectsABadURL(t *testing.T) {
-	root := []byte(pemOf(newTestPKI(t).root))
+func TestNewRejectsBadConfig(t *testing.T) {
+	good := strings.Repeat("ab", 32)
 	tests := []struct {
-		name, url, want string
+		name, url, fingerprint, want string
 	}{
-		{"plain http", "http://ca.test:9000", "https://"},
-		{"no scheme", "ca.test:9000", "https://"},
-		{"no host", "https://", "no host"},
-		{"port only", "https://:9000", "no host"},
-		{"credentials", "https://user:pw@ca.test", "user or password"},
-		{"path", "https://ca.test/ca", "no path"},
-		{"query", "https://ca.test/?x=1", "no path"},
-		{"unparseable", "https://ca.test:port", "CA URL"},
+		{"plain http", "http://ca.test:9000", good, "https://"},
+		{"no scheme", "ca.test:9000", good, "https://"},
+		{"no host", "https://", good, "no host"},
+		{"port only", "https://:9000", good, "no host"},
+		{"credentials", "https://user:pw@ca.test", good, "user or password"},
+		{"path", "https://ca.test/ca", good, "no path"},
+		{"query", "https://ca.test/?x=1", good, "no path"},
+		{"unparseable", "https://ca.test:port", good, "CA URL"},
+		{"short fingerprint", "https://ca.test", "abcd", "64 hexadecimal"},
+		{"not hex", "https://ca.test", strings.Repeat("zz", 32), "64 hexadecimal"},
+		{"empty fingerprint", "https://ca.test", "", "64 hexadecimal"},
+		{"a certificate, not its fingerprint", "https://ca.test", "-----BEGIN CERTIFICATE-----", "64 hexadecimal"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(Config{URL: tt.url, RootPEM: root})
-			wantErr(t, err, tt.want)
-		})
-	}
-}
-
-func TestNewRejectsABadRoot(t *testing.T) {
-	pki := newTestPKI(t)
-	root := pemOf(pki.root)
-	leaf, err := x509.ParseCertificate(pki.serverCert.Certificate[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	tests := []struct {
-		name, pem, want string
-	}{
-		{"empty", "", "no PEM certificate"},
-		{"not PEM", "root_ca.crt", "no PEM certificate"},
-		{"a key file", "-----BEGIN EC PRIVATE KEY-----\nAAAA\n-----END EC PRIVATE KEY-----\n", `"EC PRIVATE KEY" block`},
-		{"garbage inside", "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n", "certificate 1 does not parse"},
-		{"the server's own certificate", pemOf(leaf), "is not a CA certificate"},
-		{"junk after the certificate", root + "-----BEGIN CERTIFICATE-----\ntruncated", "unreadable data after"},
-		{"too many", strings.Repeat(root, maxRoots+1), "more than"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			_, err := New(Config{URL: "https://ca.test", RootPEM: []byte(tt.pem)})
-			wantErr(t, err, "CA root certificate: ")
+			_, err := New(Config{URL: tt.url, Fingerprint: tt.fingerprint})
 			wantErr(t, err, tt.want)
 		})
 	}
 }
 
 func TestNewNormalizes(t *testing.T) {
-	pki := newTestPKI(t)
-	// Text before a certificate, as `openssl x509 -text` writes it, and two
-	// roots, as during a root replacement.
-	c, err := New(Config{URL: " https://ca.test:9000/ ", RootPEM: []byte("Certificate:\n    Data: ...\n" + pemOf(pki.root) + "\n" + pemOf(pki.inter))})
+	c, err := New(Config{URL: " https://ca.test:9000/ ", Fingerprint: " " + strings.Repeat("AB", 32) + "\n"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if c.URL() != "https://ca.test:9000" {
 		t.Errorf("URL = %q", c.URL())
 	}
-	if c.http.Timeout != defaultTimeout {
-		t.Errorf("timeout = %v, want the default", c.http.Timeout)
+	if c.RootFingerprint() != strings.Repeat("ab", 32) {
+		t.Errorf("RootFingerprint = %q", c.RootFingerprint())
 	}
-	roots := c.TrustedRoots()
-	if len(roots) != 2 || !roots[0].Equal(pki.root) || !roots[1].Equal(pki.inter) {
-		t.Fatalf("TrustedRoots = %d certificates", len(roots))
+	if c.timeout != defaultTimeout {
+		t.Errorf("timeout = %v, want the default", c.timeout)
 	}
-	roots[0] = nil // a copy: the client's own list is unaffected
-	if c.TrustedRoots()[0] == nil {
-		t.Error("TrustedRoots hands out the client's own slice")
-	}
-	sum := sha256.Sum256(pki.root.Raw)
-	if Fingerprint(pki.root) != hex.EncodeToString(sum[:]) {
-		t.Errorf("Fingerprint = %q", Fingerprint(pki.root))
+	// Making a client connects to nothing.
+	if c.pinned != nil || c.root != nil {
+		t.Error("New pinned a root without being asked anything")
 	}
 }
 
-func TestTrustsOnlyTheConfiguredRoot(t *testing.T) {
+func TestPinsTheRootAndTrustsOnlyIt(t *testing.T) {
 	f := newFakeCA(t)
 	var agent atomic.Value
 	f.mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
 		agent.Store(r.UserAgent())
 		writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 	})
+	c := f.client(t)
 	ctx := context.Background()
 
-	c := f.client(t)
-	if err := c.Health(ctx); err != nil {
-		t.Fatalf("Health: %v", err)
+	for range 3 {
+		if err := c.Health(ctx); err != nil {
+			t.Fatalf("Health: %v", err)
+		}
 	}
 	if got := agent.Load(); got != "handrail-ca/test" {
 		t.Errorf("User-Agent = %v", got)
 	}
-	tlsConfig := c.http.Transport.(*http.Transport).TLSClientConfig
+	// The root is fetched once, however many requests follow.
+	if n := f.rootFetches.Load(); n != 1 {
+		t.Errorf("the root was fetched %d times, want 1", n)
+	}
+	root, err := c.Root(ctx)
+	if err != nil || !root.Equal(f.pki.root) || Fingerprint(root) != c.RootFingerprint() {
+		t.Fatalf("Root = %v, %v; want the CA's root", root, err)
+	}
+	// Everything after the fetch goes through a client that verifies, and
+	// verifies against that root alone.
+	tlsConfig := c.pinned.Transport.(*http.Transport).TLSClientConfig
 	if tlsConfig.InsecureSkipVerify {
-		t.Error("the client skips certificate verification")
+		t.Error("the pinned client skips certificate verification")
 	}
 	want := x509.NewCertPool()
 	want.AddCert(f.pki.root)
 	if !tlsConfig.RootCAs.Equal(want) {
-		t.Error("the client trusts something other than the configured root")
+		t.Error("the pinned client trusts something other than the pinned root")
+	}
+}
+
+// The fetch of the root is the one request made before the server can be
+// verified. Each way it could be fooled must end with nothing pinned and
+// no further request made.
+func TestRefusesAWrongRoot(t *testing.T) {
+	other := newTestPKI(t)
+	otherFingerprint := Fingerprint(other.root)
+	refused := func(t *testing.T, f *fakeCA, c *Client, want string) {
+		t.Helper()
+		wantErr(t, c.Health(context.Background()), want)
+		if c.pinned != nil || c.root != nil {
+			t.Error("a root was pinned")
+		}
+		if f.hits.Load() != 0 {
+			t.Error("a request was made without a pinned root")
+		}
+		if _, err := c.Root(context.Background()); err == nil {
+			t.Error("Root returned a certificate")
+		}
 	}
 
-	t.Run("a server of another CA is refused", func(t *testing.T) {
-		before := f.hits.Load()
-		other, err := New(Config{URL: f.srv.URL, RootPEM: []byte(pemOf(newTestPKI(t).root)), Timeout: 5 * time.Second})
+	t.Run("a fingerprint the CA does not know", func(t *testing.T) {
+		f := newFakeCA(t)
+		refused(t, f, f.clientFor(t, otherFingerprint), "has no root with fingerprint")
+	})
+
+	t.Run("the server answers with a different certificate", func(t *testing.T) {
+		f := newFakeCA(t)
+		f.mux.HandleFunc("GET /root/"+otherFingerprint, jsonRoute(http.StatusOK, map[string]string{"ca": pemOf(f.pki.root)}))
+		refused(t, f, f.clientFor(t, otherFingerprint), "not the configured")
+	})
+
+	// The root is public: anyone can serve it. A server that hands out the
+	// right root but does not itself hold a certificate from that CA is not
+	// the CA.
+	t.Run("a server that relays the right root but is not of that CA", func(t *testing.T) {
+		f := newFakeCA(t)
+		f.mux.HandleFunc("GET /root/"+otherFingerprint, jsonRoute(http.StatusOK, map[string]string{"ca": pemOf(other.root)}))
+		refused(t, f, f.clientFor(t, otherFingerprint), "does not check out")
+	})
+
+	t.Run("the right CA under a name its certificate does not carry", func(t *testing.T) {
+		f := newFakeCA(t)
+		url := strings.Replace(f.srv.URL, "127.0.0.1", "127.0.0.2", 1)
+		c, err := New(Config{URL: url, Fingerprint: Fingerprint(f.pki.root), Timeout: 2 * time.Second})
 		if err != nil {
 			t.Fatal(err)
 		}
-		var unknown x509.UnknownAuthorityError
-		if err := other.Health(ctx); !errors.As(err, &unknown) {
-			t.Fatalf("err = %v, want an unknown-authority error", err)
+		if err := c.Health(context.Background()); err == nil {
+			t.Fatal("accepted a server whose certificate is for another address")
 		}
-		if f.hits.Load() != before {
-			t.Error("a request reached a server that was not verified")
+		if c.pinned != nil || f.hits.Load() != 0 {
+			t.Error("a root was pinned, or a request made, for a server under the wrong name")
 		}
 	})
 
-	t.Run("the right CA under another name is refused", func(t *testing.T) {
-		before := f.hits.Load()
-		// The same server, reached by an address its certificate does not carry.
-		elsewhere, err := New(Config{URL: strings.Replace(f.srv.URL, "127.0.0.1", "127.0.0.2", 1), RootPEM: []byte(pemOf(f.pki.root)), Timeout: 2 * time.Second})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if err := elsewhere.Health(ctx); err == nil {
-			t.Fatal("accepted a server whose certificate is for another address")
-		}
-		if f.hits.Load() != before {
-			t.Error("a request reached a server that was not verified")
-		}
+	t.Run("a redirect", func(t *testing.T) {
+		f := newFakeCA(t)
+		f.mux.HandleFunc("GET /root/"+otherFingerprint, func(w http.ResponseWriter, r *http.Request) {
+			http.Redirect(w, r, "https://elsewhere.test/root/"+otherFingerprint, http.StatusFound)
+		})
+		refused(t, f, f.clientFor(t, otherFingerprint), "the CA answered 302")
 	})
+}
+
+func TestRootAnswerMustBeOneCertificate(t *testing.T) {
+	tests := []struct {
+		name string
+		body func(f *fakeCA) any
+		want string
+	}{
+		{"not a JSON object", func(*fakeCA) any { return "text" }, "expected JSON"},
+		{"empty", func(*fakeCA) any { return map[string]string{"ca": ""} }, "not a PEM certificate"},
+		{"a key", func(*fakeCA) any {
+			return map[string]string{"ca": "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n"}
+		}, "not a PEM certificate"},
+		{"two certificates", func(f *fakeCA) any {
+			return map[string]string{"ca": pemOf(f.pki.root) + pemOf(f.pki.inter)}
+		}, "more than one PEM block"},
+		{"garbage inside", func(*fakeCA) any {
+			return map[string]string{"ca": "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n"}
+		}, "does not parse"},
+		{"too large", func(*fakeCA) any {
+			return map[string]string{"ca": strings.Repeat("x", maxJSON)}
+		}, "larger than"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := newFakeCA(t)
+			configured := strings.Repeat("cd", 32)
+			f.mux.HandleFunc("GET /root/"+configured, jsonRoute(http.StatusOK, tt.body(f)))
+			c := f.clientFor(t, configured)
+			_, err := c.Root(context.Background())
+			wantErr(t, err, tt.want)
+			if c.pinned != nil {
+				t.Error("a root was pinned")
+			}
+		})
+	}
+}
+
+// handrail-ca starts while the CA is down; the root is pinned when the CA
+// comes up, without a restart.
+func TestPinningIsRetriedAfterAFailure(t *testing.T) {
+	f := newFakeCA(t)
+	f.mux.HandleFunc("GET /health", jsonRoute(http.StatusOK, map[string]string{"status": "ok"}))
+	var down atomic.Bool
+	down.Store(true)
+	inner := f.srv.Config.Handler
+	f.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if down.Load() {
+			http.Error(w, "starting", http.StatusServiceUnavailable)
+			return
+		}
+		inner.ServeHTTP(w, r)
+	})
+	c := f.client(t)
+
+	err := c.Health(context.Background())
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != http.StatusServiceUnavailable {
+		t.Fatalf("first call: %v, want a 503 StatusError", err)
+	}
+	wantErr(t, err, "pinning the CA's root")
+	down.Store(false)
+	if err := c.Health(context.Background()); err != nil {
+		t.Fatalf("second call: %v", err)
+	}
 }
 
 func TestUnreachableCA(t *testing.T) {

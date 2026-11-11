@@ -23,13 +23,13 @@ make build          # static binary ./handrail-ca, version-stamped
 ```
 
 handrail-ca needs three things to start: a directory for its own store, the
-CA's address, and a copy of the CA's root certificate
+CA's address, and the fingerprint of the CA's root certificate
 ([docs/ca-setup.md](docs/ca-setup.md) says where that comes from).
 
 ```sh
 export HANDRAIL_DATA=/var/lib/handrail-ca
 export HANDRAIL_CA_URL=https://ca.internal.example
-export HANDRAIL_CA_ROOT=/etc/handrail-ca/root_ca.crt
+export HANDRAIL_CA_FINGERPRINT=<64 hex characters>   # step certificate fingerprint root_ca.crt, on the CA's host
 
 ./handrail-ca user add -role operator alice   # asks for a password
 ./handrail-ca                                 # serves http://127.0.0.1:8080
@@ -39,7 +39,7 @@ export HANDRAIL_CA_ROOT=/etc/handrail-ca/root_ca.crt
 |---|---|---|
 | `-data` | `HANDRAIL_DATA` | Directory for handrail-ca's own store (accounts, sessions, history). Created owner-only. |
 | `-ca-url` | `HANDRAIL_CA_URL` | The CA's address, `https://host[:port]`. |
-| `-ca-root` | `HANDRAIL_CA_ROOT` | File with the CA's root certificate. Every connection to the CA is verified against it and nothing else. |
+| `-ca-fingerprint` | `HANDRAIL_CA_FINGERPRINT` | SHA-256 fingerprint of the CA's root certificate. handrail-ca fetches the root from the CA, accepts it only if it has this fingerprint, and from then on verifies every connection to the CA against that root and nothing else. |
 | `-listen` | `HANDRAIL_LISTEN` | Listen address; `127.0.0.1:8080` unless set. |
 | `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. |
 | `-trusted-proxy` | `HANDRAIL_TRUSTED_PROXIES` | Addresses or CIDR ranges of the reverse proxies in front, comma-separated. Set it whenever there is one. |
@@ -163,9 +163,8 @@ docker volume create handrail-data
 docker run --rm -it -v handrail-data:/data handrail-ca user add -role operator alice
 docker run -d -p 127.0.0.1:8080:8080 \
   -v handrail-data:/data \
-  -v /etc/handrail-ca/root_ca.crt:/etc/handrail/root_ca.crt:ro \
   -e HANDRAIL_CA_URL=https://ca.internal.example \
-  -e HANDRAIL_CA_ROOT=/etc/handrail/root_ca.crt \
+  -e HANDRAIL_CA_FINGERPRINT=<the root's SHA-256 fingerprint> \
   -e HANDRAIL_PUBLIC_URL=http://127.0.0.1:8080 \
   handrail-ca
 ```

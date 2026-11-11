@@ -29,19 +29,15 @@ import (
 
 // The tests in this file run against the development CA (deploy/dev), a real
 // step-ca, and are skipped without it. `make dev-test` sets the two
-// variables from the running Compose project: the CA's address and the path
-// of its root certificate.
-func devCA(t *testing.T) (url string, rootPEM []byte) {
+// variables from the running Compose project: the CA's address and the
+// fingerprint of its root certificate.
+func devCA(t *testing.T) (url, fingerprint string) {
 	t.Helper()
-	url, rootFile := os.Getenv("HANDRAIL_DEV_CA_URL"), os.Getenv("HANDRAIL_DEV_CA_ROOT")
-	if url == "" || rootFile == "" {
+	url, fingerprint = os.Getenv("HANDRAIL_DEV_CA_URL"), os.Getenv("HANDRAIL_DEV_CA_FINGERPRINT")
+	if url == "" || fingerprint == "" {
 		t.Skip("no development CA: run `make dev-up` and `make dev-test`")
 	}
-	rootPEM, err := os.ReadFile(rootFile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return url, rootPEM
+	return url, fingerprint
 }
 
 func devContext(t *testing.T) context.Context {
@@ -52,8 +48,8 @@ func devContext(t *testing.T) context.Context {
 }
 
 func TestIntegrationReadSide(t *testing.T) {
-	url, rootPEM := devCA(t)
-	c, err := New(Config{URL: url, RootPEM: rootPEM})
+	url, fingerprint := devCA(t)
+	c, err := New(Config{URL: url, Fingerprint: fingerprint})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,17 +63,21 @@ func TestIntegrationReadSide(t *testing.T) {
 		t.Errorf("Version = %q, %v", version, err)
 	}
 
-	trusted := c.TrustedRoots()[0]
+	// The root that was fetched is the one configured, and the CA lists it.
+	pinned, err := c.Root(ctx)
+	if err != nil || Fingerprint(pinned) != fingerprint {
+		t.Fatalf("Root: %v", err)
+	}
 	roots, err := c.Roots(ctx)
-	if err != nil || len(roots) != 1 || !roots[0].Equal(trusted) {
-		t.Fatalf("Roots = %d certificates, %v; want the configured root alone", len(roots), err)
+	if err != nil || len(roots) != 1 || !roots[0].Equal(pinned) {
+		t.Fatalf("Roots = %d certificates, %v; want the pinned root alone", len(roots), err)
 	}
 	inters, err := c.Intermediates(ctx)
 	if err != nil || len(inters) != 1 {
 		t.Fatalf("Intermediates = %d certificates, %v", len(inters), err)
 	}
-	if err := inters[0].CheckSignatureFrom(trusted); err != nil {
-		t.Errorf("the intermediate is not signed by the configured root: %v", err)
+	if err := inters[0].CheckSignatureFrom(pinned); err != nil {
+		t.Errorf("the intermediate is not signed by the pinned root: %v", err)
 	}
 
 	provisioners, err := c.Provisioners(ctx)
@@ -106,32 +106,41 @@ func TestIntegrationReadSide(t *testing.T) {
 	}
 }
 
-// A client configured with some other CA's root must not talk to this one.
-func TestIntegrationRefusesAnotherRoot(t *testing.T) {
+// A client configured with a fingerprint that is not this CA's root must
+// not pin anything, nor talk to it.
+func TestIntegrationRefusesAnotherFingerprint(t *testing.T) {
 	url, _ := devCA(t)
-	c, err := New(Config{URL: url, RootPEM: []byte(pemOf(newTestPKI(t).root))})
+	c, err := New(Config{URL: url, Fingerprint: Fingerprint(newTestPKI(t).root)})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var unknown x509.UnknownAuthorityError
-	if err := c.Health(devContext(t)); !errors.As(err, &unknown) {
-		t.Fatalf("err = %v, want an unknown-authority error", err)
+	err = c.Health(devContext(t))
+	if err == nil || !strings.Contains(err.Error(), "has no root with fingerprint") {
+		t.Fatalf("err = %v, want a refusal to pin", err)
+	}
+	if c.pinned != nil {
+		t.Error("a root was pinned")
 	}
 }
 
 // The development CA's certificate names localhost, not 127.0.0.1: reached
-// by address it must be refused, even with the right root.
+// by address it must be refused, even with the right fingerprint. This is
+// the check that the server handing out the root is itself of that CA,
+// under the configured name.
 func TestIntegrationRefusesAnotherName(t *testing.T) {
-	url, rootPEM := devCA(t)
+	url, fingerprint := devCA(t)
 	if !strings.Contains(url, "//localhost:") {
 		t.Skip("the development CA is not at localhost")
 	}
-	c, err := New(Config{URL: strings.Replace(url, "//localhost:", "//127.0.0.1:", 1), RootPEM: rootPEM})
+	c, err := New(Config{URL: strings.Replace(url, "//localhost:", "//127.0.0.1:", 1), Fingerprint: fingerprint})
 	if err != nil {
 		t.Fatal(err)
 	}
 	var wrongName x509.HostnameError
 	if err := c.Health(devContext(t)); !errors.As(err, &wrongName) {
 		t.Fatalf("err = %v, want a host-name error", err)
+	}
+	if c.pinned != nil {
+		t.Error("a root was pinned for a server under the wrong name")
 	}
 }

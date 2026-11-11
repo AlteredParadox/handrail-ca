@@ -199,15 +199,21 @@ browser ──HTTPS──▶ handrail-ca ──HTTPS (pinned root)──▶ step
 ```
 
 **CA client.** Hand-written `net/http` client and our own request and
-response structs. The operator gives handrail-ca the CA's root certificate
-as a file, and it is the only trust anchor for the CA connection. (The
-first draft of this plan had the root fetched from the CA by its SHA-256
-fingerprint, as `step ca bootstrap` does. That needs one request made
-before the server can be verified; with a file there is none, at the cost
-of copying a file instead of a 64-character string.) The client makes no
-connection until it is used, so handrail-ca starts, and reports it, while
-the CA is down. Redirects are not followed and every answer is
-size-bounded. `github.com/smallstep/certificates/ca` is not
+response structs. The operator configures the SHA-256 fingerprint of the
+CA's root certificate. The root is fetched from the CA once, accepted only
+if it has that fingerprint, and from then on is the only trust anchor for
+the CA connection. This is the exchange `step ca bootstrap` makes, and it
+means one request is made before the server can be verified in the usual
+way. Nothing from that request is trusted on the server's word: the
+certificate must match the fingerprint, the request carries nothing
+secret, and the certificate the server presented on that same connection
+must chain to the fetched root for the configured host name, so a server
+that only relays the CA's public root is refused. (For a while the
+operator supplied the root as a file instead, which needs no such request;
+the owner chose the fingerprint on 2026-11-11, a string being easier to
+handle than a file.) The root is pinned on first use, so handrail-ca
+starts, and reports it, while the CA is down. Redirects are not followed
+and every answer is size-bounded. `github.com/smallstep/certificates/ca` is not
 imported: it links 491 non-standard-library packages, including two Badger
 versions, gRPC and Google API clients.
 
@@ -428,7 +434,7 @@ server that answers `/healthz`.
   same CI job as `make dev-verify`).
 - Done: the store (`internal/store`, `internal/password`): schema,
   migrations, and the `user` subcommands.
-- Done: configuration (`-data`, `-ca-url`, `-ca-root`, `-listen`,
+- Done: configuration (`-data`, `-ca-url`, `-ca-fingerprint`, `-listen`,
   `-public-url`), sign-in and sign-out, sessions, the form token and
   `Origin` check, the Host check, the page shell from the mockup, and the
   CA status page, with an integration test against the development CA.

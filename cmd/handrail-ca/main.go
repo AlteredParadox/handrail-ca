@@ -83,12 +83,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	defer st.Close()
 
-	rootPEM, err := readSmallFile(cfg.caRoot)
-	if err != nil {
-		log.Error("reading the CA's root certificate", "err", err)
-		return 1
-	}
-	client, err := ca.New(ca.Config{URL: cfg.caURL, RootPEM: rootPEM, UserAgent: "handrail-ca/" + version})
+	client, err := ca.New(ca.Config{URL: cfg.caURL, Fingerprint: cfg.caFingerprint, UserAgent: "handrail-ca/" + version})
 	if err != nil {
 		log.Error("CA configuration", "err", err)
 		return 1
@@ -148,14 +143,15 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	return serve(ctx, ln, handler, log)
 }
 
-// config is what the server is started with. Secrets are never flags: the
-// only file named here is the CA's root certificate, which is public.
+// config is what the server is started with. Secrets are never flags:
+// nothing here is one. The root's fingerprint is public.
 type config struct {
-	listen    string
-	dataDir   string
-	caURL     string
-	caRoot    string
-	publicURL string
+	listen  string
+	dataDir string
+	caURL   string
+	// caFingerprint is the SHA-256 of the CA's root certificate, in hex.
+	caFingerprint string
+	publicURL     string
 	// trustedProxies is the -trusted-proxy list, parsed.
 	trustedProxies []netip.Prefix
 }
@@ -167,7 +163,7 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 	fs.StringVar(&cfg.listen, "listen", envOr("HANDRAIL_LISTEN", defaultListen), "address to listen on (or set HANDRAIL_LISTEN)")
 	fs.StringVar(&cfg.dataDir, "data", os.Getenv("HANDRAIL_DATA"), "directory for handrail-ca's own store (or set HANDRAIL_DATA)")
 	fs.StringVar(&cfg.caURL, "ca-url", os.Getenv("HANDRAIL_CA_URL"), "the CA's address, https://host[:port] (or set HANDRAIL_CA_URL)")
-	fs.StringVar(&cfg.caRoot, "ca-root", os.Getenv("HANDRAIL_CA_ROOT"), "file holding the CA's root certificate, a copy of root_ca.crt (or set HANDRAIL_CA_ROOT)")
+	fs.StringVar(&cfg.caFingerprint, "ca-fingerprint", os.Getenv("HANDRAIL_CA_FINGERPRINT"), "SHA-256 fingerprint of the CA's root certificate, as printed by 'step certificate fingerprint root_ca.crt' (or set HANDRAIL_CA_FINGERPRINT)")
 	fs.StringVar(&cfg.publicURL, "public-url", os.Getenv("HANDRAIL_PUBLIC_URL"), "the address browsers use, http(s)://host[:port][/path]; needed unless listening on loopback (or set HANDRAIL_PUBLIC_URL)")
 	proxies := fs.String("trusted-proxy", os.Getenv("HANDRAIL_TRUSTED_PROXIES"), "addresses or CIDR ranges of the reverse proxies in front, comma-separated; only they are believed about who a visitor is (or set HANDRAIL_TRUSTED_PROXIES)")
 	if err := fs.Parse(args); err != nil {
@@ -186,7 +182,7 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 	for _, need := range []struct{ value, name string }{
 		{cfg.dataDir, "-data (HANDRAIL_DATA)"},
 		{cfg.caURL, "-ca-url (HANDRAIL_CA_URL)"},
-		{cfg.caRoot, "-ca-root (HANDRAIL_CA_ROOT)"},
+		{cfg.caFingerprint, "-ca-fingerprint (HANDRAIL_CA_FINGERPRINT)"},
 	} {
 		if need.value == "" {
 			missing = append(missing, need.name)
@@ -224,25 +220,6 @@ func (c config) resolvePublicURL(listening net.Addr) (*url.URL, error) {
 func isLoopback(addr net.Addr) bool {
 	tcp, ok := addr.(*net.TCPAddr)
 	return ok && tcp.IP.IsLoopback()
-}
-
-// readSmallFile reads a configuration file that has no business being
-// large.
-func readSmallFile(path string) ([]byte, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	const limit = 1 << 20
-	data, err := io.ReadAll(io.LimitReader(f, limit+1))
-	if err != nil {
-		return nil, err
-	}
-	if len(data) > limit {
-		return nil, fmt.Errorf("%s is larger than %d bytes", path, limit)
-	}
-	return data, nil
 }
 
 // sweepSessions removes ended sessions from the store now and then. They

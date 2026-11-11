@@ -53,7 +53,10 @@ const healthPath = "/healthz"
 // CA is what the pages need from the CA client (*ca.Client).
 type CA interface {
 	URL() string
-	TrustedRoots() []*x509.Certificate
+	// RootFingerprint is the configured SHA-256 of the CA's root; Root is
+	// the certificate itself, once it has been fetched and matched.
+	RootFingerprint() string
+	Root(ctx context.Context) (*x509.Certificate, error)
 	Health(ctx context.Context) error
 	Version(ctx context.Context) (string, error)
 	Roots(ctx context.Context) ([]*x509.Certificate, error)

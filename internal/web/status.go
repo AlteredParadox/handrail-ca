@@ -47,10 +47,15 @@ type caSnapshot struct {
 	Version        string
 	VersionProblem string
 
-	// Trusted are the configured root certificates.
-	Trusted []certView
+	// RootFingerprint is the fingerprint handrail-ca was configured with,
+	// shown whether or not the root could be fetched.
+	RootFingerprint string
+	// Root is the certificate with that fingerprint, nil until it has been
+	// fetched from the CA; RootProblem says why it could not be.
+	Root        *certView
+	RootProblem string
 	// RootsProblem is set when the CA's own list of roots could not be
-	// read; Trusted[i].Listed means nothing then.
+	// read; Root.Listed means nothing then.
 	RootsProblem string
 
 	Intermediates        []certView
@@ -117,9 +122,14 @@ func (c *statusCache) get(ctx context.Context, client CA, now func() time.Time) 
 
 // readCA asks the CA everything the status page shows, in parallel.
 func readCA(ctx context.Context, client CA, now time.Time) *caSnapshot {
-	snap := &caSnapshot{CheckedAt: now.UTC().Format("15:04:05 UTC"), Address: client.URL()}
+	snap := &caSnapshot{
+		CheckedAt:       now.UTC().Format("15:04:05 UTC"),
+		Address:         client.URL(),
+		RootFingerprint: grouped(client.RootFingerprint()),
+	}
 	var (
 		wg            sync.WaitGroup
+		root          *x509.Certificate
 		roots, inters []*x509.Certificate
 		provisioners  []ca.Provisioner
 	)
@@ -133,6 +143,7 @@ func readCA(ctx context.Context, client CA, now time.Time) *caSnapshot {
 		}()
 	}
 	ask(func() error { return client.Health(ctx) }, &snap.HealthProblem)
+	ask(func() (err error) { root, err = client.Root(ctx); return }, &snap.RootProblem)
 	ask(func() (err error) { snap.Version, err = client.Version(ctx); return }, &snap.VersionProblem)
 	ask(func() (err error) { roots, err = client.Roots(ctx); return }, &snap.RootsProblem)
 	ask(func() (err error) { inters, err = client.Intermediates(ctx); return }, &snap.IntermediatesProblem)
@@ -141,12 +152,12 @@ func readCA(ctx context.Context, client CA, now time.Time) *caSnapshot {
 	wg.Wait()
 
 	snap.Reachable = snap.HealthProblem == ""
-	for _, cert := range client.TrustedRoots() {
-		v := newCertView(cert, now)
+	if root != nil {
+		v := newCertView(root, now)
 		for _, published := range roots {
-			v.Listed = v.Listed || published.Equal(cert)
+			v.Listed = v.Listed || published.Equal(root)
 		}
-		snap.Trusted = append(snap.Trusted, v)
+		snap.Root = &v
 	}
 	for _, cert := range inters {
 		snap.Intermediates = append(snap.Intermediates, newCertView(cert, now))
