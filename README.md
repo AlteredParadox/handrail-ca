@@ -23,6 +23,25 @@ make build          # static binary ./handrail-ca, version-stamped
 
 `-listen` (or `HANDRAIL_LISTEN`) changes the listen address.
 
+### Accounts
+
+Accounts are kept in handrail-ca's own store, one SQLite file in a data
+directory, and are managed from the command line on the host. Nothing signs
+in with them yet; that arrives with the sign-in page.
+
+```sh
+export HANDRAIL_DATA=/var/lib/handrail-ca    # or pass -data to each command
+./handrail-ca user add -role operator alice  # prints a generated password once
+./handrail-ca user add -password-file pw.txt bob   # viewer, password from a file
+./handrail-ca user passwd alice              # new password; signs alice out
+./handrail-ca user remove bob
+./handrail-ca user list
+```
+
+A viewer reads; an operator will also issue and revoke. Flags come before
+the user name. The data directory and its files are created readable by
+their owner only.
+
 Or as a container:
 
 ```sh

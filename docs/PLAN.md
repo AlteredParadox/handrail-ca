@@ -48,7 +48,10 @@ tables with a read-only account and changes nothing in the CA's database.
 server-side sessions and two roles, viewer and operator. With the store (D5)
 the accounts live there and are managed from the command line on the host
 (`handrail-ca user add`, `passwd`, `remove`, `list`); there is no account
-management in the web UI in the first release. OIDC is a later milestone.
+management in the web UI in the first release. `add` and `passwd` generate
+a password and print it once, or take one from a file; nothing prompts, so
+no terminal library is needed. Changing a password ends that account's
+sessions. OIDC is a later milestone.
 
 **D3. Key generation: offered, as the second path.** Pasting a CSR is the
 default and keeps the private key with the requester. "Generate a key for
@@ -276,14 +279,27 @@ paths so they never appear in `-h` output or a process list.
 
 ## 5. Dependencies
 
-The scaffold has none. Planned, each to be confirmed when it is added:
+In use:
+
+| Module | For | License |
+|---|---|---|
+| `golang.org/x/crypto` | argon2id | BSD-3-Clause |
+| `modernc.org/sqlite` | the store; pure Go, so the binary stays static | BSD-3-Clause |
+
+`modernc.org/sqlite` is SQLite's C source translated to Go and links six
+more modules into the binary: `modernc.org/libc`, `modernc.org/memory` and
+`modernc.org/mathutil` (BSD-3-Clause, same authors), `golang.org/x/sys` and
+`github.com/google/uuid` (BSD-3-Clause), `github.com/dustin/go-humanize`
+(MIT) and `github.com/remyoudompheng/bigfft` (BSD-3-Clause). It took the
+stripped binary from 7.7 MB to 12.0 MB. `THIRD_PARTY_LICENSES.md` carries
+all of their notices.
+
+Planned, each to be confirmed when it is added:
 
 | Module | For | License |
 |---|---|---|
 | `github.com/go-jose/go-jose/v4` | open the provisioner key (PBES2 JWE), sign tokens | Apache-2.0 |
 | `github.com/jackc/pgx/v5` | read the CA's PostgreSQL database | MIT |
-| `golang.org/x/crypto` | argon2id | BSD-3-Clause |
-| `modernc.org/sqlite` | the store; pure Go, so the binary stays static | BSD-3-Clause |
 
 Certificate and CSR handling is `crypto/x509` from the standard library.
 
