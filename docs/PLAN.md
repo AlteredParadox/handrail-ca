@@ -516,9 +516,46 @@ server that answers `/healthz`.
   needs before applying a CA-wide name policy ([ca-setup.md](ca-setup.md),
   section 2): anything the policy leaves out stops renewing.
 - The certificate's note and labels, from the store, on the detail page.
-- Measure start-up scan time, refresh time and memory with 100,000 synthetic
-  rows and record the results here; decide then whether an on-disk cache is
-  needed.
+- Done: measured with 100,000 synthetic rows; the table below. **No
+  on-disk cache**: the first read takes seconds, not minutes, and the
+  picture fits in memory with room to spare. `make dev-measure` repeats the
+  measurement (`ROWS=` for another size).
+
+  | 100,000 certificates in the CA's database | Measured |
+  | --- | --- |
+  | First read after start (list, fetch and parse everything) | 4.3 to 4.6 s |
+  | Each later read, nothing new or a hundred new | 0.25 to 0.28 s |
+  | Memory the picture holds | 69 MB, about 690 bytes a certificate |
+  | The process, resident, after the first read | 157 MB |
+  | The process, resident, at its highest, after a sign-in and list requests | 311 MB |
+  | Default list (38,000 active, by expiry), the whole page | 0.09 to 0.10 s |
+  | Everything by subject or by date issued, the whole page | 0.19 to 0.26 s |
+  | Search for one name or serial, the whole page | 0.06 s |
+  | One certificate read for its page | under 1 ms |
+
+  How it was measured: the development CA's PostgreSQL on the same
+  machine (two cores of a 2016 Xeon), so nothing here includes a network;
+  rows written straight into the tables with random 128-bit serials, one to
+  three names each, six in ten expired, one in fifty revoked. The first
+  three lines are from the inventory alone (`TestScale`); the rest are the
+  built binary, with page times taken by curl.
+
+  What it says:
+  - Every later read lists all the keys and reads the whole revocation
+    table, so its cost grows with the tables. A quarter of a second every
+    thirty seconds at this size is acceptable; at a million rows it would
+    want a cheaper question to ask first.
+  - Filtering and sorting in memory on every request is fast enough. The
+    measurement found one thing that was not: sorting by subject lowered
+    the case of both subjects in every comparison and took 0.77 s. The
+    lower-case subject is now kept, and the sort takes 0.16 s.
+  - The process uses several times what the picture holds: Go lets the
+    heap about double before it collects, and each sign-in's password hash
+    takes 64 MB for a moment. At 690 bytes a certificate, a CA with a few
+    thousand certificates has a picture of a few megabytes, and the
+    password hash is then the larger part; that is arithmetic, not a
+    measurement. Not measured: anything above 100,000 rows, a small CA's
+    process, a database on another machine, or a long run.
 - ESLint `jscheck` joins `make` and CI with the first JavaScript file.
 
 **M3. Revoke.**
@@ -567,7 +604,8 @@ account management in the web UI; several CAs.
   unprivileged account, nothing in it that can mint a certificate, and a
   documented backup.
 - **Table growth.** Short-lived certificates and no pruning mean the tables
-  only grow. M2 measures this instead of assuming it is fine.
+  only grow. Measured at 100,000 rows (section 6, M2): fine there, with
+  the cost of each read growing with the tables.
 - **Revocation is weaker than the word suggests.** Without a CRL a revoked
   certificate keeps working until it expires. The UI states this on the
   revoke page instead of leaving the operator to assume otherwise.

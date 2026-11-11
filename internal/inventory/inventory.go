@@ -126,6 +126,10 @@ type Certificate struct {
 	// name must be found by it, however many others it carries. It is as
 	// bounded as the certificate itself, which the Source caps.
 	haystack string
+	// subjectKey is the subject in lower case: what the list is sorted by
+	// when sorted by subject, kept so that sorting does not rebuild it for
+	// every comparison.
+	subjectKey string
 }
 
 // Revocation is what the CA recorded when a certificate was revoked.
@@ -520,6 +524,7 @@ func summarise(row RawCertificate) *Certificate {
 		c.Subject = clip(cert.Subject.String())
 	}
 	c.NotBefore, c.NotAfter = cert.NotBefore.UTC(), cert.NotAfter.UTC()
+	c.subjectKey = strings.ToLower(c.Subject)
 	c.Names, c.MoreNames = namesOf(cert)
 	c.haystack = haystackOf(c, cert)
 	return c

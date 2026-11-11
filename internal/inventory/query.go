@@ -17,6 +17,7 @@
 package inventory
 
 import (
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -182,33 +183,34 @@ func (c *Certificate) matches(provisioner, needle string) bool {
 // (unreadable ones have no dates), fall back to the serial so that the
 // order is the same on every request.
 func sortRows(rows []Row, order Order, reverse bool) {
-	less := func(a, b *Certificate) bool {
+	compare := func(a, b *Certificate) int {
+		var c int
 		switch order {
 		case ByIssued:
-			if !a.NotBefore.Equal(b.NotBefore) {
-				return a.NotBefore.After(b.NotBefore)
-			}
+			c = b.NotBefore.Compare(a.NotBefore)
 		case BySubject:
-			if x, y := strings.ToLower(a.Subject), strings.ToLower(b.Subject); x != y {
-				return x < y
-			}
+			c = strings.Compare(a.subjectKey, b.subjectKey)
 		default:
-			if !a.NotAfter.Equal(b.NotAfter) {
-				return a.NotAfter.Before(b.NotAfter)
-			}
+			c = a.NotAfter.Compare(b.NotAfter)
 		}
-		return a.Serial < b.Serial
+		if c == 0 {
+			c = strings.Compare(a.Serial, b.Serial)
+		}
+		return c
 	}
-	sort.SliceStable(rows, func(i, j int) bool {
-		a, b := rows[i].Certificate, rows[j].Certificate
+	slices.SortFunc(rows, func(x, y Row) int {
+		a, b := x.Certificate, y.Certificate
 		// Unreadable rows have nothing to sort by: always last.
 		if (a.Problem == "") != (b.Problem == "") {
-			return a.Problem == ""
+			if a.Problem == "" {
+				return -1
+			}
+			return 1
 		}
 		if reverse {
-			return less(b, a)
+			return compare(b, a)
 		}
-		return less(a, b)
+		return compare(a, b)
 	})
 }
 
