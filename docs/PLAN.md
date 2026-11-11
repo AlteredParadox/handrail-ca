@@ -300,7 +300,12 @@ As built in milestone 1:
   limit, and a successful sign-in gives its attempt back. The address is
   the visitor's own only where that can be known (next point). A known
   user name can be kept locked out by someone who keeps failing on it; that
-  is the price of any lockout.
+  is the price of any lockout. Names and addresses are counted in two
+  bounded tables, and a full table never drops a count that is still
+  running. With the table of names full, a name not yet in it is refused:
+  that limit is the one that bounds guessing at an account. With the table
+  of addresses full, a new address goes uncounted: addresses are cheap to
+  produce, and refusing new ones would lock every other visitor out.
 - Behind a reverse proxy every visitor arrives from the proxy's address.
   `-trusted-proxy` lists the proxies; on a connection from one of them the
   visitor is the rightmost address in `X-Forwarded-For` that is not itself

@@ -669,12 +669,12 @@ func TestSignInIsThrottled(t *testing.T) {
 		s.browser().signIn("bob", "wrong")
 	}
 	wantRedirect(t, s.browser().signIn("bob", bobPassword), "/")
-	if e := s.server.limiter.entries["user:bob"]; e != nil {
+	if e := s.server.limiter.names["bob"]; e != nil {
 		t.Errorf("bob's failures were kept after a success: %+v", e)
 	}
 	// The address keeps its four failures, and gets the successful attempt
 	// back: one more wrong guess is checked, the one after is not.
-	if e := s.server.limiter.entries["addr:10.20.0.5"]; e == nil || e.attempts != limiterAttempts-1 {
+	if e := s.server.limiter.addrs["10.20.0.5"]; e == nil || e.attempts != limiterAttempts-1 {
 		t.Errorf("the address's count after a success: %+v", e)
 	}
 	wantStatus(t, s.browser().signIn("alice", "wrong"), http.StatusUnauthorized)
@@ -765,38 +765,104 @@ func TestPasswordChangeDuringSignIn(t *testing.T) {
 	wantRedirect(t, s.browser().signIn("alice", "a new password entirely"), "/")
 }
 
-func TestLimiterStaysBounded(t *testing.T) {
-	l := newLimiter()
-	for i := range limiterEntries {
-		l.begin(t0, fmt.Sprintf("addr:%d", i))
+// A full table must not forget who is locked out: forgetting would give a
+// locked account five fresh guesses to anyone able to fill the table.
+func TestLimiterStaysBoundedWithoutForgetting(t *testing.T) {
+	const size = 50
+	small := func() *limiter {
+		l := newLimiter()
+		l.maxLen = size
+		return l
 	}
-	// Full of live windows: the next attempt clears the table rather than
-	// growing it.
-	l.begin(t0.Add(time.Second), "addr:new")
-	if len(l.entries) != 1 {
-		t.Errorf("%d entries after overflow, want 1", len(l.entries))
+	lock := func(l *limiter, name, addr string) {
+		for range limiterAttempts {
+			if l.begin(t0, name, addr) != 0 {
+				t.Fatalf("locking %q/%q: refused early", name, addr)
+			}
+		}
 	}
-	// Finished windows are dropped first.
-	l = newLimiter()
-	for i := range limiterEntries {
-		l.begin(t0, fmt.Sprintf("addr:%d", i))
-	}
-	l.begin(t0.Add(limiterWindow), "addr:new")
-	if len(l.entries) != 1 {
-		t.Errorf("%d entries after pruning, want 1", len(l.entries))
-	}
-	if l.blocked(t0, "addr:none") != 0 {
-		t.Error("an unknown key is blocked")
-	}
-	// A refused attempt counts against none of its keys.
-	l = newLimiter()
-	for range limiterAttempts {
-		l.begin(t0, "user:a")
-	}
-	if l.begin(t0, "user:a", "addr:b") == 0 || l.entries["addr:b"] != nil {
-		t.Error("a refused attempt was counted against its other key")
-	}
-	l.refund("addr:none") // nothing to give back: no effect, no panic
+
+	t.Run("addresses", func(t *testing.T) {
+		l := small()
+		lock(l, "alice", "")
+		lock(l, "", "203.0.113.1")
+		// Fill the address table from many addresses, as malformed user
+		// names would: no password hashing involved.
+		for i := 0; len(l.addrs) < size; i++ {
+			l.begin(t0, "", fmt.Sprintf("2001:db8::%x", i))
+		}
+		later := t0.Add(time.Minute)
+		// More new addresses are let through uncounted; the table does not
+		// grow and nothing in it is dropped.
+		for i := range 3 * size {
+			if l.begin(later, "", fmt.Sprintf("2001:db8:1::%x", i)) != 0 {
+				t.Fatal("a new address was refused because the table is full")
+			}
+		}
+		if len(l.addrs) != size {
+			t.Errorf("%d addresses tracked, want %d", len(l.addrs), size)
+		}
+		if l.blocked(later, "alice", "") == 0 || l.begin(later, "alice", "2001:db8:2::1") == 0 {
+			t.Error("alice's lockout was lost when the address table filled")
+		}
+		if l.blocked(later, "", "203.0.113.1") == 0 {
+			t.Error("a locked address was forgotten when the table filled")
+		}
+		// Once windows have run out, their entries make room again.
+		after := t0.Add(limiterWindow)
+		l.begin(after, "", "198.51.100.1")
+		if l.addrs["198.51.100.1"] == nil || len(l.addrs) != 1 {
+			t.Errorf("after the windows ended: %d entries", len(l.addrs))
+		}
+	})
+
+	t.Run("names", func(t *testing.T) {
+		l := small()
+		lock(l, "alice", "")
+		for i := 0; len(l.names) < size; i++ {
+			l.begin(t0, fmt.Sprintf("name-%d", i), "")
+		}
+		later := t0.Add(time.Minute)
+		// A name not seen before is refused, and counted nowhere.
+		if l.begin(later, "newcomer", "192.0.2.9") == 0 {
+			t.Error("a new name was accepted with the table of names full")
+		}
+		if len(l.names) != size || l.addrs["192.0.2.9"] != nil {
+			t.Errorf("a refused attempt was counted: %d names, address %v", len(l.names), l.addrs["192.0.2.9"])
+		}
+		// Names already there carry on as before.
+		if l.begin(later, "name-0", "") != 0 {
+			t.Error("a known name with attempts left was refused")
+		}
+		if l.blocked(later, "alice", "") == 0 {
+			t.Error("alice's lockout was lost when the table of names filled")
+		}
+		if l.begin(t0.Add(limiterWindow), "newcomer", "") != 0 {
+			t.Error("a new name is still refused after the windows ended")
+		}
+	})
+
+	t.Run("bookkeeping", func(t *testing.T) {
+		l := small()
+		if l.blocked(t0, "nobody", "192.0.2.1") != 0 || l.blocked(t0, "", "") != 0 {
+			t.Error("an unknown key is blocked")
+		}
+		// A refused attempt counts against neither key.
+		lock(l, "alice", "")
+		if l.begin(t0, "alice", "192.0.2.1") == 0 || l.addrs["192.0.2.1"] != nil {
+			t.Error("a refused attempt was counted against its address")
+		}
+		// Empty keys are never stored.
+		l.begin(t0, "", "")
+		if l.names[""] != nil || l.addrs[""] != nil {
+			t.Error("an empty key was stored")
+		}
+		l.succeed("nobody", "192.0.2.77") // nothing to clear or give back
+		// A used-up window that has ended blocks nothing.
+		if l.blocked(t0.Add(limiterWindow), "alice", "") != 0 {
+			t.Error("alice is blocked after her window ended")
+		}
+	})
 }
 
 func TestSessionsEnd(t *testing.T) {
