@@ -91,7 +91,15 @@ turns out to hold a certificate for it, that is recorded as a failure (a
 certificate nobody has the key for) and the operator is sent to its page
 to revoke it. That page says so from handrail-ca's own record of what
 happened, as it does for every notice about a request: no address can
-make a certificate's page say that nobody has its key. `-no-key-generation` switches the path off: its routes then refuse,
+make a certificate's page say that nobody has its key. An attempt whose
+outcome was not learned is remembered for ten minutes, by who asked and
+for what names, with the request it sent (the public key and the names;
+the private key is gone). The same operator asking for the same
+certificate again is held to the rules of the CSR path first: the
+database is read, and if it holds the earlier attempt's certificate the
+operator is taken to it and nothing new is made; if that cannot be told
+yet, nothing is made; only when nothing was issued, as far as can be
+known, does a new key get made. `-no-key-generation` switches the path off: its routes then refuse,
 and the Issue page does not offer it. Not done: encrypting the key with a
 password of the operator's, or offering it as a file to download.
 

@@ -32,6 +32,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -218,6 +219,43 @@ func typedNames(typed string) ([]string, error) {
 	return out, nil
 }
 
+// earlierGenerateSettled accounts for an earlier attempt at the same
+// certificate whose outcome was not learned. It reports whether the new
+// attempt may go ahead. When it may not, the answer has been written: the
+// operator was taken to the certificate the earlier attempt turned out to
+// have been given, or told why nothing is made yet. left is what stays
+// remembered of the earlier attempt.
+func (s *server) earlierGenerateSettled(w http.ResponseWriter, r *http.Request, data issueData, earlier issuedAt, left *issuedAt) bool {
+	u := currentUser(r)
+	settle, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), issueTimeout)
+	orphan, wait := s.settleEarlier(settle, earlier.req, earlier)
+	cancel()
+	if orphan != "" {
+		*left = issuedAt{}
+		s.record(r, store.Event{Actor: u.user.Username, Action: store.ActionIssue, Outcome: store.OutcomeFailed, Serial: orphan, Subject: earlier.req.CommonName,
+			Detail: "the earlier attempt, whose outcome was not known, was given this certificate: the CA's database holds it now. Its key was made by handrail-ca and discarded then, so the certificate is of no use to anyone"})
+		s.issues.remember(issuedAt{serial: orphan, how: "keyless", at: s.opts.Now()})
+		http.Redirect(w, r, s.certificateURL(orphan)+arrived, http.StatusSeeOther)
+		return false
+	}
+	if wait != "" {
+		data.Problem = "an earlier attempt to issue this certificate has an outcome that is not known yet, and " + wait + ". Nothing was made or sent: a second certificate would leave the first, if there is one, with a key nobody has and nobody looking for it"
+		s.renderIssue(w, r, http.StatusConflict, data)
+		return false
+	}
+	return true
+}
+
+// generateKey is what an attempt to issue a certificate with a generated
+// key is remembered under while its outcome is not known: who asked, and
+// for what common name and names.
+func generateKey(username, commonName string, names []string) string {
+	sorted := append([]string{}, names...)
+	sort.Strings(sorted)
+	sum := sha256.Sum256([]byte(username + "\x00" + commonName + "\x00" + strings.Join(sorted, "\x00")))
+	return "generate " + hex.EncodeToString(sum[:])
+}
+
 // generateAsk is what a key-generating form asks for, checked.
 type generateAsk struct {
 	commonName string
@@ -276,6 +314,27 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	commonName, names, makeKey, kind, length := want.commonName, want.names, want.makeKey, want.kind, want.length
+	// An earlier attempt at the same certificate, by the same operator,
+	// whose outcome was not learned is accounted for before another is
+	// made. If it was given a certificate after all, that certificate is
+	// for a key nobody has: the operator is taken to it, to revoke it,
+	// before a second one joins it.
+	u := currentUser(r)
+	pending := generateKey(u.user.Username, commonName, names)
+	earlier, busy := s.issues.begin(pending, s.opts.Now())
+	if busy {
+		refuse(http.StatusConflict, "this certificate is being issued right now, by a form sent a moment ago. Wait for that one")
+		return
+	}
+	// What is remembered of this certificate when the handler is done: an
+	// earlier attempt of unknown outcome, unless this request settles it.
+	left := earlier
+	defer func() { s.issues.end(pending, left) }()
+	if earlier.uncertain && !s.earlierGenerateSettled(w, r, data, earlier, &left) {
+		return
+	}
+	left = issuedAt{}
+
 	// Everything typed has been checked. From here a key is made, so the
 	// form is taken: sent again, it makes nothing.
 	once := r.PostForm.Get("once")
@@ -297,7 +356,6 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	u := currentUser(r)
 	asked := "names: " + strings.Join(requestNamesOf(req), ", ") + "; validity: " + validityWords(length) + "; key made by handrail-ca (" + kind + ")"
 	event := store.Event{Actor: u.user.Username, Action: store.ActionIssue, Subject: req.CommonName}
 	attempt := event
@@ -324,8 +382,14 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 			// Remembered as that, so that its page can say so from what
 			// happened here and not from an address.
 			s.issues.remember(issuedAt{serial: outcome.serial, how: "keyless", at: s.opts.Now()})
-			http.Redirect(w, r, s.certificateURL(outcome.serial)+"?issued=1", http.StatusSeeOther)
+			http.Redirect(w, r, s.certificateURL(outcome.serial)+arrived, http.StatusSeeOther)
 			return
+		}
+		if outcome.outcome == store.OutcomeUnknown {
+			// Remembered, with the request (which holds the public key and
+			// the names, and nothing secret): the next attempt at this
+			// certificate looks for what became of this one first.
+			left = issuedAt{uncertain: true, before: before, sentAt: sentAt, req: req, at: s.opts.Now()}
 		}
 		s.record(r, event)
 		data.Failure = outcome.failure

@@ -136,7 +136,8 @@ certificate and its chain.
 - If the CA does not answer with a certificate, the key is discarded and
   the page says so. If a certificate for it turns up in the CA's database
   all the same, handrail-ca says that nobody has its key and offers to
-  revoke it.
+  revoke it. Asking for the same certificate again looks for that first,
+  and makes nothing new until the earlier attempt is accounted for.
 - `-no-key-generation` switches this way off.
 
 ### Revoking

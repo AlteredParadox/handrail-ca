@@ -201,6 +201,10 @@ type issuedAt struct {
 	uncertain bool
 	before    *inventory.Snapshot
 	sentAt    time.Time
+	// req is the request of an uncertain attempt, kept when it cannot be
+	// had again from a form: one handrail-ca made itself, for a key it
+	// has since discarded. It holds the public key and the names.
+	req *ca.Request
 }
 
 // maxRememberedIssues bounds the requests remembered as just signed.

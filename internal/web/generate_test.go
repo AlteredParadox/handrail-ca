@@ -466,6 +466,91 @@ func TestGenerateOutcomes(t *testing.T) {
 	})
 }
 
+// An attempt whose outcome was not learned is accounted for before the
+// same certificate is tried again. If it was given a certificate after
+// all, that one is for a key nobody has, and the operator is taken to it
+// before a second is made.
+func TestGenerateAgainAfterAnUnknownOutcome(t *testing.T) {
+	lost := errors.New(`Post "https://ca.internal.example:9000/1.0/sign": context deadline exceeded`)
+	start := func(t *testing.T) (*site, *browser, url.Values, **ca.Issued) {
+		s := newSite(t, "http://127.0.0.1:8080")
+		b := s.browser()
+		wantRedirect(t, b.signIn("alice", alicePassword), "/")
+		var pending *ca.Issued
+		s.ca.sign = func(_ context.Context, r *ca.Request, d time.Duration) (*ca.Issued, error) {
+			pending = s.caSigns(r, d)
+			return nil, lost
+		}
+		form := b.generateForm("git.internal.example", "git\n10.20.0.14", "p256")
+		rec := b.do(http.MethodPost, "/issue/generate", form)
+		wantStatus(t, rec, http.StatusBadGateway)
+		wantBody(t, rec, "It is not known yet whether a certificate was issued")
+		// The form that came back, with what was typed, good for another go.
+		form.Set("once", onceField.FindStringSubmatch(rec.Body.String())[1])
+		return s, b, form, &pending
+	}
+	issues := func(s *site) {
+		s.ca.sign = func(_ context.Context, r *ca.Request, d time.Duration) (*ca.Issued, error) {
+			issued := s.caSigns(r, d)
+			s.caStores(issued.Certificate)
+			return issued, nil
+		}
+	}
+
+	t.Run("too soon to know", func(t *testing.T) {
+		s, b, form, _ := start(t)
+		issues(s)
+		rec := b.do(http.MethodPost, "/issue/generate", form)
+		wantStatus(t, rec, http.StatusConflict)
+		wantBody(t, rec, "an earlier attempt to issue this certificate has an outcome that is not known yet", "Nothing was made or sent")
+		if strings.Contains(rec.Body.String(), "PRIVATE KEY") || len(s.ca.signings()) != 1 {
+			t.Errorf("a second key or certificate was made: %d signings", len(s.ca.signings()))
+		}
+	})
+
+	t.Run("the first certificate has turned up", func(t *testing.T) {
+		s, b, form, pending := start(t)
+		issues(s)
+		s.caStores((*pending).Certificate)
+		s.clock.advance(time.Minute)
+		rec := b.do(http.MethodPost, "/issue/generate", form)
+		wantRedirect(t, rec, "/certificates/5001?issued=1")
+		wantBody(t, b.get("/certificates/5001?issued=1"), "issued for a key that handrail-ca had made and never handed over", "Revoke it below", `href="/certificates/5001/revoke"`)
+		if n := len(s.ca.signings()); n != 1 {
+			t.Fatalf("the CA was asked to sign %d times", n)
+		}
+		events := s.issueEvents()
+		if last := events[len(events)-1]; last.Outcome != store.OutcomeFailed || last.Serial != "5001" || !strings.Contains(last.Detail, "Its key was made by handrail-ca and discarded then") {
+			t.Errorf("history: %+v", last)
+		}
+		// With the first accounted for, the same form makes a new one.
+		rec = b.do(http.MethodPost, "/issue/generate", form)
+		wantStatus(t, rec, http.StatusOK)
+		wantBody(t, rec, "Save the private key now.")
+		if n := len(s.ca.signings()); n != 2 {
+			t.Errorf("the CA was asked to sign %d times", n)
+		}
+	})
+
+	t.Run("nothing was issued, as far as can be known", func(t *testing.T) {
+		s, b, form, _ := start(t)
+		issues(s)
+		s.clock.advance(issueSettles)
+		rec := b.do(http.MethodPost, "/issue/generate", form)
+		wantStatus(t, rec, http.StatusOK)
+		wantBody(t, rec, "Save the private key now.")
+	})
+
+	// Another certificate, or the same names asked for by someone else, is
+	// not held up by it.
+	t.Run("another certificate is not held up", func(t *testing.T) {
+		s, b, _, _ := start(t)
+		issues(s)
+		rec := b.do(http.MethodPost, "/issue/generate", b.generateForm("other.internal.example", "", "p256"))
+		wantStatus(t, rec, http.StatusOK)
+	})
+}
+
 func TestTypedNames(t *testing.T) {
 	got, err := typedNames(" a.internal.example,b.internal.example\r\n\n10.20.0.1  a.internal.example\tspiffe://x/y ")
 	want := []string{"a.internal.example", "b.internal.example", "10.20.0.1", "spiffe://x/y"}
