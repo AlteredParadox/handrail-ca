@@ -29,6 +29,7 @@ const (
 	ActionSignOut    = "sign-out"
 	ActionIssue      = "issue"
 	ActionRevoke     = "revoke"
+	ActionNote       = "note"
 	ActionUserAdd    = "user-add"
 	ActionUserPasswd = "user-passwd"
 	ActionUserRemove = "user-remove"

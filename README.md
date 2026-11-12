@@ -11,8 +11,9 @@ revoked and expired ones a click away. Each certificate has a page of its
 own: what it says, who issued it, whether and why it was revoked, and the
 certificate to download as PEM, DER or with its chain. A summary lists every
 name the CA's certificates carry, by domain and network, which is what a
-name policy on the CA has to allow. Issuing and revoking are not built yet;
-the [build plan](docs/PLAN.md) has the order.
+name policy on the CA has to allow. Operators can keep a note and labels on
+a certificate, for what the CA does not record. Issuing and revoking are not
+built yet; the [build plan](docs/PLAN.md) has the order.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.
@@ -44,7 +45,7 @@ export HANDRAIL_DB_URL_FILE=/etc/handrail-ca/db_url  # a file, because it holds 
 
 | Flag | Environment | |
 |---|---|---|
-| `-data` | `HANDRAIL_DATA` | Directory for handrail-ca's own store (accounts, sessions, history). Created owner-only. |
+| `-data` | `HANDRAIL_DATA` | Directory for handrail-ca's own store (accounts, sessions, history, notes on certificates). Created owner-only. |
 | `-ca-url` | `HANDRAIL_CA_URL` | The CA's address, `https://host[:port]`. |
 | `-ca-fingerprint` | `HANDRAIL_CA_FINGERPRINT` | SHA-256 fingerprint of the CA's root certificate. handrail-ca fetches the root from the CA, accepts it only if it has this fingerprint, and from then on verifies every connection to the CA against that root and nothing else. |
 | `-db-url-file` | `HANDRAIL_DB_URL_FILE` | File holding the connection string for the CA's PostgreSQL database: `postgres://user:password@host:port/database?sslmode=verify-full`, for an account that can only read the three certificate tables. Keep the file readable by handrail-ca's user alone. |

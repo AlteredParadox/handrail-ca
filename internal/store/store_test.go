@@ -20,6 +20,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -175,7 +176,7 @@ func TestAFailedSchemaStepChangesNothing(t *testing.T) {
 
 	migrations = append(append([]string{}, saved...), `CREATE TABLE extra (id INTEGER PRIMARY KEY); CREATE TABLE users (id INTEGER);`)
 	_, err := Open(ctx, dir)
-	wantErr(t, err, "schema step 2")
+	wantErr(t, err, fmt.Sprintf("schema step %d", len(saved)+1))
 
 	// Neither the first statement of the failed step nor its version stuck.
 	migrations = saved

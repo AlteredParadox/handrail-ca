@@ -231,6 +231,7 @@ func newFakeCA(t *testing.T) *fakeCA {
 type brokenStore struct {
 	*store.Store
 	historyErr, sessionErr, createErr, credentialsErr atomic.Pointer[error]
+	noteErr, setNoteErr                               atomic.Pointer[error]
 	// beforeCreate runs between the password check and the session being
 	// created, where a concurrent `user passwd` could land. beforeChange
 	// runs at the same point of a change of password.
@@ -242,6 +243,20 @@ func (b *brokenStore) ChangePassword(ctx context.Context, id int64, oldHash, new
 		b.beforeChange()
 	}
 	return b.Store.ChangePassword(ctx, id, oldHash, newHash, now)
+}
+
+func (b *brokenStore) Note(ctx context.Context, serial string) (store.Note, error) {
+	if err := b.noteErr.Load(); err != nil {
+		return store.Note{}, *err
+	}
+	return b.Store.Note(ctx, serial)
+}
+
+func (b *brokenStore) SetNote(ctx context.Context, n store.Note) error {
+	if err := b.setNoteErr.Load(); err != nil {
+		return *err
+	}
+	return b.Store.SetNote(ctx, n)
 }
 
 func (b *brokenStore) AppendHistory(ctx context.Context, e store.Event) error {

@@ -85,6 +85,26 @@ BEGIN SELECT RAISE(ABORT, 'history rows are never changed'); END;
 CREATE TRIGGER history_no_delete BEFORE DELETE ON history
 BEGIN SELECT RAISE(ABORT, 'history rows are never deleted'); END;
 `,
+	// 2: notes and labels on certificates.
+	`
+-- What the CA does not record about a certificate. By serial number: the
+-- store holds no certificates, and a serial here need not still be in the
+-- CA's database.
+CREATE TABLE cert_notes (
+	serial     TEXT    PRIMARY KEY,
+	note       TEXT    NOT NULL,
+	updated_at INTEGER NOT NULL,
+	updated_by TEXT    NOT NULL
+) STRICT, WITHOUT ROWID;
+
+-- A row per label, so that the certificates with a label can be found.
+CREATE TABLE cert_labels (
+	serial TEXT NOT NULL REFERENCES cert_notes (serial) ON DELETE CASCADE,
+	label  TEXT NOT NULL,
+	PRIMARY KEY (serial, label)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX cert_labels_label ON cert_labels (label);
+`,
 }
 
 // Store is an open store. It is safe for concurrent use.
