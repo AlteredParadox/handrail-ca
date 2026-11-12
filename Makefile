@@ -3,7 +3,7 @@ BINARY := handrail-ca
 # this with the tag; local builds report the git description, or "dev".
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build run test vet notices notices-check license-headers license-check dev-up dev-verify dev-test dev-down clean
+.PHONY: build run test vet notices notices-check license-headers license-check dev-up dev-verify dev-test dev-measure dev-down clean
 
 # `notices` runs FIRST: THIRD_PARTY_LICENSES.md is embedded into the binary
 # (legal.go), so regenerating it here means what ships always matches what
@@ -62,6 +62,13 @@ dev-verify:
 
 dev-test:
 	@./deploy/dev/test.sh
+
+# Fills the development CA's database with synthetic certificates up to ROWS
+# and measures the inventory against it (docs/PLAN.md, section 6). The rows
+# stay until dev-down.
+ROWS ?= 100000
+dev-measure:
+	@./deploy/dev/measure.sh $(ROWS)
 
 dev-down:
 	@docker compose -f deploy/dev/compose.yaml down -v

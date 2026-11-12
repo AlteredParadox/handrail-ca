@@ -8,6 +8,7 @@ disk, keys in a volume.
 make dev-up       # start, seed, create the read-only database role
 make dev-verify   # check step-ca's behavior against what the docs say
 make dev-test     # run handrail-ca's integration tests against it
+make dev-measure  # fill the database to 100,000 certificates and time the inventory
 make dev-down     # remove it and its volumes
 ```
 
@@ -57,6 +58,11 @@ go run ./cmd/handrail-ca          # http://127.0.0.1:8080
 - `up.sh`: generates passwords, starts everything, runs the seed and the
   role script.
 - `verify.sh`: the checks behind `make dev-verify`.
+- `measure.sh`: behind `make dev-measure`. Writes synthetic certificate
+  rows straight into the CA's tables, as the database's owner, until there
+  are `ROWS` of them (100,000 by default), then times the inventory's reads
+  and queries through the read-only role. The rows stay until
+  `make dev-down`; run the other checks on a fresh environment.
 - `capture-fixtures.sh`: writes the certificate rows of the running CA to
   `internal/inventory/testdata/devca.json`, which the inventory's unit
   tests read. Re-run it, on a fresh environment, when the step-ca version
