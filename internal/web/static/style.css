@@ -417,14 +417,14 @@ tbody tr:last-child td {
   flex: 1 1 260px;
 }
 
-.filters .check {
+.field.check {
   align-items: center;
   flex-direction: row;
   gap: 8px;
   min-height: 44px;
 }
 
-.filters .check label {
+.field.check label {
   color: var(--ink);
   font-size: 14px;
   font-weight: 400;
@@ -729,6 +729,13 @@ a.button.on {
 
 pre.key {
   border: 1px solid var(--warn);
+}
+
+.made {
+  border: 1px solid var(--warn);
+  border-radius: 4px;
+  padding: 2px 6px;
+  user-select: all;
 }
 
 .split {

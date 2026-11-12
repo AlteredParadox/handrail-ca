@@ -100,8 +100,39 @@ database is read, and if it holds the earlier attempt's certificate the
 operator is taken to it and nothing new is made; if that cannot be told
 yet, nothing is made; only when nothing was issued, as far as can be
 known, does a new key get made. `-no-key-generation` switches the path off: its routes then refuse,
-and the Issue page does not offer it. Not done: encrypting the key with a
-password of the operator's, or offering it as a file to download.
+and the Issue page does not offer it.
+
+How the key is handed over (2026-11-12, asked for by the owner): the form
+takes an optional password for the key and a choice of PEM files or one
+PFX file. With a password the PEM key is PKCS #8 encrypted under PBES2
+(PBKDF2 over HMAC-SHA-256 with 600,000 rounds, AES-256-CBC), written by
+`internal/keyfile` with the standard library and checked both ways against
+`openssl`. A PFX file needs a password and comes in two kinds: AES-256
+with 150,000 rounds, and Triple DES with SHA-1 and 2,048 rounds for
+devices that read nothing newer. The PFX library's own counts were not
+kept: 2,048 for AES-256, which is no protection for a password a person
+chooses, and a single round for the older kind's check on the whole file,
+where OpenSSL's `-legacy` writes 2,048. The AES-256 count is bounded by
+what readers accept, as their makers publish it: Windows refuses a count
+above 600,000; .NET 9 and newer refuse one above 300,000 or a file whose
+counts add up to more than 1,000,000; .NET Framework, given no password,
+refuses a file whose three counts add up to more than 600,000. Three
+times 150,000 is inside all of these. None of those readers was tried:
+the files were read back with OpenSSL 3.5 and the library only. Because a
+PFX file still guards its password less well than the PEM key, the form
+can make the password instead (the 20 random characters the accounts
+get), shown once on the answer page and kept nowhere, and the page says
+which protection a file has. A typed password is held to the same
+12-character minimum as an account's. The encrypted key is made before
+the CA is asked, so a certificate never exists for a key that cannot be
+written out; if the PFX file cannot be made once the certificate exists,
+the key is handed over as encrypted PEM with the same password. The key,
+the certificate and the chain are also offered as files to save: each is
+a link that carries its file inside the page (a `data:` address with a
+`download` name), so saving asks the server for nothing and there is
+still no address the key can be fetched from. No JavaScript is involved.
+Saving all of them was driven in Chromium, Firefox and WebKit and every
+saved file checked with `openssl`.
 
 **D4. Front end: server-rendered pages.** `html/template` with a small amount
 of JavaScript for filtering, copying and confirmation. Auto-escaping by
@@ -672,6 +703,7 @@ In use:
 | `golang.org/x/crypto` | argon2id | BSD-3-Clause |
 | `golang.org/x/term` | asking for a password at the terminal without showing it | BSD-3-Clause |
 | `modernc.org/sqlite` | the store; pure Go, so the binary stays static | BSD-3-Clause |
+| `software.sslmate.com/src/go-pkcs12` | write a generated key and its certificates as a PFX file | BSD-3-Clause |
 
 `modernc.org/sqlite` is SQLite's C source translated to Go. With it, seven
 more modules are linked into the binary: `modernc.org/libc`,
@@ -698,6 +730,16 @@ and the token signatures here, for a credential that can mint
 certificates: a maintained library that many projects use for exactly this
 was preferred, and step-ca reads the tokens with the same family of
 library.
+
+`software.sslmate.com/src/go-pkcs12` (BSD-3-Clause) writes the PFX files
+for generated keys. It brings no other module (it uses `golang.org/x/crypto`,
+which is already here) and took the stripped binary from 19.9 MB to
+20.0 MB. Go's own `golang.org/x/crypto/pkcs12` only reads such files and
+is frozen; PKCS #12 has enough encodings and old habits in it that writing
+one here, for files other people's software has to accept, was the worse
+choice. Only its encoder runs in handrail-ca; its decoder is used by the
+tests. The encrypted PEM key, by contrast, is one small structure, and
+`internal/keyfile` writes it with the standard library.
 
 Certificate and CSR handling is `crypto/x509` from the standard library.
 
@@ -892,10 +934,11 @@ encrypted key; and handrail-ca serving TLS itself.
   test that generates a key and certificate on the development CA through
   the pages and checks the key is the certificate's.
 
-Milestone 4 is complete with this. Not built in it: a password on a
-generated key, the key or certificate as a download from the page that
-shows them, and renewing or re-issuing an existing certificate from its
-page.
+- Done: how a generated key is handed over (D3 has it as built): as files
+  to save, with a password typed or made, as PEM or as a PFX file.
+
+Milestone 4 is complete with this. Not built in it: renewing or
+re-issuing an existing certificate from its page.
 
 **M5. First release, v0.1.0.**
 - Deployment documentation: creating the provisioner with its name policy

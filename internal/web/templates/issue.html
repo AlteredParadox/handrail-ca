@@ -54,21 +54,31 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{with .Generated}}
 <section class="card">
 <div class="card-head"><h2>The certificate and its private key</h2><span class="badge ok">Issued</span></div>
-<p class="callout warn"><strong>Save the private key now. This page is the only place it is.</strong> handrail-ca made it for this one answer and has not kept it: not in its store, not in its log. Leave or reload this page and it is gone, and the certificate with it is of no use. Reloading does not make another.</p>
+<p class="callout warn"><strong>Save the {{if .PFX}}PFX file{{else}}private key{{end}}{{if .MadePassword}} and its password{{end}} now. This page is the only place {{if .MadePassword}}they are{{else}}it is{{end}}.</strong> handrail-ca made {{if .PFX}}the key in it{{else}}it{{end}} for this one answer and has not kept it: not in its store, not in its log. Leave or reload this page and it is gone, and the certificate with it is of no use. Reloading does not make another.</p>
+{{with .PFXProblem}}<p class="problem" role="alert">The PFX file that was asked for could not be made ({{.}}). The key is handed over below as PEM instead, encrypted with the same password.</p>{{end}}
 <dl>
 <dt>Subject</dt><dd>{{if .Subject}}{{.Subject}}{{else}}<span class="muted">Empty</span>{{end}}</dd>
 <dt>Serial</dt><dd class="mono small">{{.Serial}}</dd>
 <dt>Expires</dt><dd>{{.Expires}}</dd>
-<dt>Key</dt><dd>{{.Kind}}, not encrypted</dd>
+<dt>Key</dt><dd>{{.Kind}}, {{if .PFX}}inside a PFX file that opens with the password {{if .MadePassword}}below{{else}}you gave{{end}}{{else if .Encrypted}}encrypted with the password {{if .MadePassword}}below{{else}}you gave{{end}}{{else}}not encrypted{{end}}</dd>
+{{if .MadePassword}}<dt>Password</dt><dd><span class="mono made">{{.MadePassword}}</span> <span class="sub">Made by handrail-ca for this {{if .PFX}}file{{else}}key{{end}}, shown here once and kept nowhere. Keep it, and not in the same place as the {{if .PFX}}file{{else}}key{{end}}.</span></dd>{{end}}
 </dl>
 {{range .Differs}}<p class="problem">Not as asked: {{.}}.</p>{{end}}
+<div class="actions">
+{{range .Files}}<a class="button" download="{{.Name}}" href="{{.URL}}">{{.Label}}</a>
+{{end}}</div>
+<p class="sub">The files are inside this page: saving one fetches nothing from handrail-ca.{{if not .PFX}} They can also be copied from below.{{end}}</p>
+{{if .PFX}}
+<p class="callout info">The PFX file holds the key, the certificate and its chain, and opens with {{if .MadePassword}}the password above{{else}}your password{{end}}. It is not text, so it is not shown here: save it with the button above. {{if .OlderPFX}}<strong>It is the kind for older devices</strong>, protected with Triple DES and SHA-1. That is weak{{if not .MadePassword}}, and a password a person chose can be found from the file quickly{{end}}: treat the file as you would an unprotected key, and delete it once it has been imported.{{else}}It is protected with AES-256, which Windows 10 and Windows Server 2019 or newer, OpenSSL 1.1.1 or newer and Java 12 or newer can read. A device that cannot open it needs the kind for older devices. {{if .MadePassword}}Delete the file once it has been imported.{{else}}Someone who gets hold of the file can try passwords against it about four times as fast as against a PEM key from here, so what protects it is how hard your password is to guess: delete the file once it has been imported.{{end}}{{end}}</p>
+{{else}}
 <h3>Private key</h3>
 <pre class="pem key">{{.KeyPEM}}</pre>
+{{end}}
 <h3>Certificate</h3>
 <pre class="pem">{{.PEM}}</pre>
 <h3>Certificate and chain</h3>
 <pre class="pem">{{.Chain}}</pre>
-<p class="sub">The key is in PKCS #8 PEM with no password: keep it readable by the service that uses it and by nobody else. {{if .URL}}The certificate, without its key, can be had again from <a href="{{.URL}}">its page</a>.{{else}}The certificate will be in the list once the CA's database has been read again.{{end}}</p>
+<p class="sub">{{if .PFX}}handrail-ca has not kept the password and cannot show it again.{{else if .Encrypted}}The key is in PKCS #8 PEM, encrypted with {{if .MadePassword}}the password above{{else}}your password{{end}} (PBKDF2 and AES-256): whatever uses the certificate has to be given the password. handrail-ca has not kept the password and cannot show it again.{{else}}The key is in PKCS #8 PEM with no password: keep it readable by the service that uses it and by nobody else.{{end}} {{if .URL}}The certificate, without its key, can be had again from <a href="{{.URL}}">its page</a>.{{else}}The certificate will be in the list once the CA's database has been read again.{{end}}</p>
 </section>
 {{end}}
 {{else if .Unlisted}}
@@ -151,6 +161,29 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{end}}
 </select>
 </div>
+<div class="validity">
+<div class="field short">
+<label for="key_password">Password for the key (optional)</label>
+<input id="key_password" name="key_password" type="password" autocomplete="new-password" maxlength="1024">
+</div>
+<div class="field short">
+<label for="key_password_again">The same password again</label>
+<input id="key_password_again" name="key_password_again" type="password" autocomplete="new-password" maxlength="1024">
+</div>
+</div>
+<div class="field check">
+<input id="make_password" name="make_password" type="checkbox" value="1"{{if .Generate.MakePassword}} checked{{end}}>
+<label for="make_password">Make a password for me, and show it once with the key</label>
+</div>
+<p class="sub">With a password, at least 12 characters, the key is handed over encrypted with it, and whatever uses the certificate has to be given the password. handrail-ca does not keep the password or show it again. Without one the key is handed over as it is. A password made here is 20 random characters, and is the one to use for a PFX file, which guards its password less well than a PEM key does.</p>
+<div class="field short">
+<label for="format">Hand it over as</label>
+<select id="format" name="format">
+{{range .Generate.Forms}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+{{end}}
+</select>
+</div>
+<p class="sub">PEM is separate text files for the key, the certificate and its chain. A PFX file (also called PKCS #12 or .p12) is one file with all three, which is what Windows and many printers and appliances import; it always needs a password. Try the AES-256 kind first: the kind for older devices uses weak protection.</p>
 </section>
 
 <section class="card">

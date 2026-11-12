@@ -19,6 +19,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ed25519"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -28,10 +29,13 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
 
 	"handrail-ca/internal/ca"
 	"handrail-ca/internal/inventory"
@@ -470,5 +474,60 @@ func TestIntegrationGenerateThroughThePages(t *testing.T) {
 	wantBody(t, refused, "No certificate was issued", "not allowed", "The key handrail-ca made for this request has been discarded.")
 	if strings.Contains(refused.Body.String(), "PRIVATE KEY") {
 		t.Error("a key is on the page of a request that was refused")
+	}
+}
+
+// A generated key handed over as a PFX file with a password made here,
+// against the development CA: the password the page shows opens the file,
+// and what is in it is the key of a certificate the real CA signed, with
+// the chain to its root.
+func TestIntegrationGenerateAsAPFXFile(t *testing.T) {
+	s, client, _ := devSite(t, "handrail")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	name := fmt.Sprintf("pfx-%d.handrail.test", time.Now().UnixNano()%1_000_000_000)
+
+	form := b.generateForm(name, name, "p256")
+	form.Set("validity", "24h0m0s")
+	form.Set("format", "pfx")
+	form.Set("make_password", "1")
+	rec := b.do(http.MethodPost, "/issue/generate", form)
+	wantStatus(t, rec, http.StatusOK)
+	wantBody(t, rec, "Save the PFX file and its password now.", "<dt>Subject</dt><dd>CN="+name+"</dd>")
+	body := rec.Body.String()
+	made := madePassword.FindStringSubmatch(body)
+	if made == nil {
+		t.Fatal("no password on the page")
+	}
+	if strings.Contains(body, "PRIVATE KEY") {
+		t.Error("the key is on the page as text")
+	}
+	_, files := filesOn(t, body)
+	key, cert, chain, err := pkcs12.DecodeChain([]byte(files[name+".pfx"]), made[1])
+	if err != nil {
+		t.Fatalf("the password shown does not open the file: %v", err)
+	}
+	if signer, ok := key.(crypto.Signer); !ok || !reflect.DeepEqual(signer.Public(), cert.PublicKey) {
+		t.Error("the key in the file is not the certificate's")
+	}
+	root, err := client.Root(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, inters := x509.NewCertPool(), x509.NewCertPool()
+	roots.AddCert(root)
+	for _, c := range chain {
+		inters.AddCert(c)
+	}
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inters, DNSName: name, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		t.Errorf("the certificate in the file does not verify for its name: %v", err)
+	}
+	if strings.Contains(s.log.String(), made[1]) {
+		t.Error("the password is in the log")
+	}
+	for _, e := range s.issueEvents() {
+		if strings.Contains(e.Detail, made[1]) {
+			t.Error("the password is in the history")
+		}
 	}
 }

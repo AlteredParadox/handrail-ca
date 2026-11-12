@@ -28,9 +28,11 @@ import (
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
+	"html/template"
 	"net/http"
 	"sort"
 	"strings"
@@ -38,7 +40,12 @@ import (
 	"time"
 	"unicode"
 
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
+
 	"handrail-ca/internal/ca"
+	"handrail-ca/internal/inventory"
+	"handrail-ca/internal/keyfile"
+	"handrail-ca/internal/password"
 	"handrail-ca/internal/store"
 )
 
@@ -72,10 +79,54 @@ var keyKinds = []struct {
 	{"rsa3072", "RSA 3072", func() (crypto.Signer, error) { return rsa.GenerateKey(rand.Reader, 3072) }},
 }
 
+// keyForms are the forms a generated key is handed over in, in the order
+// offered. The PFX kinds are one file holding the key, the certificate
+// and its chain, opened with a password; pfx names the encoder for them,
+// and older says it is the kind for older devices.
+var keyForms = []struct {
+	value, label string
+	pfx          *pkcs12.Encoder
+	older        bool
+}{
+	{"pem", "PEM files", nil, false},
+	// AES-256 with PBKDF2 over SHA-256, as OpenSSL 3 writes by default,
+	// but with the password stretched pfxIterations times and not the
+	// library's 2,048, which the library says itself is no protection for
+	// a password a person would choose.
+	{"pfx", "One PFX file, AES-256", pkcs12.Modern2023.WithIterations(pfxIterations), false},
+	// Triple DES and SHA-1: weak, and what older devices can read. The
+	// counts are the ones OpenSSL writes with -legacy, 2,048 throughout,
+	// which is what such devices have long been given; the library alone
+	// would stretch the password once for the check on the whole file,
+	// and that check is where a password is guessed fastest.
+	{"pfx-legacy", "One PFX file for older devices, Triple DES", pkcs12.LegacyDES.WithIterations(olderPFXIterations), true},
+}
+
+// olderPFXIterations is the count in a PFX file for older devices.
+const olderPFXIterations = 2048
+
+// pfxIterations is how many rounds of PBKDF2 stretch the password of an
+// AES-256 PFX file, in each of the three places the file uses it (the key,
+// the certificates and the check on the whole).
+//
+// A PFX file is read by other people's software, some of which refuses a
+// file that asks for too much work. As published on 2026-11-12, and not
+// tried here: Windows refuses a count above 600,000; .NET 9 and newer
+// refuse one above 300,000, or a file whose counts add up to more than
+// 1,000,000; and .NET Framework, where no password is passed to it,
+// refuses a file whose three counts add up to more than 600,000. 150,000
+// each, 450,000 together, is inside all of them, and a quarter of what a
+// PEM key from here gets.
+const pfxIterations = 150_000
+
 // generateView is the form for a certificate whose key handrail-ca makes.
 type generateView struct {
 	CommonName, Names string
 	Kinds             []validityOption
+	// Forms are the forms the key can be handed over in.
+	Forms []validityOption
+	// MakePassword says the box for having a password made was ticked.
+	MakePassword bool
 	// Once marks this showing of the form: it is taken once.
 	Once string
 }
@@ -84,10 +135,42 @@ type generateView struct {
 type generatedView struct {
 	Subject, Serial, Expires, Kind string
 	KeyPEM, PEM, Chain             string
+	// Encrypted says the key is encrypted with the password that was
+	// given with the form.
+	Encrypted bool
+	// PFX says the key was handed over inside a PFX file, with the
+	// certificate and chain, and not as text; OlderPFX, that the file is
+	// the kind for older devices. PFXProblem is why a PFX file that was
+	// asked for could not be made: the key is then handed over as PEM.
+	PFX, OlderPFX bool
+	PFXProblem    string
+	// MadePassword is the password handrail-ca made for the key, when it
+	// was asked to: shown on this page, once, and kept nowhere.
+	MadePassword string
+	// Files are the same things as files to save. Each is a link that
+	// carries its file within this page: nothing is fetched to save it,
+	// so the key is still in this one answer and nowhere else.
+	Files []fileLink
 	// URL is the certificate's page, when the inventory has it.
 	URL string
 	// Differs says where the certificate does not carry what was asked.
 	Differs []string
+}
+
+// fileLink is a file carried inside the page, to be saved from it.
+type fileLink struct {
+	Label, Name string
+	URL         template.URL
+}
+
+// carried makes a link that saves a file. The file is in the link itself
+// (a data URL), so saving it asks the server for nothing.
+func carried(label, name, mediaType string, body []byte) fileLink {
+	return fileLink{Label: label, Name: name, URL: template.URL("data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(body))}
+}
+
+func pemFile(label, name, text string) fileLink {
+	return carried(label, name, "application/x-pem-file", []byte(text))
 }
 
 // usedForms remembers the forms that have been taken, so that a form sent
@@ -177,10 +260,14 @@ func (s *server) newGenerateData(r *http.Request, w http.ResponseWriter) (issueD
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not prepare the form.")
 		return data, provisioner, false
 	}
-	data.Generate = &generateView{CommonName: r.PostForm.Get("common_name"), Names: r.PostForm.Get("names"), Once: once}
+	data.Generate = &generateView{CommonName: r.PostForm.Get("common_name"), Names: r.PostForm.Get("names"), Once: once, MakePassword: r.PostForm.Get("make_password") != ""}
 	chosen := r.PostForm.Get("key")
 	for i, k := range keyKinds {
 		data.Generate.Kinds = append(data.Generate.Kinds, validityOption{Value: k.value, Label: k.label, Selected: k.value == chosen || (chosen == "" && i == 0)})
+	}
+	form := r.PostForm.Get("format")
+	for i, f := range keyForms {
+		data.Generate.Forms = append(data.Generate.Forms, validityOption{Value: f.value, Label: f.label, Selected: f.value == form || (form == "" && i == 0)})
 	}
 	return data, provisioner, true
 }
@@ -263,6 +350,14 @@ type generateAsk struct {
 	makeKey    func() (crypto.Signer, error)
 	kind       string
 	length     time.Duration
+	// password encrypts the key that is handed over, if it is not empty;
+	// madePassword says handrail-ca made it, and so has to show it.
+	password     string
+	madePassword bool
+	// pfx is the encoder for the PFX file the key is handed over in, nil
+	// for PEM; older says it is the kind for older devices.
+	pfx   *pkcs12.Encoder
+	older bool
 }
 
 // generateAsked reads and checks the form. Nothing is made here.
@@ -290,8 +385,127 @@ func generateAsked(r *http.Request, claims ca.Claims) (generateAsk, error) {
 	if want.makeKey == nil {
 		return want, errors.New("choose a kind of key from the list")
 	}
-	want.length, err = chosenValidity(r, claims)
-	return want, err
+	if want.length, err = chosenValidity(r, claims); err != nil {
+		return want, err
+	}
+	if err := want.handover(r); err != nil {
+		return want, err
+	}
+	return want, nil
+}
+
+// handover reads how the key is to be handed over: with what password,
+// and in what form.
+func (want *generateAsk) handover(r *http.Request) error {
+	// A password for the key is optional. One that is given is typed
+	// twice, since a slip would leave a key nobody can open, and is held
+	// to the length asked of every password here.
+	want.password = r.PostForm.Get("key_password")
+	if want.password != r.PostForm.Get("key_password_again") {
+		return errors.New("the two passwords for the key are not the same")
+	}
+	if want.password != "" {
+		if err := password.Check(want.password); err != nil {
+			return errors.New("the key's " + err.Error())
+		}
+	}
+	// Or one is made here, long and random: what a file that other
+	// software has to be able to open needs more than anything else.
+	if r.PostForm.Get("make_password") != "" {
+		if want.password != "" {
+			return errors.New("either type a password for the key or have one made, not both")
+		}
+		made, err := password.Generate()
+		if err != nil {
+			return errors.New("handrail-ca could not make a password")
+		}
+		want.password, want.madePassword = made, true
+	}
+	form, known := r.PostForm.Get("format"), false
+	if form == "" {
+		form = keyForms[0].value
+	}
+	for _, f := range keyForms {
+		if f.value == form {
+			want.pfx, want.older, known = f.pfx, f.older, true
+		}
+	}
+	if !known {
+		return errors.New("choose how the key is handed over from the list")
+	}
+	if want.pfx != nil && want.password == "" {
+		return errors.New("a PFX file needs a password: it is what the file is opened with")
+	}
+	return nil
+}
+
+// words says how the key is handed over, for the history. The password
+// itself is in no record.
+func (want generateAsk) words() string {
+	var words string
+	switch {
+	case want.pfx != nil && want.older:
+		words = ", handed over in a PFX file for older devices"
+	case want.pfx != nil:
+		words = ", handed over in a PFX file"
+	case want.password != "":
+		words = ", encrypted with a password"
+	}
+	if want.madePassword {
+		words += " that handrail-ca made"
+	}
+	return words
+}
+
+// keyPEM writes a private key as it is handed over: PKCS #8 in PEM,
+// encrypted with the password if there is one.
+func keyPEM(key crypto.Signer, pw string) (string, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	if err != nil {
+		return "", err
+	}
+	defer clear(der)
+	if pw == "" {
+		return string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})), nil
+	}
+	out, err := keyfile.Encrypt(der, pw)
+	return string(out), err
+}
+
+// handOver puts on the answer page what the operator takes away: the
+// chain, the files to save, and the password if handrail-ca made it.
+func (s *server) handOver(view *generatedView, want generateAsk, key crypto.Signer, commonName string, issued *ca.Issued) {
+	cert := issued.Certificate
+	if want.madePassword {
+		view.MadePassword = want.password
+	}
+	var chain bytes.Buffer
+	for _, c := range append([]*x509.Certificate{cert}, issued.Intermediates...) {
+		_ = pem.Encode(&chain, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
+	}
+	view.Chain = chain.String()
+	// Named like the downloads on a certificate's own page.
+	named := &inventory.Certificate{Subject: commonName, SerialHex: cert.SerialNumber.Text(16)}
+	certificates := []fileLink{
+		pemFile("Download certificate", fileName(named, ".pem"), view.PEM),
+		pemFile("Download chain", fileName(named, "-chain.pem"), view.Chain),
+	}
+	view.Files = append([]fileLink{pemFile("Download key", fileName(named, ".key"), view.KeyPEM)}, certificates...)
+	view.Files = append(view.Files, pemFile("Key and chain in one file", fileName(named, "-key-and-chain.pem"), view.KeyPEM+view.Chain))
+	if want.pfx == nil {
+		return
+	}
+	pfx, err := want.pfx.Encode(key, cert, issued.Intermediates, want.password)
+	if err != nil {
+		// The certificate exists; its key must still reach the operator.
+		// It is handed over as PEM, encrypted with the same password,
+		// which was made ready before the CA was asked.
+		s.log.Error("making a PFX file", "err", err)
+		view.PFXProblem = err.Error()
+		return
+	}
+	view.PFX, view.OlderPFX, view.KeyPEM = true, want.older, ""
+	view.Files = append([]fileLink{carried("Download PFX file", fileName(named, ".pfx"), "application/x-pkcs12", pfx)}, certificates...)
 }
 
 // generate makes a key and a request for what was typed, has the CA sign
@@ -355,8 +569,17 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusUnprocessableEntity, err.Error())
 		return
 	}
+	// The key in the form it will be handed over in, before the CA is
+	// asked for anything: a certificate must not come to exist for a key
+	// that then cannot be written out.
+	handover, err := keyPEM(key, want.password)
+	if err != nil {
+		s.log.Error("writing out a generated key", "err", err)
+		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not write out the key it made. Nothing was sent to the CA.")
+		return
+	}
 
-	asked := "names: " + strings.Join(requestNamesOf(req), ", ") + "; validity: " + validityWords(length) + "; key made by handrail-ca (" + kind + ")"
+	asked := "names: " + strings.Join(requestNamesOf(req), ", ") + "; validity: " + validityWords(length) + "; key made by handrail-ca (" + kind + ")" + want.words()
 	event := store.Event{Actor: u.user.Username, Action: store.ActionIssue, Subject: req.CommonName}
 	attempt := event
 	attempt.Outcome, attempt.Detail = store.OutcomeAttempt, asked
@@ -398,16 +621,6 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	keyDER, err := x509.MarshalPKCS8PrivateKey(key)
-	if err != nil {
-		// The certificate exists and its key cannot be written out.
-		s.log.Error("encoding a generated key", "err", err)
-		event.Serial, event.Outcome = issued.Certificate.SerialNumber.String(), store.OutcomeFailed
-		event.Detail = asked + "; issued, but the key could not be encoded to hand over, so the certificate is of no use to anyone"
-		s.record(r, event)
-		s.errorPage(w, r, http.StatusInternalServerError, "The CA issued a certificate, but handrail-ca could not write out its key, which is now gone. Revoke the certificate from its page and start again.")
-		return
-	}
 	cert := issued.Certificate
 	serial := cert.SerialNumber.String()
 	differs := differences(req, cert, provisioner.HasTemplate())
@@ -420,15 +633,10 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 
 	view := &generatedView{
 		Subject: cert.Subject.String(), Serial: serial, Expires: expiry(cert.NotAfter, s.opts.Now()), Kind: kind, Differs: differs,
-		KeyPEM: string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})),
-		PEM:    string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})),
+		KeyPEM: handover, Encrypted: want.password != "",
+		PEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: cert.Raw})),
 	}
-	clear(keyDER)
-	var chain bytes.Buffer
-	for _, c := range append([]*x509.Certificate{cert}, issued.Intermediates...) {
-		_ = pem.Encode(&chain, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})
-	}
-	view.Chain = chain.String()
+	s.handOver(view, want, key, req.CommonName, issued)
 	if after.Certificate(serial) != nil {
 		view.URL = s.certificateURL(serial)
 	}
