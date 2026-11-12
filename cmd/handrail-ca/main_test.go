@@ -375,6 +375,76 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
+// When the server is told to stop, a request it is in the middle of is
+// answered first: the draining must not be tied to the context whose
+// cancellation started it.
+func TestServeLetsARequestInFlightFinish(t *testing.T) {
+	ln := listenLoopback(t)
+	entered, release := make(chan struct{}), make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+	handler := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		_, _ = io.WriteString(w, "finished")
+	})
+	ctx, stop := context.WithCancel(context.Background())
+	defer stop()
+	served := make(chan int, 1)
+	go func() { served <- serve(ctx, ln, handler, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
+
+	type answer struct {
+		body string
+		err  error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		resp, err := http.Get("http://" + ln.Addr().String() + "/")
+		if err != nil {
+			answered <- answer{err: err}
+			return
+		}
+		defer resp.Body.Close()
+		body, err := io.ReadAll(resp.Body)
+		answered <- answer{string(body), err}
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request did not reach the handler")
+	}
+	stop()
+	// The server is draining now, and must still be: the request is not done.
+	select {
+	case code := <-served:
+		t.Fatalf("serve returned %d with a request still in flight", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case got := <-answered:
+		if got.err != nil || got.body != "finished" {
+			t.Errorf("the request in flight was answered %q, %v", got.body, got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the request in flight was never answered")
+	}
+	select {
+	case code := <-served:
+		if code != 0 {
+			t.Errorf("serve = %d after draining, want 0", code)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("serve did not return after draining")
+	}
+}
+
 // serve reports a listener that fails underneath it rather than hanging.
 func TestServeListenerClosed(t *testing.T) {
 	ln := listenLoopback(t)
