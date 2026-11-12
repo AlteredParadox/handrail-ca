@@ -75,6 +75,8 @@ type Store interface {
 	TouchSession(ctx context.Context, token store.TokenHash, now time.Time) error
 	DeleteSession(ctx context.Context, token store.TokenHash) error
 	AppendHistory(ctx context.Context, e store.Event) error
+	Note(ctx context.Context, serial string) (store.Note, error)
+	SetNote(ctx context.Context, n store.Note) error
 }
 
 // Inventory is what the pages need from the certificate inventory
@@ -227,6 +229,7 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("GET /names", s.signedIn(s.namesPage))
 	mux.HandleFunc("GET /certificates/{serial}", s.signedIn(s.detailPage))
 	mux.HandleFunc("GET /certificates/{serial}/{form}", s.signedIn(s.certificateFile))
+	mux.HandleFunc("POST /certificates/{serial}/note", s.signedIn(s.saveNote))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusNotFound, "There is no such page.")
 	})

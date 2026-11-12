@@ -4,8 +4,9 @@ Status: 2026-11-11. Milestone 1 is built: sign-in and a CA status page, on
 a store of its own, against a development CA. Milestone 2 is under way: the
 certificate inventory is read from the CA's database and shown as a list,
 and each certificate has a page of its own with downloads; the names in
-use are summarised and the inventory has been measured at 100,000
-certificates. Notes and labels are next (section 6).
+use are summarised, the inventory has been measured at 100,000
+certificates, and operators can keep a note and labels on each
+certificate. Milestone 3, revoking, is next (section 6).
 Section 2 records the decisions made so far.
 
 ## 1. What we are building
@@ -524,7 +525,18 @@ server that answers `/healthz`.
   of a certificate is counted, however many it carries. The page shows
   the hundred groups of each kind with the most certificates and two
   hundred names of each group, and says what it left out.
-- The certificate's note and labels, from the store, on the detail page.
+- Done: the certificate's note and labels, on its page. The store's second
+  schema step adds them, by serial number; an existing store gains the
+  tables when it is next opened. Everyone who signs in reads them;
+  operators change them, with a form on the certificate's page, and each
+  change goes into the history (who, when, which certificate; not the
+  text). A note is at most 1,000 characters; a certificate has at most
+  twelve labels, each of letters, digits and `. _ : -`. What cannot be
+  kept is refused with the reason and what was typed, never shortened. If
+  the store cannot be read, the page says the note could not be read, not
+  that there is none. Not built yet: labels in the list, and filtering the
+  list by label; the labels are stored a row each so that this needs no
+  further schema change.
 - Done: measured with 100,000 synthetic rows; the table below. **No
   on-disk cache**: the first read takes seconds, not minutes, and the
   picture fits in memory with room to spare. `make dev-measure` repeats the

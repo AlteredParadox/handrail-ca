@@ -133,6 +133,39 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{end}}
 </section>
 
+{{with .Note}}
+<section class="card" id="note">
+<div class="card-head">
+<h2>Note and labels</h2>
+{{with .Updated}}<span class="sub">Last changed {{.}}</span>{{end}}
+</div>
+{{if .Saved}}<output class="notice">Saved.</output>{{end}}
+{{if .Unread}}
+<p class="problem">The note could not be read from handrail-ca's store just now. That does not mean there is none.</p>
+{{else if .CanEdit}}
+{{with .Problem}}<p class="problem" role="alert">Not saved: {{.}}.</p>{{end}}
+<form method="post" action="{{$base}}/certificates/{{$.Data.Serial}}/note" class="note">
+<input type="hidden" name="form_token" value="{{$.FormToken}}">
+<div class="field">
+<label for="note-text">Note</label>
+<textarea id="note-text" name="note" rows="4" maxlength="{{.MaxNote}}" spellcheck="true">{{.Typed}}</textarea>
+<p class="sub">What the CA does not record: what the certificate is for, where it is installed, who asked for it. Everyone who signs in can read it.</p>
+</div>
+<div class="field">
+<label for="note-labels">Labels</label>
+<input id="note-labels" name="labels" type="text" value="{{.TypedLabels}}" autocomplete="off" spellcheck="false">
+<p class="sub">Separated by commas or spaces. Letters, digits, dots, colons, hyphens and underscores.</p>
+</div>
+<div><button type="submit" class="primary">Save</button></div>
+</form>
+{{else}}
+{{if .Text}}<p class="note-text">{{.Text}}</p>{{end}}
+{{if .Labels}}<ul class="labels">{{range .Labels}}<li>{{.}}</li>{{end}}</ul>{{end}}
+{{if and (not .Text) (not .Labels)}}<p class="muted">Nothing has been noted about this certificate. Operators can add a note and labels.</p>{{end}}
+{{end}}
+</section>
+{{end}}
+
 {{with .PEM}}
 <section class="card">
 <h2>Certificate (PEM)</h2>

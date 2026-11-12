@@ -28,11 +28,13 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
 
 	"handrail-ca/internal/inventory"
+	"handrail-ca/internal/store"
 )
 
 // maxShownNames is how many names of each kind the detail page lists.
@@ -83,6 +85,31 @@ type detailData struct {
 	Stale string
 
 	PEM string
+
+	// Note is what handrail-ca's users have recorded about the
+	// certificate. Nil for a row that is not a certificate.
+	Note *noteView
+}
+
+// noteView is the note and labels of a certificate, and the form for
+// changing them.
+type noteView struct {
+	Text   string
+	Labels []string
+	// Updated says when and by whom it was last changed; empty if never.
+	Updated string
+	// CanEdit is true for operators, who get the form. Typed and
+	// TypedLabels are what the form holds: the saved note, or what was
+	// just submitted and refused.
+	CanEdit            bool
+	Typed, TypedLabels string
+	MaxNote            int
+	// Saved is set on the page shown right after a save; Problem is why
+	// what was submitted was not saved; Unread is set when the note could
+	// not be read from the store, and is then not shown as "no note".
+	Saved   bool
+	Problem string
+	Unread  bool
 }
 
 type nameGroup struct {
@@ -151,6 +178,31 @@ func (s *server) detailPage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	note := s.noteFor(r, f.summary.Serial)
+	note.Saved = note.CanEdit && r.URL.Query().Get("saved") == "note"
+	s.renderDetail(w, r, http.StatusOK, f, note)
+}
+
+// noteFor reads a certificate's note from the store, for the signed-in
+// user. A store that cannot be read costs the note, not the page.
+func (s *server) noteFor(r *http.Request, serial string) *noteView {
+	view := &noteView{CanEdit: currentUser(r).user.Role == store.RoleOperator, MaxNote: store.MaxNote}
+	note, err := s.opts.Store.Note(r.Context(), serial)
+	if err != nil {
+		s.log.Error("reading a certificate's note", "serial", serial, "err", err)
+		view.Unread, view.CanEdit = true, false
+		return view
+	}
+	view.Text, view.Labels = note.Text, note.Labels
+	view.Typed, view.TypedLabels = note.Text, strings.Join(note.Labels, ", ")
+	if !note.UpdatedAt.IsZero() {
+		view.Updated = note.UpdatedAt.UTC().Format("2006-01-02 15:04 UTC") + " by " + note.UpdatedBy
+	}
+	return view
+}
+
+// renderDetail writes a certificate's page.
+func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, f found, note *noteView) {
 	now := s.opts.Now()
 	snap, summary, cert := f.snap, f.summary, f.cert
 	status := snap.Status(summary, now)
@@ -169,12 +221,62 @@ func (s *server) detailPage(w http.ResponseWriter, r *http.Request) {
 	if cert == nil {
 		data.Title = "Serial " + shortSerial(summary.Serial)
 		data.Problem = summary.Problem
-		s.render(w, r, http.StatusOK, "detail.html", data.Title, data)
+		s.render(w, r, code, "detail.html", data.Title, data)
 		return
 	}
 	fillCertificate(&data, cert, now)
 	data.Summary = summarySentence(status, summary, snap.Revocation(summary.Serial), now)
-	s.render(w, r, http.StatusOK, "detail.html", data.Title, data)
+	data.Note = note
+	s.render(w, r, code, "detail.html", data.Title, data)
+}
+
+// saveNote replaces a certificate's note and labels. It changes only
+// handrail-ca's own store, nothing at the CA, and only an operator may: a
+// note is read by everyone who signs in, as a statement about a
+// certificate. The change goes into the history, without the text.
+func (s *server) saveNote(w http.ResponseWriter, r *http.Request) {
+	u := currentUser(r)
+	if u.user.Role != store.RoleOperator {
+		s.errorPage(w, r, http.StatusForbidden, "Only operators can change a certificate's note and labels.")
+		return
+	}
+	f, ok := s.certificateFor(w, r)
+	if !ok {
+		return
+	}
+	if f.cert == nil {
+		s.errorPage(w, r, http.StatusNotFound, "That row of the CA's database is not a certificate, so there is nothing to keep a note about.")
+		return
+	}
+	serial := f.summary.Serial
+	typed, typedLabels := r.PostForm.Get("note"), r.PostForm.Get("labels")
+	text, err := store.CleanNote(typed)
+	var labels []string
+	if err == nil {
+		labels, err = store.ParseLabels(typedLabels)
+	}
+	if err == nil {
+		err = s.opts.Store.SetNote(r.Context(), store.Note{Serial: serial, Text: text, Labels: labels, UpdatedAt: s.opts.Now(), UpdatedBy: u.user.Username})
+	}
+	if errors.Is(err, store.ErrInvalidNote) {
+		// Back to the page with what was typed, and why it was not kept.
+		note := s.noteFor(r, serial)
+		note.Typed, note.TypedLabels = typed, typedLabels
+		note.Problem = strings.TrimPrefix(err.Error(), store.ErrInvalidNote.Error()+": ")
+		s.renderDetail(w, r, http.StatusUnprocessableEntity, f, note)
+		return
+	}
+	if err != nil {
+		s.log.Error("saving a certificate's note", "serial", serial, "err", err)
+		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not save the note in its store, so nothing was changed. The log has the details.")
+		return
+	}
+	detail := "note and labels changed"
+	if text == "" && len(labels) == 0 {
+		detail = "note and labels removed"
+	}
+	s.record(r, store.Event{Actor: u.user.Username, Action: store.ActionNote, Outcome: store.OutcomeOK, Serial: serial, Subject: f.summary.Subject, Detail: detail})
+	http.Redirect(w, r, s.base+"/certificates/"+url.PathEscape(serial)+"?saved=note#note", http.StatusSeeOther)
 }
 
 // fillCertificate puts what the certificate itself says into data.
