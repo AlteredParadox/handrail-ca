@@ -17,7 +17,9 @@
 package web
 
 import (
+	"bytes"
 	"context"
+	"crypto/x509"
 	"net/http"
 	"os"
 	"regexp"
@@ -89,6 +91,43 @@ func TestIntegrationPages(t *testing.T) {
 	}
 	wantBody(t, b.get("/?view=all&admin=1"), "Admin JWK <span")
 	wantBody(t, b.get("/?q=10.20.0.20&view=all"), "git.handrail.test")
+
+	// A certificate's own page, reached from the list, and its chain: the
+	// certificate, then the CA's intermediate, verifying up to the root
+	// the CA client pinned.
+	link := regexp.MustCompile(`href="(/certificates/\d+)">web1\.handrail\.test<`).FindStringSubmatch(b.get("/?q=web1.handrail.test").Body.String())
+	if link == nil {
+		t.Fatal("the list does not link to web1.handrail.test's page")
+	}
+	detail := b.get(link[1])
+	wantStatus(t, detail, http.StatusOK)
+	wantBody(t, detail, "<h1>web1.handrail.test</h1>", "Issued by the handrail provisioner.", "Handrail Dev CA Intermediate CA",
+		"step-ca provisioner", "Server authentication", ">Not revoked<", "-----BEGIN CERTIFICATE-----")
+	chain := parsePEM(t, b.get(link[1]+"/chain").Body.Bytes())
+	if len(chain) != 2 {
+		t.Fatalf("the chain has %d certificates, want the leaf and the intermediate", len(chain))
+	}
+	root, err := client.Root(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, inters := x509.NewCertPool(), x509.NewCertPool()
+	roots.AddCert(root)
+	inters.AddCert(chain[1])
+	if _, err := chain[0].Verify(x509.VerifyOptions{Roots: roots, Intermediates: inters, DNSName: "web1.handrail.test", KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageAny}}); err != nil {
+		t.Errorf("the downloaded chain does not verify to the CA's root: %v", err)
+	}
+	if der := b.get(link[1] + "/der"); !bytes.Equal(der.Body.Bytes(), chain[0].Raw) {
+		t.Error("the DER download is not the certificate in the chain")
+	}
+	// The revoked one says who revoked it and why.
+	link = regexp.MustCompile(`href="(/certificates/\d+)">gone\.handrail\.test<`).FindStringSubmatch(b.get("/?q=gone.handrail.test&view=revoked").Body.String())
+	if link == nil {
+		t.Fatal("the list does not link to gone.handrail.test's page")
+	}
+	gone := b.get(link[1])
+	wantBody(t, gone, `<span class="badge bad">Revoked</span>`, "<dt>Revoked</dt>", "<dt>Reason</dt>")
+	t.Logf("the revoked certificate's record: %s", regexp.MustCompile(`(?s)<h2>Revocation</h2>.*?</dl>`).FindString(gone.Body.String()))
 
 	// Counts, whatever they are by now: at least the seed's one revocation.
 	if !regexp.MustCompile(`\d+ in all: .*[1-9]\d* revoked`).MatchString(page.Body.String()) {

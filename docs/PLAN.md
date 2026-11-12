@@ -2,8 +2,10 @@
 
 Status: 2026-11-11. Milestone 1 is built: sign-in and a CA status page, on
 a store of its own, against a development CA. Milestone 2 is under way: the
-certificate inventory is read from the CA's database and shown as a list;
-the detail page is next (section 6).
+certificate inventory is read from the CA's database and shown as a list,
+and each certificate has a page of its own with downloads; notes and
+labels, the names-in-use summary and the size measurement are next
+(section 6).
 Section 2 records the decisions made so far.
 
 ## 1. What we are building
@@ -493,16 +495,27 @@ server that answers `/healthz`.
   says how old its picture is, and when the last read failed, that
   certificates issued or revoked since are not on it. Everything is in the
   address, so a filtered list can be bookmarked; there is no JavaScript,
-  so the ESLint item below still waits for the first script. Rows do not
-  link anywhere yet: the detail page is the next change.
+  so the ESLint item below still waits for the first script.
+- Done: the detail page, at `/certificates/{serial}` (the decimal serial,
+  the key the CA stores it under). What the certificate says: subject,
+  every name by kind, validity with how much of the lifetime is used,
+  issuer, serial in both forms, key, signature, usages, extensions by
+  name, the SHA-256 fingerprint, and the PEM. What the CA recorded:
+  the issuing provisioner and the revocation record (when, the RFC 5280
+  reason, how it was asked for, by which provisioner). Downloads: PEM, DER,
+  and a chain, which is the certificate followed by the one of the CA's
+  current intermediates that signed it; when none did, there is no chain
+  file, since one that does not verify is worse than none. The
+  certificate is read from the database again for each request and must
+  still be the one that was listed; the inventory keeps summaries only. A
+  row that is not a certificate has a page that says so and nothing to
+  download. No JavaScript here either.
 - A "names in use" summary: every DNS name, IP address, email address and
   URI in the certificates the CA has issued, grouped by parent domain or
   network. step-ca cannot produce this list, and it is what an operator
   needs before applying a CA-wide name policy ([ca-setup.md](ca-setup.md),
   section 2): anything the policy leaves out stops renewing.
-- Detail page: parsed fields, extensions, fingerprints, chain, PEM and DER
-  download, issuing provisioner, revocation record, and the certificate's
-  note and labels from the store.
+- The certificate's note and labels, from the store, on the detail page.
 - Measure start-up scan time, refresh time and memory with 100,000 synthetic
   rows and record the results here; decide then whether an on-disk cache is
   needed.

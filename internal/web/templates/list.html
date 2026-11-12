@@ -99,9 +99,9 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <tr>
 <td><span class="badge {{.Badge}}">{{.StatusLabel}}</span></td>
 {{if .Problem}}
-<td colspan="3"><div class="problem">This row of the CA's database could not be read as a certificate: {{.Problem}}</div></td>
+<td colspan="3"><div class="problem">This row of the CA's database could not be read as a certificate: {{.Problem}}{{if .URL}} <a href="{{.URL}}">What is known of it</a>{{end}}</div></td>
 {{else}}
-<td><div class="strong">{{.Subject}}</div>{{with .Names}}<div class="sub">{{.}}</div>{{end}}</td>
+<td><a class="strong" href="{{.URL}}">{{.Subject}}</a>{{with .Names}}<div class="sub">{{.}}</div>{{end}}</td>
 <td>{{if .Provisioner}}{{.Provisioner}} <span class="sub">{{.ProvisionerType}}</span>{{else}}<span class="sub">Not recorded</span>{{end}}</td>
 <td><div class="nowrap">{{.Expires}}</div><div class="sub">{{.When}}</div></td>
 {{end}}

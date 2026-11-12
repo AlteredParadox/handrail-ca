@@ -78,11 +78,12 @@ type Store interface {
 }
 
 // Inventory is what the pages need from the certificate inventory
-// (*inventory.Inventory): its picture as last read, and a way to have it
-// read again now.
+// (*inventory.Inventory): its picture as last read, a way to have it read
+// again now, and one certificate itself, which the picture does not keep.
 type Inventory interface {
 	Snapshot() *inventory.Snapshot
 	Refresh(ctx context.Context) error
+	DER(ctx context.Context, serial string) ([]byte, error)
 }
 
 // InventoryRefresh is how often the inventory is read again.
@@ -223,6 +224,8 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("POST /account/password", s.signedIn(s.changePassword))
 	mux.HandleFunc("GET /{$}", s.signedIn(s.listPage))
 	mux.HandleFunc("POST /refresh", s.signedIn(s.refreshInventory))
+	mux.HandleFunc("GET /certificates/{serial}", s.signedIn(s.detailPage))
+	mux.HandleFunc("GET /certificates/{serial}/{form}", s.signedIn(s.certificateFile))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusNotFound, "There is no such page.")
 	})

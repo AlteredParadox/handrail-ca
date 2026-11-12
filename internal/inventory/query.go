@@ -113,6 +113,8 @@ type Query struct {
 // Row is one certificate of a result, with its status at the time asked.
 type Row struct {
 	*Certificate
+	// Key is the row's key in the CA's database: see Snapshot.Key.
+	Key        string
 	Status     Status
 	Revocation *Revocation
 }
@@ -148,7 +150,7 @@ func (s *Snapshot) Select(q Query, now time.Time) Result {
 			}
 		}
 		if q.View.includes(status) {
-			res.Rows = append(res.Rows, Row{Certificate: c, Status: status, Revocation: s.revoked[c.Serial]})
+			res.Rows = append(res.Rows, Row{Certificate: c, Key: s.Key(c), Status: status, Revocation: s.revoked[c.Serial]})
 		}
 	}
 	sortRows(res.Rows, q.Order, q.Reverse)

@@ -220,8 +220,45 @@ type Snapshot struct {
 	// Certificates are sorted by the end of their validity, latest first;
 	// unreadable rows come last.
 	Certificates []*Certificate
-	revoked      map[string]*Revocation
-	window       time.Duration
+	// bySerial finds a row by its key in the CA's database, which for a
+	// certificate is its serial number. oddKeys holds the key of each row
+	// whose Serial is not its key: a key that is not a serial number is
+	// kept bounded for showing, and may be shortened. Nearly always empty.
+	bySerial map[string]*Certificate
+	oddKeys  map[*Certificate]string
+	revoked  map[string]*Revocation
+	window   time.Duration
+}
+
+// Certificate returns the summary kept under a key of the CA's database:
+// for a certificate, its serial number in decimal. Nil if the inventory
+// has no such row.
+func (s *Snapshot) Certificate(key string) *Certificate { return s.bySerial[key] }
+
+// Key is the key of a summary's row in the CA's database: what
+// Certificate finds it by. For a certificate that is its serial number. A
+// row that is not a certificate can have any key, and its Serial is that
+// key made fit to show, which is not always the key itself.
+func (s *Snapshot) Key(c *Certificate) string {
+	if key, odd := s.oddKeys[c]; odd {
+		return key
+	}
+	return c.Serial
+}
+
+// oddKeysOf finds the rows whose Serial is not their key.
+func oddKeysOf(certs map[string]*Certificate) map[*Certificate]string {
+	var odd map[*Certificate]string
+	for key, c := range certs {
+		if key == c.Serial {
+			continue
+		}
+		if odd == nil {
+			odd = map[*Certificate]string{}
+		}
+		odd[c] = key
+	}
+	return odd
 }
 
 // Revocation returns the revocation recorded for a serial, nil if none.
@@ -356,8 +393,48 @@ func (inv *Inventory) Refresh(ctx context.Context) error {
 	}
 	state.LoadedAt, state.Problem, state.RevocationsKnown, state.OrphanRevocations = attempted, "", true, orphans
 	inv.certs = certs
-	inv.current = &Snapshot{State: state, Certificates: sorted(certs), revoked: revoked, window: inv.window}
+	inv.current = &Snapshot{State: state, Certificates: sorted(certs), bySerial: certs, oddKeys: oddKeysOf(certs), revoked: revoked, window: inv.window}
 	return nil
+}
+
+// Errors of DER.
+var (
+	// ErrNotFound: the inventory has no certificate with that serial.
+	ErrNotFound = errors.New("no such certificate in the inventory")
+	// ErrUnreadable: there is a row with that serial, but what is stored
+	// in it is not a certificate, or not that certificate.
+	ErrUnreadable = errors.New("the stored value is not that certificate")
+)
+
+// DER returns a certificate as the CA stored it, for showing it in full
+// and for downloading. Only certificates of the inventory can be asked
+// for: the serial has to be one the last read listed. What comes back is
+// checked again, since it is fetched again: it must parse and carry the
+// serial it was asked for by.
+func (inv *Inventory) DER(ctx context.Context, serial string) ([]byte, error) {
+	known := inv.Snapshot().Certificate(serial)
+	if known == nil {
+		return nil, ErrNotFound
+	}
+	if known.Problem != "" {
+		return nil, fmt.Errorf("%w: %s", ErrUnreadable, known.Problem)
+	}
+	rows, err := inv.src.Certificates(ctx, []string{serial})
+	if err != nil {
+		return nil, fmt.Errorf("reading the certificate: %w", err)
+	}
+	for _, row := range rows {
+		if row.Serial != serial {
+			continue
+		}
+		cert, err := x509.ParseCertificate(row.DER)
+		if err != nil || cert.SerialNumber == nil || cert.SerialNumber.String() != serial {
+			return nil, ErrUnreadable
+		}
+		return row.DER, nil
+	}
+	// Listed a moment ago, gone now.
+	return nil, ErrNotFound
 }
 
 // read builds the next picture from the Source and the summaries already

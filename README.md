@@ -7,9 +7,10 @@ view, issue and revoke certificates from a browser.
 (reachability, version, root and intermediate certificates, provisioners,
 whether a revocation list is published) and the list of every certificate
 it has issued, read from its database: by status, searchable, with the
-revoked and expired ones a click away. A page per certificate, issuing and
-revoking are not built yet; the [build plan](docs/PLAN.md) has the
-order.
+revoked and expired ones a click away. Each certificate has a page of its
+own: what it says, who issued it, whether and why it was revoked, and the
+certificate to download as PEM, DER or with its chain. Issuing and revoking
+are not built yet; the [build plan](docs/PLAN.md) has the order.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.
