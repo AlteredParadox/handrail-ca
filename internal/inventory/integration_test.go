@@ -82,7 +82,7 @@ func TestIntegrationReadsTheCAsDatabase(t *testing.T) {
 	if subjects["renewed.handrail.test"] != 2 {
 		t.Errorf("%d certificates for the renewed name, want 2", subjects["renewed.handrail.test"])
 	}
-	if provisioners["handrail/JWK"] < 9 || provisioners["acme/ACME"] != 2 || provisioners["Admin JWK/JWK"] < 1 {
+	if provisioners["handrail/JWK"] < 9 || provisioners["acme/ACME"] < 2 || provisioners["Admin JWK/JWK"] < 1 {
 		t.Errorf("by provisioner: %v", provisioners)
 	}
 	// The one the seed revoked, as recorded; and the seed's other

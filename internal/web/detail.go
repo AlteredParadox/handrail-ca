@@ -92,6 +92,16 @@ type detailData struct {
 	// Note is what handrail-ca's users have recorded about the
 	// certificate. Nil for a row that is not a certificate.
 	Note *noteView
+
+	// CanRevoke is set for an operator looking at a certificate that has
+	// no revocation record, on a handrail-ca that can act on the CA.
+	// ReadOnly is set when the same operator cannot because handrail-ca
+	// was started read-only.
+	CanRevoke, ReadOnly bool
+	// JustRevoked says how the visitor got here from the revoke page:
+	// "now" when their request revoked the certificate, "before" when it
+	// found it revoked already. Only looked at beside a revocation record.
+	JustRevoked string
 }
 
 // noteView is the note and labels of a certificate, and the form for
@@ -129,6 +139,9 @@ type extensionView struct {
 type revocationView struct {
 	When, Reason, Detail, How, By string
 	Problem                       string
+	// IssuedOverACME is set when the revoked certificate came from an ACME
+	// provisioner: its client can still order another.
+	IssuedOverACME bool
 }
 
 // found is the certificate a request is about.
@@ -220,6 +233,7 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	}
 	if rev := snap.Revocation(summary.Serial); rev != nil {
 		data.Revocation = newRevocationView(rev, snap.Provisioners())
+		data.Revocation.IssuedOverACME = summary.Provisioner.Type == acmeType
 	}
 	if cert == nil {
 		data.Title = "Serial " + shortSerial(summary.Serial)
@@ -230,6 +244,13 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	fillCertificate(&data, cert, now)
 	data.Summary = summarySentence(status, summary, snap.Revocation(summary.Serial), now)
 	data.Note = note
+	if u := currentUser(r); u.user.Role == store.RoleOperator && data.Revocation == nil {
+		acting := s.opts.CA.ProvisionerState().Configured
+		data.CanRevoke, data.ReadOnly = acting, !acting
+	}
+	if said := r.URL.Query().Get("revoked"); data.Revocation != nil && (said == "now" || said == "before") {
+		data.JustRevoked = said
+	}
 	s.render(w, r, code, "detail.html", data.Title, data)
 }
 

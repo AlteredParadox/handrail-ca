@@ -69,6 +69,9 @@ type CA interface {
 	// not, and its error is the reason it could not be.
 	ProvisionerState() ca.ProvisionerState
 	Unlock(ctx context.Context) error
+	// Revoke asks the CA to record a certificate as revoked. An error does
+	// not mean it was not: see ca.Client.Revoke.
+	Revoke(ctx context.Context, r ca.Revocation) error
 }
 
 // Store is what the pages need from the store (*store.Store).
@@ -235,6 +238,8 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("GET /certificates/{serial}", s.signedIn(s.detailPage))
 	mux.HandleFunc("GET /certificates/{serial}/{form}", s.signedIn(s.certificateFile))
 	mux.HandleFunc("POST /certificates/{serial}/note", s.signedIn(s.saveNote))
+	mux.HandleFunc("GET /certificates/{serial}/revoke", s.signedIn(s.revokeForm))
+	mux.HandleFunc("POST /certificates/{serial}/revoke", s.signedIn(s.revoke))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusNotFound, "There is no such page.")
 	})

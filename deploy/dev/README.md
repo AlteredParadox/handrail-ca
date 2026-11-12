@@ -72,9 +72,9 @@ go run ./cmd/handrail-ca          # http://127.0.0.1:8080
 - `test.sh`: runs the Go tests named `TestIntegration...` with the CA's
   address and root fingerprint in the environment, the read-only role's
   database connection string in a file, the file with the `handrail`
-  provisioner's password, and the serial number of a certificate it has
-  just issued for the tests to revoke. Those tests are skipped everywhere
-  else.
+  provisioner's password, and the serial numbers of two certificates it
+  has just issued for the tests to revoke, one through the CA client and
+  one through the pages. Those tests are skipped everywhere else.
 
 ## Raising the step-ca version
 

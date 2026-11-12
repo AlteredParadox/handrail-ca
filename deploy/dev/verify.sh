@@ -113,6 +113,24 @@ ghost="9${RANDOM}${RANDOM}${RANDOM}"
 same "any serial can be marked revoked, issued or not" \
 	"$(inca "t=\$(step ca token $ghost --revoke $HP 2>/dev/null) && step ca revoke $ghost --token \"\$t\" >/dev/null 2>&1; echo \$?")" "0"
 
+echo "What a revocation does not stop"
+# The same name again from the same provisioner, after its certificate
+# was revoked.
+inca "step ca certificate again.handrail.test g.crt g.key $HP --force >/dev/null 2>&1"
+again=$(inca "step certificate inspect g.crt --format json | jq -r .serial_number")
+inca "t=\$(step ca token $again --revoke $HP 2>/dev/null) && step ca revoke $again --token \"\$t\" >/dev/null 2>&1"
+check "the name of a revoked certificate is issued again when asked for" inca "step ca certificate again.handrail.test g2.crt g2.key $HP --force"
+# ACME: the CA validates http-01 by connecting back to this container,
+# which answers to acme3.handrail.test on the compose network.
+ACME='--provisioner acme --standalone --force'
+check "a certificate is issued over ACME" inca "step ca certificate acme3.handrail.test a.crt a.key $ACME"
+acme=$(inca "step certificate inspect a.crt --format json | jq -r .serial_number")
+inca "t=\$(step ca token $acme --revoke $HP 2>/dev/null) && step ca revoke $acme --token \"\$t\" --reasonCode 1 >/dev/null 2>&1"
+same "the ACME certificate is recorded as revoked" "$(sql "select count(*) from revoked_x509_certs where nkey = convert_to('$acme', 'UTF8')")" "1"
+check "a revoked ACME certificate cannot be renewed by presenting it" inca "! step ca renew a.crt a.key --force"
+check "a new ACME order for the same name is filled all the same" inca "step ca certificate acme3.handrail.test a2.crt a2.key $ACME"
+check "and it is a new certificate" inca "test \"\$(step certificate inspect a2.crt --format json | jq -r .serial_number)\" != $acme"
+
 echo "Limits (docs/ca-setup.md, sections 1 and 2)"
 # refused|allowed <name> [extra step ca certificate flags]
 refused() {

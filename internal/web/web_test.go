@@ -25,6 +25,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -84,6 +85,30 @@ type fakeCA struct {
 	// provisioner's key cannot be opened, nil when it is open.
 	readOnly  bool
 	unlockErr error
+
+	// revoke is what the CA does when asked to revoke; newSite sets it to
+	// confirm and record the revocation in the site's database, as step-ca
+	// does. asked is every revocation it was sent.
+	revoke func(ctx context.Context, r ca.Revocation) error
+	mu     sync.Mutex
+	asked  []ca.Revocation
+}
+
+func (f *fakeCA) Revoke(ctx context.Context, r ca.Revocation) error {
+	if f.readOnly {
+		return ca.ErrNoProvisioner
+	}
+	f.mu.Lock()
+	f.asked = append(f.asked, r)
+	f.mu.Unlock()
+	return f.revoke(ctx, r)
+}
+
+// sent is every revocation the CA was asked for.
+func (f *fakeCA) sent() []ca.Revocation {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]ca.Revocation{}, f.asked...)
 }
 
 const fakeKeyID = "kid-of-the-handrail-key"
@@ -369,6 +394,10 @@ func newSite(t *testing.T, publicURL string, trustedProxies ...string) *site {
 		t.Fatal(err)
 	}
 	s := &site{t: t, store: &brokenStore{Store: st}, ca: newFakeCA(t), rows: newFakeRows(t), clock: &clock{now: t0}, log: &bytes.Buffer{}, public: u}
+	s.ca.revoke = func(_ context.Context, r ca.Revocation) error {
+		s.caRecords(r)
+		return nil
+	}
 	// The inventory as it is after its first read, on the site's clock.
 	s.inv = inventory.New(s.rows)
 	s.inv.SetClock(s.clock.Now)
@@ -388,6 +417,21 @@ func newSite(t *testing.T, publicURL string, trustedProxies ...string) *site {
 	s.server.dummyHash = cheapHash("nobody has this password")
 	s.server.hash = func(pw string) (string, error) { return cheapHash(pw), nil }
 	return s
+}
+
+// caRecords writes a revocation into the site's database as step-ca
+// would, stamped with the site's clock.
+func (s *site) caRecords(r ca.Revocation) {
+	record, err := json.Marshal(map[string]any{
+		"Serial": r.Serial, "ProvisionerID": "p1", "ReasonCode": r.ReasonCode, "Reason": r.Reason,
+		"RevokedAt": s.clock.Now().UTC().Format(time.RFC3339), "TokenID": "t", "MTLS": false, "ACME": false,
+	})
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	s.rows.mu.Lock()
+	defer s.rows.mu.Unlock()
+	s.rows.revocations = append(s.rows.revocations, inventory.RawRevocation{Serial: r.Serial, JSON: record})
 }
 
 type syncWriter struct {
@@ -422,6 +466,8 @@ type browser struct {
 	// set), and forwardedFor the X-Forwarded-For header sent with it.
 	remote       string
 	forwardedFor string
+	// ctx replaces the request's context, for a browser that goes away.
+	ctx context.Context
 }
 
 func (s *site) browser() *browser {
@@ -460,6 +506,9 @@ func (b *browser) do(method, path string, form url.Values) *httptest.ResponseRec
 	}
 	for name, value := range b.cookies {
 		req.AddCookie(&http.Cookie{Name: name, Value: value})
+	}
+	if b.ctx != nil {
+		req = req.WithContext(b.ctx)
 	}
 	rec := httptest.NewRecorder()
 	b.s.handler.ServeHTTP(rec, req)

@@ -106,7 +106,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </div>
 {{end}}
 
-<section class="card">
+<section class="card" id="revocation">
 <div class="card-head">
 <h2>Revocation</h2>
 {{if .Revocation}}<span class="badge bad">Revoked</span>
@@ -114,6 +114,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{else if .Stale}}<span class="badge warn">Not revoked {{.LastRead}}</span>
 {{else}}<span class="badge ok">Not revoked</span>{{end}}
 </div>
+{{if eq .JustRevoked "now"}}<output class="notice">Revoked. The CA confirmed it, and this is its record.</output>
+{{else if eq .JustRevoked "before"}}<output class="stale">This certificate was already revoked when the request reached the CA. The record below is the earlier revocation; nothing was changed.</output>{{end}}
 {{with .Revocation}}
 {{if .Problem}}
 <p class="problem">The CA has a revocation record for this serial number, so it treats the certificate as revoked, but the record could not be read: {{.Problem}}</p>
@@ -125,11 +127,14 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{with .By}}<dt>Provisioner</dt><dd>{{.}}</dd>{{end}}
 </dl>
 {{end}}
-<p class="muted">The CA will not renew a revoked certificate. Whether systems that trust it learn of the revocation depends on the CA publishing a revocation list; the <a href="{{$base}}/status">CA status</a> page says whether it does.</p>
+<p class="muted">The CA will not renew a revoked certificate, but it will issue a new one for the same names to whoever may ask for one. Whether systems that trust it learn of the revocation depends on the CA publishing a revocation list; the <a href="{{$base}}/status">CA status</a> page says whether it does.</p>
+{{if .IssuedOverACME}}<p class="muted">This certificate was issued over ACME. Its client does not renew: it orders a new certificate each time, and the revocation does not stop that.</p>{{end}}
 {{else}}
 {{if not .RevocationsKnown}}<p class="problem">The CA's revocation records have not been read. This certificate may have been revoked.</p>
 {{else if .Stale}}<p class="problem">The CA had no revocation record for this certificate {{.LastRead}}. Its records could not be read again since, so a revocation after that would not show here.</p>
 {{else}}<p class="muted">The CA has no revocation record for this certificate{{with .LastRead}}, as of {{.}}{{end}}.</p>{{end}}
+{{if .CanRevoke}}<div class="actions"><a class="button danger" href="{{$base}}/certificates/{{.Serial}}/revoke">Revoke…</a></div>
+{{else if .ReadOnly}}<p class="muted">handrail-ca was started read-only, so it cannot revoke this certificate. On the CA's host, <span class="mono">step ca revoke</span> does it.</p>{{end}}
 {{end}}
 </section>
 

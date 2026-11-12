@@ -12,10 +12,10 @@ own: what it says, who issued it, whether and why it was revoked, and the
 certificate to download as PEM, DER or with its chain. A summary lists every
 name the CA's certificates carry, by domain and network, which is what a
 name policy on the CA has to allow. Operators can keep a note and labels on
-a certificate, for what the CA does not record. handrail-ca now opens the
-key of its provisioner on the CA, and the status page says whether it
-could, but revoking from a certificate's page is the next change and issuing
-comes after it; the [build plan](docs/PLAN.md) has the order.
+a certificate, for what the CA does not record, and can revoke one from its
+page: after a confirmation that names the certificate and says what
+revoking will and will not do on your CA. Issuing is not built yet; the
+[build plan](docs/PLAN.md) has the order.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.
@@ -69,6 +69,40 @@ which it is, and so does the CA status page, under "Acting on the CA".
 The provisioner password can ask the CA for a certificate for any name the
 CA's policy allows and can revoke any certificate; whoever can read that
 file, or the memory of the running process, has that power.
+
+### Revoking
+
+An operator revokes a certificate from its page. handrail-ca asks first:
+the page names the certificate, says whether your CA publishes a
+revocation list (if it does not, systems that already trust the
+certificate are not told, and keep accepting it until it expires), takes a
+reason and an optional note for the CA's record, and wants the
+certificate's subject typed out. Viewers cannot revoke, and a handrail-ca
+started with `-read-only` refuses for everyone.
+
+The request goes to the CA once. Whatever the CA answers, handrail-ca then
+reads the CA's database again and tells you what it found there: revoked,
+not revoked, or not known. "Not revoked" is said only when the CA refused
+or the request could not be sent at all. If no answer came back, the page
+says it is not known yet and to look again in a minute, even when the
+database shows nothing: the CA may still be working on the request. When the database holds the revocation but the CA answered
+with an error, it says both, with the CA's words: a CA that fails after
+recording a revocation may not have rebuilt its revocation list. The attempt and the outcome are both written to the history
+and the log, with who asked and from where. It does not depend on the
+CA's database being readable: if the certificate list is stale, the page
+says so and the revocation still goes to the CA.
+
+Only certificates in the list can be revoked from here. Revocation cannot
+be undone, by handrail-ca or by step-ca.
+
+Revoking stops the CA renewing that one certificate. It does not stop a
+new certificate being issued for the same names: step-ca does not look at
+revocations when it is asked for one. This matters most for certificates
+issued over ACME, since an ACME client (certbot, acme.sh, Caddy) gets
+every certificate by a new order and never by renewing the old one. A
+machine like that keeps getting certificates after one of them is revoked,
+and has to be stopped on the machine itself. The revoke page says this
+for such a certificate.
 
 handrail-ca serves plain HTTP. To reach it from another machine, put a
 reverse proxy with TLS in front and set `-public-url` to the proxy's

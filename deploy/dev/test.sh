@@ -30,26 +30,34 @@ db_tls_url_file="$(pwd)/.secrets/handrail_db_tls_url"
 	printf 'postgres://handrail:%s@db.handrail.test:15432/stepca?sslmode=verify-full\n' "$(cat .secrets/handrail_db_password)" >"$db_tls_url_file"
 )
 
-# A certificate for the tests to revoke, issued for the purpose: one that
-# nothing else looks at. Its serial number is all the tests are told.
-revoke_serial=$(docker compose exec -T ca bash -c '
-	set -euo pipefail
-	work=$(mktemp -d) && cd "$work"
-	name="revoke-$RANDOM$RANDOM.handrail.test"
-	step ca certificate "$name" t.crt t.key --provisioner handrail \
-		--provisioner-password-file /run/secrets/handrail_provisioner_password --not-after 1h >/dev/null 2>&1
-	step certificate inspect t.crt --format json | jq -r .serial_number
-	rm -rf "$work"')
-if [[ ! "$revoke_serial" =~ ^[0-9]+$ ]]; then
-	echo "test: could not issue a certificate for the revocation tests" >&2
-	exit 1
-fi
+# Certificates for the tests to revoke, issued for the purpose: ones that
+# nothing else looks at. Their serial numbers are all the tests are told.
+# One is revoked through the CA client alone, the other through the pages.
+issue_to_revoke() {
+	local serial
+	serial=$(docker compose exec -T ca bash -c '
+		set -euo pipefail
+		work=$(mktemp -d) && cd "$work"
+		name="revoke-$RANDOM$RANDOM.handrail.test"
+		step ca certificate "$name" t.crt t.key --provisioner handrail \
+			--provisioner-password-file /run/secrets/handrail_provisioner_password --not-after 1h >/dev/null 2>&1
+		step certificate inspect t.crt --format json | jq -r .serial_number
+		rm -rf "$work"')
+	if [[ ! "$serial" =~ ^[0-9]+$ ]]; then
+		echo "test: could not issue a certificate for the revocation tests" >&2
+		exit 1
+	fi
+	printf '%s' "$serial"
+}
+revoke_serial=$(issue_to_revoke)
+revoke_serial_pages=$(issue_to_revoke)
 
 cd ../..
 HANDRAIL_DEV_CA_URL=https://localhost:19000 \
 	HANDRAIL_DEV_CA_FINGERPRINT="$fingerprint" \
 	HANDRAIL_DEV_PROVISIONER_PASSWORD_FILE="$(pwd)/deploy/dev/.secrets/handrail_provisioner_password" \
 	HANDRAIL_DEV_REVOKE_SERIAL="$revoke_serial" \
+	HANDRAIL_DEV_REVOKE_SERIAL_PAGES="$revoke_serial_pages" \
 	HANDRAIL_DEV_DB_URL_FILE="$db_url_file" \
 	HANDRAIL_DEV_DB_TLS_URL_FILE="$db_tls_url_file" \
 	go test -race -count=1 -v -run '^TestIntegration' ./...
