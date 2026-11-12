@@ -124,6 +124,23 @@ type Claims struct {
 // Provisioners lists every provisioner on the CA, following its paging.
 func (c *Client) Provisioners(ctx context.Context) ([]Provisioner, error) {
 	var all []Provisioner
+	err := c.eachProvisioner(ctx, func(raw json.RawMessage) error {
+		p, err := parseProvisioner(raw)
+		if err != nil {
+			return err
+		}
+		all = append(all, p)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return all, nil
+}
+
+// eachProvisioner hands every entry of the CA's provisioner list to visit,
+// following the list's paging, and stops at the first error.
+func (c *Client) eachProvisioner(ctx context.Context, visit func(json.RawMessage) error) error {
 	cursor := ""
 	for page := 0; page < maxProvisionerPages; page++ {
 		query := url.Values{"limit": {fmt.Sprint(provisionerPage)}}
@@ -135,24 +152,22 @@ func (c *Client) Provisioners(ctx context.Context) ([]Provisioner, error) {
 			NextCursor   string            `json:"nextCursor"`
 		}
 		if err := c.getJSON(ctx, "/provisioners", query, &answer); err != nil {
-			return nil, err
+			return err
 		}
 		for _, raw := range answer.Provisioners {
-			p, err := parseProvisioner(raw)
-			if err != nil {
-				return nil, err
+			if err := visit(raw); err != nil {
+				return err
 			}
-			all = append(all, p)
 		}
 		if answer.NextCursor == "" {
-			return all, nil
+			return nil
 		}
 		if answer.NextCursor == cursor {
-			return nil, errors.New("/provisioners: the CA repeated a page cursor")
+			return errors.New("/provisioners: the CA repeated a page cursor")
 		}
 		cursor = answer.NextCursor
 	}
-	return nil, fmt.Errorf("/provisioners: more than %d pages", maxProvisionerPages)
+	return fmt.Errorf("/provisioners: more than %d pages", maxProvisionerPages)
 }
 
 func parseProvisioner(raw json.RawMessage) (Provisioner, error) {

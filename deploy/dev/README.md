@@ -40,6 +40,8 @@ export HANDRAIL_DATA=$PWD/deploy/dev/.secrets/handrail-data
 export HANDRAIL_CA_URL=https://localhost:19000
 export HANDRAIL_CA_FINGERPRINT=<the fingerprint make dev-up printed>
 export HANDRAIL_DB_URL_FILE=$PWD/deploy/dev/.secrets/handrail_db_url   # written by make dev-test
+export HANDRAIL_PROVISIONER=handrail
+export HANDRAIL_PROVISIONER_PASSWORD_FILE=$PWD/deploy/dev/.secrets/handrail_provisioner_password
 go run ./cmd/handrail-ca user add -role operator dev
 go run ./cmd/handrail-ca          # http://127.0.0.1:8080
 ```
@@ -68,9 +70,11 @@ go run ./cmd/handrail-ca          # http://127.0.0.1:8080
   tests read. Re-run it, on a fresh environment, when the step-ca version
   is raised.
 - `test.sh`: runs the Go tests named `TestIntegration...` with the CA's
-  address and root fingerprint in the environment, and the read-only
-  role's database connection string in a file. Those tests are skipped
-  everywhere else.
+  address and root fingerprint in the environment, the read-only role's
+  database connection string in a file, the file with the `handrail`
+  provisioner's password, and the serial number of a certificate it has
+  just issued for the tests to revoke. Those tests are skipped everywhere
+  else.
 
 ## Raising the step-ca version
 

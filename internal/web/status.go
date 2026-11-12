@@ -70,6 +70,21 @@ type caSnapshot struct {
 	CRL        ca.CRL
 	CRLNext    string
 	CRLProblem string
+
+	Acting actingView
+}
+
+// actingView is whether handrail-ca can change anything on the CA.
+type actingView struct {
+	// ReadOnly means no provisioner was configured; the rest is then empty.
+	ReadOnly bool
+	// Provisioner is the name of the provisioner handrail-ca acts through.
+	Provisioner string
+	// Ready means its key is open; KeyID is set with it. Otherwise Problem
+	// is why the key could not be opened.
+	Ready   bool
+	KeyID   string
+	Problem string
 }
 
 type certView struct {
@@ -152,7 +167,16 @@ func readCA(ctx context.Context, client CA, now time.Time) *caSnapshot {
 	ask(func() (err error) { inters, err = client.Intermediates(ctx); return }, &snap.IntermediatesProblem)
 	ask(func() (err error) { provisioners, err = client.Provisioners(ctx); return }, &snap.ProvisionersProblem)
 	ask(func() (err error) { snap.CRL, err = client.CRL(ctx); return }, &snap.CRLProblem)
+	// Opening the provisioner's key, if it is not open yet, is how its
+	// current problem is learned.
+	if client.ProvisionerState().Configured {
+		ask(func() error { return client.Unlock(ctx) }, &snap.Acting.Problem)
+	}
 	wg.Wait()
+
+	acting := client.ProvisionerState()
+	snap.Acting.ReadOnly = !acting.Configured
+	snap.Acting.Provisioner, snap.Acting.Ready, snap.Acting.KeyID = acting.Name, acting.Ready, acting.KeyID
 
 	snap.Reachable = snap.HealthProblem == ""
 	if root != nil {
