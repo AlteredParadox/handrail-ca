@@ -106,38 +106,52 @@ func (s *server) namesPage(w http.ResponseWriter, r *http.Request) {
 	usage := snap.NamesInUse(view, now)
 	data.Certificates, data.Wildcards = usage.Certificates, usage.Wildcards
 	for _, ku := range usage.Kinds {
-		words := kindWords[ku.Kind]
-		kind := namesKind{Title: words.title, Column: words.column, Note: words.note, Names: ku.Names}
-		for i, g := range ku.Groups {
-			if i == maxNameGroups {
-				kind.MoreGroups = len(ku.Groups) - maxNameGroups
-				break
-			}
-			group := namesGroup{Label: g.Label, Count: len(g.Names), Certificates: g.Certificates}
-			if group.Label == "" {
-				group.Label = words.alone
-			}
-			for j, n := range g.Names {
-				if j == maxGroupNames {
-					group.MoreNames = len(g.Names) - maxGroupNames
-					break
-				}
-				// The name's certificates: the list, searched for it,
-				// over the same certificates this page counts, the
-				// CA's own admin certificates among them. A search is
-				// only so long; the start of a longer name finds it.
-				search := n.Value
-				if r := []rune(search); len(r) > maxSearch {
-					search = string(r[:maxSearch])
-				}
-				q := listQuery{Search: search, View: view, IncludeAdmin: true}
-				group.Names = append(group.Names, namesUse{Value: shownName(n.Value), Certificates: n.Certificates, URL: q.href(s.base)})
-			}
-			kind.Groups = append(kind.Groups, group)
-		}
-		data.Kinds = append(data.Kinds, kind)
+		data.Kinds = append(data.Kinds, s.newNamesKind(ku, view))
 	}
 	s.render(w, r, http.StatusOK, "names.html", "Names in use", data)
+}
+
+// newNamesKind is one kind of name as the page shows it: its first
+// maxNameGroups groups, and how many more there are.
+func (s *server) newNamesKind(ku inventory.KindUsage, view inventory.View) namesKind {
+	words := kindWords[ku.Kind]
+	kind := namesKind{Title: words.title, Column: words.column, Note: words.note, Names: ku.Names}
+	groups := ku.Groups
+	if len(groups) > maxNameGroups {
+		groups, kind.MoreGroups = groups[:maxNameGroups], len(groups)-maxNameGroups
+	}
+	for _, g := range groups {
+		group := s.newNamesGroup(g, view)
+		if group.Label == "" {
+			group.Label = words.alone
+		}
+		kind.Groups = append(kind.Groups, group)
+	}
+	return kind
+}
+
+// newNamesGroup is one group as the page shows it: its first
+// maxGroupNames names, each with a link to its certificates, and how many
+// more there are.
+func (s *server) newNamesGroup(g inventory.NameGroup, view inventory.View) namesGroup {
+	group := namesGroup{Label: g.Label, Count: len(g.Names), Certificates: g.Certificates}
+	names := g.Names
+	if len(names) > maxGroupNames {
+		names, group.MoreNames = names[:maxGroupNames], len(names)-maxGroupNames
+	}
+	for _, n := range names {
+		// The name's certificates: the list, searched for it, over the
+		// same certificates this page counts, the CA's own admin
+		// certificates among them. A search is only so long; the start
+		// of a longer name finds it.
+		search := n.Value
+		if r := []rune(search); len(r) > maxSearch {
+			search = string(r[:maxSearch])
+		}
+		q := listQuery{Search: search, View: view, IncludeAdmin: true}
+		group.Names = append(group.Names, namesUse{Value: shownName(n.Value), Certificates: n.Certificates, URL: q.href(s.base)})
+	}
+	return group
 }
 
 // maxShownName is how much of one name the summary shows.

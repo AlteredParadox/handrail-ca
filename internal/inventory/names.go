@@ -79,94 +79,30 @@ type NameUsage struct {
 // stops being issued and renewed. Rows that are not certificates have no
 // names to count.
 func (s *Snapshot) NamesInUse(view View, now time.Time) NameUsage {
-	tallies := map[NameKind]map[string]*groupTally{}
-	count := func(c *Certificate, kind NameKind, value string) {
-		label, value := groupOf(kind, value)
-		groups := tallies[kind]
-		if groups == nil {
-			groups = map[string]*groupTally{}
-			tallies[kind] = groups
-		}
-		g := groups[label]
-		if g == nil {
-			g = &groupTally{names: map[string]*nameTally{}}
-			groups[label] = g
-		}
-		if g.last != c {
-			g.last = c
-			g.certificates++
-		}
-		n := g.names[value]
-		if n == nil {
-			n = &nameTally{}
-			g.names[value] = n
-		}
-		if n.last != c {
-			n.last = c
-			n.certificates++
-		}
-	}
-
+	tallies := nameTallies{}
 	var usage NameUsage
 	for _, c := range s.Certificates {
 		if c.Problem != "" || !view.includes(s.Status(c, now)) {
 			continue
 		}
 		usage.Certificates++
-		// Every name whole: Names, unless that list was shortened.
-		names, commonName := c.Names, c.Subject
-		if c.exactNames != nil {
-			names = c.exactNames
-			for _, name := range names {
-				if name.Kind == CommonName {
-					commonName = name.Value
-				}
-			}
-		}
-		// The common name is counted by itself only when none of the
-		// names is the same.
-		named := !c.hasCommonName
-		for _, name := range names {
-			if name.Kind == CommonName {
-				continue
-			}
-			count(c, name.Kind, name.Value)
-			named = named || strings.EqualFold(name.Value, commonName)
-		}
-		if !named {
-			count(c, CommonName, commonName)
-		}
+		tallies.countCertificate(c)
 	}
-
 	for _, kind := range []NameKind{DNS, IP, Email, URI, CommonName} {
-		groups := tallies[kind]
-		if len(groups) == 0 {
+		if len(tallies[kind]) == 0 {
 			continue
 		}
-		ku := KindUsage{Kind: kind}
-		for label, g := range groups {
-			group := NameGroup{Label: label, Certificates: g.certificates}
-			for value, n := range g.names {
-				group.Names = append(group.Names, NameUse{Value: value, Certificates: n.certificates})
-				if kind == DNS && strings.HasPrefix(value, "*.") {
-					usage.Wildcards++
-				}
-			}
-			sort.Slice(group.Names, func(i, j int) bool { return group.Names[i].Value < group.Names[j].Value })
-			ku.Names += len(group.Names)
-			ku.Groups = append(ku.Groups, group)
+		ku := tallies.usage(kind)
+		if kind == DNS {
+			usage.Wildcards = wildcards(ku)
 		}
-		sort.Slice(ku.Groups, func(i, j int) bool {
-			a, b := ku.Groups[i], ku.Groups[j]
-			if a.Certificates != b.Certificates {
-				return a.Certificates > b.Certificates
-			}
-			return a.Label < b.Label
-		})
 		usage.Kinds = append(usage.Kinds, ku)
 	}
 	return usage
 }
+
+// nameTallies counts names by kind, then by group.
+type nameTallies map[NameKind]map[string]*groupTally
 
 // groupTally and nameTally count certificates; last is the certificate
 // counted most recently, so that one carrying a name twice, or two names
@@ -180,6 +116,103 @@ type groupTally struct {
 type nameTally struct {
 	certificates int
 	last         *Certificate
+}
+
+// countCertificate counts every name of one certificate, whole: its
+// subject alternative names, and its common name if none of them is the
+// same.
+func (t nameTallies) countCertificate(c *Certificate) {
+	names, commonName := wholeNames(c)
+	named := !c.hasCommonName
+	for _, name := range names {
+		t.count(c, name.Kind, name.Value)
+		named = named || strings.EqualFold(name.Value, commonName)
+	}
+	if !named {
+		t.count(c, CommonName, commonName)
+	}
+}
+
+// wholeNames is a certificate's subject alternative names and its common
+// name, none of them shortened: Names and Subject, unless those were
+// shortened for showing.
+func wholeNames(c *Certificate) (names []Name, commonName string) {
+	if c.exactNames == nil {
+		return c.Names, c.Subject
+	}
+	commonName = c.Subject
+	for _, name := range c.exactNames {
+		if name.Kind == CommonName {
+			commonName = name.Value
+			continue
+		}
+		names = append(names, name)
+	}
+	return names, commonName
+}
+
+// count adds one name of a certificate to its group.
+func (t nameTallies) count(c *Certificate, kind NameKind, value string) {
+	label, value := groupOf(kind, value)
+	groups := t[kind]
+	if groups == nil {
+		groups = map[string]*groupTally{}
+		t[kind] = groups
+	}
+	g := groups[label]
+	if g == nil {
+		g = &groupTally{names: map[string]*nameTally{}}
+		groups[label] = g
+	}
+	if g.last != c {
+		g.last = c
+		g.certificates++
+	}
+	n := g.names[value]
+	if n == nil {
+		n = &nameTally{}
+		g.names[value] = n
+	}
+	if n.last != c {
+		n.last = c
+		n.certificates++
+	}
+}
+
+// usage puts what was counted of one kind in order: the group with the
+// most certificates first, the names of each alphabetically.
+func (t nameTallies) usage(kind NameKind) KindUsage {
+	ku := KindUsage{Kind: kind}
+	for label, g := range t[kind] {
+		group := NameGroup{Label: label, Certificates: g.certificates}
+		for value, n := range g.names {
+			group.Names = append(group.Names, NameUse{Value: value, Certificates: n.certificates})
+		}
+		sort.Slice(group.Names, func(i, j int) bool { return group.Names[i].Value < group.Names[j].Value })
+		ku.Names += len(group.Names)
+		ku.Groups = append(ku.Groups, group)
+	}
+	sort.Slice(ku.Groups, func(i, j int) bool {
+		a, b := ku.Groups[i], ku.Groups[j]
+		if a.Certificates != b.Certificates {
+			return a.Certificates > b.Certificates
+		}
+		return a.Label < b.Label
+	})
+	return ku
+}
+
+// wildcards counts the DNS names that are literal wildcards.
+func wildcards(dns KindUsage) int {
+	n := 0
+	for _, group := range dns.Groups {
+		for _, name := range group.Names {
+			if strings.HasPrefix(name.Value, "*.") {
+				n++
+			}
+		}
+	}
+	return n
 }
 
 // groupOf says which group a name belongs to, and the name as it is
