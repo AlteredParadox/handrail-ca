@@ -763,6 +763,44 @@ func TestDER(t *testing.T) {
 	}
 }
 
+// A row is found by its key in the database, whatever of that key is kept
+// for showing.
+func TestRowsAreFoundByTheirKey(t *testing.T) {
+	f, src := loadFixture(t)
+	long := strings.Repeat("9", maxSerial+1)
+	odd := "odd/key \xff"
+	src.add(RawCertificate{Serial: long, DER: []byte("junk")})
+	src.add(RawCertificate{Serial: odd, DER: []byte("junk")})
+	now := f.Captured
+	inv := newInventory(src, &now)
+	if err := inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap := inv.Snapshot()
+	for _, key := range []string{long, odd} {
+		c := snap.Certificate(key)
+		if c == nil || c.Problem == "" || c.Serial == key {
+			t.Fatalf("the row under %q: %+v", key, c)
+		}
+		if snap.Key(c) != key || snap.Certificate(c.Serial) != nil {
+			t.Errorf("the row under %q is known by %q, and its shown form %q finds %v", key, snap.Key(c), c.Serial, snap.Certificate(c.Serial))
+		}
+	}
+	// A certificate's key is its serial number, and a query's rows carry
+	// their keys.
+	web1 := bySubject(snap)["web1.handrail.test"][0]
+	if snap.Key(web1) != web1.Serial {
+		t.Errorf("a certificate's key %q is not its serial %q", snap.Key(web1), web1.Serial)
+	}
+	keys := map[string]bool{}
+	for _, row := range snap.Select(Query{View: ViewUnreadable}, now).Rows {
+		keys[row.Key] = true
+	}
+	if !keys[long] || !keys[odd] || len(keys) != 2 {
+		t.Errorf("the keys of the unreadable rows: %v", keys)
+	}
+}
+
 // gatedSource holds each listing of serials until the test lets it go on,
 // or until its caller gives up.
 type gatedSource struct {

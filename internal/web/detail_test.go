@@ -32,10 +32,12 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"html"
 	"math/big"
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -201,6 +203,43 @@ func TestDetailOfEachStatus(t *testing.T) {
 	// A certificate not yet valid.
 	s.addRows(leafRow(t, 105, "soon.internal.example", t0.Add(time.Hour), t0.Add(48*time.Hour)))
 	wantBody(t, b.get("/certificates/105"), "Not valid until 2026-11-11 at 13:00 UTC.", "not started")
+}
+
+// A row that is not a certificate can have any key. Its page is found by
+// that key, whatever is shown for it; a key that cannot be put in an
+// address has no link, not a link that leads nowhere.
+func TestUnreadableRowsWithOddKeysHaveTheirPages(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	junk := []byte("not a certificate")
+	long := strings.Repeat("9", 65) // one digit too many for a serial
+	odd := "odd/key ?#%\xff"
+	s.addRows(
+		inventory.RawCertificate{Serial: long, DER: junk},
+		inventory.RawCertificate{Serial: odd, DER: junk},
+		inventory.RawCertificate{Serial: "..", DER: junk},
+		inventory.RawCertificate{Serial: strings.Repeat("7", maxKeyInAddress+1), DER: junk},
+	)
+	b := signedIn(t, s)
+	list := b.get("/?view=unreadable")
+	wantStatus(t, list, http.StatusOK)
+	// Five rows that are not certificates: these four and the site's own.
+	if got := strings.Count(list.Body.String(), "could not be read as a certificate"); got != 5 {
+		t.Fatalf("%d unreadable rows in the list, want 5", got)
+	}
+	links := regexp.MustCompile(`<a href="([^"]+)">What is known of it</a>`).FindAllStringSubmatch(list.Body.String(), -1)
+	if len(links) != 3 {
+		t.Fatalf("%d of the rows have a link, want 3: the two keys that fit no address have none", len(links))
+	}
+	for _, link := range links {
+		page := b.get(html.UnescapeString(link[1]))
+		wantStatus(t, page, http.StatusOK)
+		wantBody(t, page, "This row is not a certificate")
+	}
+	// The long key is shown shortened, and found whole.
+	wantBody(t, list, `href="/certificates/`+long+`"`)
+	wantBody(t, b.get("/certificates/"+long), "<dd class=\"mono small\">"+long[:64]+"…</dd>")
+	// The shortened form is nobody's address.
+	wantStatus(t, b.get("/certificates/"+url.PathEscape(long[:64]+"…")), http.StatusNotFound)
 }
 
 func TestDetailWhenTheRowHasChanged(t *testing.T) {
@@ -429,9 +468,9 @@ func TestRevocationInWords(t *testing.T) {
 		{"provisioner not among the certificates", inventory.Revocation{ProvisionerID: "p9"},
 			revocationView{Reason: "Unspecified", How: "With a provisioner's token", By: "p9"}},
 		{"acme", inventory.Revocation{ReasonCode: 1, ACME: true},
-			revocationView{Reason: "Key compromise", How: "Through ACME, by the account that held the certificate"}},
-		{"with its own key", inventory.Revocation{ReasonCode: 5, MTLS: true},
-			revocationView{Reason: "Cessation of operation", How: "With the certificate's own key"}},
+			revocationView{Reason: "Key compromise", How: "Through ACME"}},
+		{"by the certificate itself", inventory.Revocation{ReasonCode: 5, MTLS: true},
+			revocationView{Reason: "Cessation of operation", How: "By the certificate itself, over mutual TLS"}},
 		{"a code RFC 5280 does not define", inventory.Revocation{ReasonCode: 7},
 			revocationView{Reason: "Reason code 7", How: "With a provisioner's token"}},
 		{"unreadable", inventory.Revocation{Problem: "not JSON"}, revocationView{Problem: "not JSON"}},
