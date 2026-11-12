@@ -41,6 +41,9 @@ import (
 // signing token.
 const signPath = "/1.0/sign"
 
+// pemRequest is the PEM label of a certificate signing request.
+const pemRequest = "CERTIFICATE REQUEST"
+
 const (
 	// maxCSR bounds a certificate request in PEM. An RSA-4096 request with
 	// a hundred names is under 8 KiB.
@@ -118,7 +121,7 @@ func ReadRequest(pemText string) (*Request, error) {
 		return nil, errors.New("this is not a certificate signing request in PEM: it should begin with -----BEGIN CERTIFICATE REQUEST-----")
 	case block.Type == "CERTIFICATE":
 		return nil, errors.New("this is a certificate, not a certificate signing request")
-	case block.Type != "CERTIFICATE REQUEST" && block.Type != "NEW CERTIFICATE REQUEST":
+	case block.Type != pemRequest && block.Type != "NEW CERTIFICATE REQUEST":
 		return nil, fmt.Errorf("this is a PEM block of type %q, not a certificate signing request", clip(block.Type))
 	case strings.TrimSpace(string(rest)) != "":
 		return nil, errors.New("there is something after the request: paste one certificate signing request and nothing else")
@@ -134,7 +137,7 @@ func ReadRequest(pemText string) (*Request, error) {
 		return nil, err
 	}
 
-	r := &Request{CSR: csr, PEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr.Raw}))}
+	r := &Request{CSR: csr, PEM: string(pem.EncodeToMemory(&pem.Block{Type: pemRequest, Bytes: csr.Raw}))}
 	names := requestNames(csr)
 	if len(names) > maxRequestNames {
 		return nil, fmt.Errorf("the request has %d names, more than the %d handrail-ca asks for in one certificate", len(names), maxRequestNames)
@@ -199,7 +202,7 @@ func NewRequest(key crypto.Signer, commonName string, names []string) (*Request,
 	if err != nil {
 		return nil, fmt.Errorf("the request could not be made: %v", err)
 	}
-	return ReadRequest(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})))
+	return ReadRequest(string(pem.EncodeToMemory(&pem.Block{Type: pemRequest, Bytes: der})))
 }
 
 // nameOnly is how a subject holding only this common name prints.

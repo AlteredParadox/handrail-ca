@@ -146,6 +146,12 @@ func (s *server) ourOnce(once string) bool {
 	if err != nil || len(raw) != onceRandom+sha256.Size {
 		return false
 	}
+	// As it was given out and in no other spelling. Hexadecimal reads the
+	// same in either case, and a mark is remembered as taken by its text:
+	// one letter in the other case would be a mark never seen before.
+	if hex.EncodeToString(raw) != once {
+		return false
+	}
 	return hmac.Equal(raw[onceRandom:], s.onceCode(raw[:onceRandom]))
 }
 
@@ -212,6 +218,44 @@ func typedNames(typed string) ([]string, error) {
 	return out, nil
 }
 
+// generateAsk is what a key-generating form asks for, checked.
+type generateAsk struct {
+	commonName string
+	names      []string
+	makeKey    func() (crypto.Signer, error)
+	kind       string
+	length     time.Duration
+}
+
+// generateAsked reads and checks the form. Nothing is made here.
+func generateAsked(r *http.Request, claims ca.Claims) (generateAsk, error) {
+	var want generateAsk
+	want.commonName = strings.TrimSpace(r.PostForm.Get("common_name"))
+	for _, c := range want.commonName {
+		if !unicode.IsPrint(c) {
+			return want, errors.New("the common name has a character in it that does not print")
+		}
+	}
+	names, err := typedNames(r.PostForm.Get("names"))
+	if err != nil {
+		return want, err
+	}
+	want.names = names
+	if want.commonName == "" && len(names) == 0 {
+		return want, errors.New("give a common name, or at least one name or address")
+	}
+	for _, k := range keyKinds {
+		if k.value == r.PostForm.Get("key") {
+			want.makeKey, want.kind = k.make, k.label
+		}
+	}
+	if want.makeKey == nil {
+		return want, errors.New("choose a kind of key from the list")
+	}
+	want.length, err = chosenValidity(r, claims)
+	return want, err
+}
+
 // generate makes a key and a request for what was typed, has the CA sign
 // it, and answers with the key, once.
 func (s *server) generate(w http.ResponseWriter, r *http.Request) {
@@ -226,38 +270,12 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		data.Problem = problem
 		s.renderIssue(w, r, code, data)
 	}
-	commonName := strings.TrimSpace(r.PostForm.Get("common_name"))
-	for _, c := range commonName {
-		if !unicode.IsPrint(c) {
-			refuse(http.StatusUnprocessableEntity, "the common name has a character in it that does not print")
-			return
-		}
-	}
-	names, err := typedNames(r.PostForm.Get("names"))
+	want, err := generateAsked(r, provisioner.Claims)
 	if err != nil {
 		refuse(http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	if commonName == "" && len(names) == 0 {
-		refuse(http.StatusUnprocessableEntity, "give a common name, or at least one name or address")
-		return
-	}
-	var makeKey func() (crypto.Signer, error)
-	kind := ""
-	for _, k := range keyKinds {
-		if k.value == r.PostForm.Get("key") {
-			makeKey, kind = k.make, k.label
-		}
-	}
-	if makeKey == nil {
-		refuse(http.StatusUnprocessableEntity, "choose a kind of key from the list")
-		return
-	}
-	length, err := chosenValidity(r, provisioner.Claims)
-	if err != nil {
-		refuse(http.StatusUnprocessableEntity, err.Error())
-		return
-	}
+	commonName, names, makeKey, kind, length := want.commonName, want.names, want.makeKey, want.kind, want.length
 	// Everything typed has been checked. From here a key is made, so the
 	// form is taken: sent again, it makes nothing.
 	once := r.PostForm.Get("once")

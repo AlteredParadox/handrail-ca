@@ -284,18 +284,35 @@ func TestGenerateFormMarks(t *testing.T) {
 		}
 	}
 
+	// A mark that was taken is taken in any spelling: hexadecimal reads
+	// the same in either case, and the other case must not pass for a
+	// mark never seen.
+	taken := b.generateForm("git.internal.example", "", "p256")
+	wantStatus(t, b.do(http.MethodPost, "/issue/generate", taken), http.StatusOK)
+	respelled := strings.ToUpper(taken.Get("once"))
+	if respelled == taken.Get("once") {
+		t.Fatal("the mark has no letter to respell")
+	}
+	taken.Set("once", respelled)
+	rec := b.do(http.MethodPost, "/issue/generate", taken)
+	if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), "PRIVATE KEY") {
+		t.Errorf("a taken mark in capitals: %d", rec.Code)
+	}
+	if n := len(s.ca.signings()); n != 1 {
+		t.Fatalf("the CA was asked to sign %d times", n)
+	}
+
 	// A form taken, and its page reloaded after a restart: sessions are in
 	// the store and carry on, the process's secret and memory are new.
 	form := b.generateForm("git.internal.example", "", "p256")
 	wantStatus(t, b.do(http.MethodPost, "/issue/generate", form), http.StatusOK)
 	s.server.formKey = []byte("the key of another process, 32 b")
 	s.server.onces = usedForms{}
-	rec := b.do(http.MethodPost, "/issue/generate", form)
+	rec = b.do(http.MethodPost, "/issue/generate", form)
 	wantStatus(t, rec, http.StatusConflict)
 	wantBody(t, rec, "This form cannot be taken", "from before handrail-ca was last restarted")
-	// And so is one that was never sent before the restart.
-	if n := len(s.ca.signings()); n != 1 {
-		t.Errorf("the CA was asked to sign %d times, want the once", n)
+	if n := len(s.ca.signings()); n != 2 {
+		t.Errorf("the CA was asked to sign %d times, want once for each form that was taken", n)
 	}
 	// A form from the new process is taken.
 	wantStatus(t, b.do(http.MethodPost, "/issue/generate", b.generateForm("git.internal.example", "", "p256")), http.StatusOK)
