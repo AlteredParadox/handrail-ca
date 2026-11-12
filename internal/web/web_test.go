@@ -794,7 +794,7 @@ func TestSecurityHeaders(t *testing.T) {
 		if csp := h.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") || !strings.Contains(csp, "frame-ancestors 'none'") {
 			t.Errorf("%s: CSP = %q", path, csp)
 		}
-		if h.Get("X-Content-Type-Options") != "nosniff" || h.Get("X-Frame-Options") != "DENY" || h.Get("Referrer-Policy") != "no-referrer" {
+		if h.Get("X-Content-Type-Options") != "nosniff" || h.Get("X-Frame-Options") != "DENY" || h.Get("Referrer-Policy") != "same-origin" {
 			t.Errorf("%s: headers = %v", path, h)
 		}
 	}
@@ -2493,5 +2493,32 @@ func TestListQueryRoundTrip(t *testing.T) {
 	}
 	if got := shortSerial("65"); got != "65" {
 		t.Errorf("a short serial was shortened: %q", got)
+	}
+}
+
+// A browser fills in the Origin of a form post from the page's referrer
+// policy: under "no-referrer" it sends "Origin: null", even to the page's
+// own site. Every form here is refused unless its Origin is the public
+// URL's, so that policy would lock every browser out, and for a while it
+// did: the tests post as a browser was thought to, and no browser had
+// been tried. This test posts what Chromium, Firefox and WebKit were seen
+// to send under each policy, and pins the policy that works.
+func TestFormsWorkWithWhatBrowsersSend(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	page := b.get("/sign-in")
+	if got := page.Header().Get("Referrer-Policy"); got != "same-origin" {
+		t.Fatalf("Referrer-Policy = %q. Under no-referrer browsers post with Origin: null, which is refused", got)
+	}
+	// What a browser sends under the policy the pages carry.
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+
+	// What a browser sends under no-referrer, and from a sandboxed frame or
+	// a file opened from disk: refused, as it must be, since "null" is also
+	// what a hostile page can arrange to send.
+	other := s.browser()
+	other.origin = "null"
+	if rec := other.signIn("alice", alicePassword); rec.Code != http.StatusForbidden {
+		t.Errorf("a form with Origin: null: %d, want 403", rec.Code)
 	}
 }

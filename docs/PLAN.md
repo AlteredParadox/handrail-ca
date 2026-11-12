@@ -574,6 +574,15 @@ As built in milestone 1:
 - Sessions last twelve hours, or one hour unused. The cookie holds a random
   token; the store holds its SHA-256. Over HTTPS at the root of a host the
   cookie carries the `__Host-` prefix.
+- The pages are sent with `Referrer-Policy: same-origin`, not
+  `no-referrer`. Under `no-referrer` a browser sends `Origin: null` with
+  every form it posts, its own site included, and the `Origin` check
+  below then refuses the form. That was the policy until 2026-11-12, and
+  no browser could sign in: every test and every check by hand had posted
+  with curl or a stand-in for a browser, which send the `Origin` they are
+  told to. It was found the first time the pages were driven in real
+  browsers (Chromium, Firefox and WebKit), which is now part of checking
+  any change to a form.
 - Every form carries a token: an HMAC keyed with the cookie's token. The
   sign-in form, which has no session yet, gets a short-lived cookie of its
   own for the same purpose. A post without the right `Origin` is refused
