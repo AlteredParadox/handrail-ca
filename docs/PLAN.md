@@ -1,8 +1,9 @@
 # handrail-ca build plan
 
 Status: 2026-11-11. Milestone 1 is built: sign-in and a CA status page, on
-a store of its own, against a development CA. Milestone 2, the certificate
-list, is next (section 6).
+a store of its own, against a development CA. Milestone 2 is under way: the
+certificate inventory is read from the CA's database; the list and detail
+pages are next (section 6).
 Section 2 records the decisions made so far.
 
 ## 1. What we are building
@@ -233,14 +234,31 @@ CA's database.
 The database account needs `SELECT` on those three tables and nothing else;
 in particular it cannot read `used_ott`, ACME accounts, provisioners or
 admins, and its sessions are read-only. The connection uses TLS when the
-database is on another host. A row that does not parse is shown as
+database is on another host: as built, `sslmode=verify-full` is required
+there (TLS, with the database server's certificate checked), every host
+the driver might fall back to included, and any mode is accepted on the
+same machine. A verified connection is checked against the CA's own root,
+the one fetched by its fingerprint, unless the connection string names
+another with `sslrootcert`: the operator's CA issues PostgreSQL's
+certificate, and handrail-ca needs no certificate or root file of its own
+(owner's decision, 2026-11-11, over an opt-out for trusted networks; the
+setup guide has the steps, and the development CA runs them). The root is
+asked for when a connection is made, so a CA that is down delays the
+inventory, visibly, and does not stop the start. The connection string
+comes from a file, since it holds the password. A row that does not parse is shown as
 unreadable, not skipped. If the database cannot be reached, the last
 inventory stays on screen with its age, and issuing and revoking still work,
 since they go through the CA's API.
 
 Status is derived, most severe first: revoked, expired, not yet valid,
 expiring soon (configurable window), valid. If the revocation table could not
-be read, status is shown as unknown rather than valid.
+be read, status is shown as unknown rather than valid. As built, "expiring"
+means inside the last thirty days of validity or the last third of the
+certificate's whole lifetime, whichever is shorter, so that a certificate
+issued for a day is not expiring from the moment it exists; the window is a
+constant for now. A row that is not a certificate is its own status,
+unreadable. A revocation counts even if its record cannot be read, and
+revocations of serials that were never issued are counted and shown apart.
 
 **Acting on the CA.** handrail-ca is configured with one JWK provisioner
 (name, key ID, password file). The recommended setup is a provisioner created
@@ -397,6 +415,7 @@ In use:
 
 | Module | For | License |
 |---|---|---|
+| `github.com/jackc/pgx/v5` | read the CA's PostgreSQL database | MIT |
 | `golang.org/x/crypto` | argon2id | BSD-3-Clause |
 | `golang.org/x/term` | asking for a password at the terminal without showing it | BSD-3-Clause |
 | `modernc.org/sqlite` | the store; pure Go, so the binary stays static | BSD-3-Clause |
@@ -410,12 +429,18 @@ authors), `golang.org/x/sys` and `github.com/google/uuid` (BSD-3-Clause),
 7.7 MB to 12.0 MB. `THIRD_PARTY_LICENSES.md` carries
 all of their notices.
 
-Planned, each to be confirmed when it is added:
+`github.com/jackc/pgx/v5` (MIT) reads the CA's PostgreSQL database. With
+it come `github.com/jackc/puddle/v2`, `pgpassfile` and `pgservicefile`
+(MIT, same author), `golang.org/x/sync` and `golang.org/x/text`
+(BSD-3-Clause). pgx also honours libpq's `PG*` environment variables and
+password file, which handrail-ca does not use but does not disable. It
+took the stripped binary from 14.7 MB to 19.0 MB.
+
+Planned, to be confirmed when it is added:
 
 | Module | For | License |
 |---|---|---|
 | `github.com/go-jose/go-jose/v4` | open the provisioner key (PBES2 JWE), sign tokens | Apache-2.0 |
-| `github.com/jackc/pgx/v5` | read the CA's PostgreSQL database | MIT |
 
 Certificate and CSR handling is `crypto/x509` from the standard library.
 
@@ -450,8 +475,13 @@ server that answers `/healthz`.
   handrail-ca serving TLS itself is deferred: a reverse proxy does it.
 
 **M2. View.**
-- The PostgreSQL inventory source and in-memory index, with fixtures captured
-  from the M1 environment.
+- Done: the PostgreSQL inventory source and in-memory index
+  (`internal/inventory`), with fixtures captured from the M1 environment
+  (`deploy/dev/capture-fixtures.sh`), configured by `-db-url-file`, read
+  every thirty seconds, and shown as a card on the status page (where it
+  comes from, how old the picture is, counts by status). Integration tests
+  read the development CA's database and check that the account can do
+  nothing but read.
 - List page: filter by status and provisioner, search subject and SANs, sort,
   paginate; default view hides expired certificates. The CA's own admin
   certificates (section 3) are hidden unless asked for.

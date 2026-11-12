@@ -36,6 +36,7 @@ import (
 
 	legal "handrail-ca"
 	"handrail-ca/internal/ca"
+	"handrail-ca/internal/inventory"
 	"handrail-ca/internal/store"
 	"handrail-ca/internal/web"
 )
@@ -89,6 +90,24 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		return 1
 	}
 
+	// The certificate list is read from the CA's database. The connection
+	// string holds a password, so it comes from a file, never from a flag
+	// or the environment. Nothing connects yet.
+	dbURL, err := readSecretFile(cfg.dbURLFile)
+	if err != nil {
+		log.Error("reading the database connection file", "err", err)
+		return 1
+	}
+	// A database on another machine is checked against the CA's own root,
+	// the one fetched by its fingerprint: the same trust, no second file.
+	db, err := inventory.OpenPostgres(dbURL, client.Root)
+	if err != nil {
+		log.Error("database configuration", "file", cfg.dbURLFile, "err", err)
+		return 1
+	}
+	defer db.Close()
+	inv := inventory.New(db)
+
 	ln, err := net.Listen("tcp", cfg.listen)
 	if err != nil {
 		log.Error("listen", "addr", cfg.listen, "err", err)
@@ -125,6 +144,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		CA:                 client,
 		PublicURL:          publicURL,
 		TrustedProxies:     cfg.trustedProxies,
+		Inventory:          inv,
 		Log:                log,
 	})
 	if err != nil {
@@ -138,20 +158,25 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			"so sign-in attempts are limited per user name only and the history records the proxy's address")
 	}
 	go sweepSessions(ctx, st, log)
+	go inv.Run(ctx, web.InventoryRefresh, inventoryLog(log))
 
 	log.Info("handrail-ca listening", "addr", ln.Addr().String(), "url", publicURL.String(), "ca", client.URL(), "version", version)
 	return serve(ctx, ln, handler, log)
 }
 
-// config is what the server is started with. Secrets are never flags:
-// nothing here is one. The root's fingerprint is public.
+// config is what the server is started with. Secrets are never flags: the
+// one secret, the database password, is inside a file that is only named
+// here. The root's fingerprint is public.
 type config struct {
 	listen  string
 	dataDir string
 	caURL   string
 	// caFingerprint is the SHA-256 of the CA's root certificate, in hex.
 	caFingerprint string
-	publicURL     string
+	// dbURLFile names the file holding the connection string for the
+	// CA's database.
+	dbURLFile string
+	publicURL string
 	// trustedProxies is the -trusted-proxy list, parsed.
 	trustedProxies []netip.Prefix
 }
@@ -164,6 +189,7 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 	fs.StringVar(&cfg.dataDir, "data", os.Getenv("HANDRAIL_DATA"), "directory for handrail-ca's own store (or set HANDRAIL_DATA)")
 	fs.StringVar(&cfg.caURL, "ca-url", os.Getenv("HANDRAIL_CA_URL"), "the CA's address, https://host[:port] (or set HANDRAIL_CA_URL)")
 	fs.StringVar(&cfg.caFingerprint, "ca-fingerprint", os.Getenv("HANDRAIL_CA_FINGERPRINT"), "SHA-256 fingerprint of the CA's root certificate, as printed by 'step certificate fingerprint root_ca.crt' (or set HANDRAIL_CA_FINGERPRINT)")
+	fs.StringVar(&cfg.dbURLFile, "db-url-file", os.Getenv("HANDRAIL_DB_URL_FILE"), "file holding the connection string for the CA's PostgreSQL database, for a read-only account: postgres://user:password@host:port/database?sslmode=verify-full (or set HANDRAIL_DB_URL_FILE)")
 	fs.StringVar(&cfg.publicURL, "public-url", os.Getenv("HANDRAIL_PUBLIC_URL"), "the address browsers use, http(s)://host[:port][/path]; needed unless listening on loopback (or set HANDRAIL_PUBLIC_URL)")
 	proxies := fs.String("trusted-proxy", os.Getenv("HANDRAIL_TRUSTED_PROXIES"), "addresses or CIDR ranges of the reverse proxies in front, comma-separated; only they are believed about who a visitor is (or set HANDRAIL_TRUSTED_PROXIES)")
 	if err := fs.Parse(args); err != nil {
@@ -183,6 +209,7 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 		{cfg.dataDir, "-data (HANDRAIL_DATA)"},
 		{cfg.caURL, "-ca-url (HANDRAIL_CA_URL)"},
 		{cfg.caFingerprint, "-ca-fingerprint (HANDRAIL_CA_FINGERPRINT)"},
+		{cfg.dbURLFile, "-db-url-file (HANDRAIL_DB_URL_FILE)"},
 	} {
 		if need.value == "" {
 			missing = append(missing, need.name)
@@ -220,6 +247,46 @@ func (c config) resolvePublicURL(listening net.Addr) (*url.URL, error) {
 func isLoopback(addr net.Addr) bool {
 	tcp, ok := addr.(*net.TCPAddr)
 	return ok && tcp.IP.IsLoopback()
+}
+
+// inventoryLog reports the reading of the certificate inventory: a
+// failure when it starts or changes, and the recovery, not a line for every
+// round of a database that stays down. The status page always has the
+// current state.
+func inventoryLog(log *slog.Logger) func(error) {
+	var last string
+	return func(err error) {
+		switch {
+		case err == nil && last != "":
+			log.Info("the certificate inventory is being read again")
+			last = ""
+		case err != nil && err.Error() != last:
+			log.Warn("the certificate inventory could not be read; the status page shows how old its picture is", "err", err)
+			last = err.Error()
+		}
+	}
+}
+
+// readSecretFile reads a small file that holds a secret, trimmed. Its
+// content never goes into an error.
+func readSecretFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	const limit = 16 << 10
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", err
+	}
+	if len(data) > limit {
+		return "", fmt.Errorf("%s is larger than %d bytes", path, limit)
+	}
+	if strings.TrimSpace(string(data)) == "" {
+		return "", fmt.Errorf("%s is empty", path)
+	}
+	return strings.TrimSpace(string(data)), nil
 }
 
 // sweepSessions removes ended sessions from the store now and then. They

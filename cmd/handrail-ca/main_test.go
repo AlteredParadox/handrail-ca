@@ -19,6 +19,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"net"
@@ -67,17 +68,28 @@ func TestRunBadFlag(t *testing.T) {
 // testFingerprint is a well-formed root fingerprint that is no CA's.
 var testFingerprint = strings.Repeat("ab", 32)
 
+// dbURLFile writes a connection string for a database nothing listens on.
+func dbURLFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "db_url")
+	if err := os.WriteFile(path, []byte("postgres://handrail:not-a-real-password@127.0.0.1:1/stepca?sslmode=disable\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // serverArgs is a complete configuration: a fresh data directory, a CA
-// address nothing listens on, and a root fingerprint.
+// address nothing listens on, a root fingerprint, and a database nothing
+// listens on.
 func serverArgs(t *testing.T, listen string, more ...string) []string {
 	t.Helper()
 	clearEnv(t)
-	return append([]string{"-listen", listen, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-fingerprint", testFingerprint}, more...)
+	return append([]string{"-listen", listen, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-fingerprint", testFingerprint, "-db-url-file", dbURLFile(t)}, more...)
 }
 
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_FINGERPRINT", "HANDRAIL_PUBLIC_URL", "HANDRAIL_TRUSTED_PROXIES"} {
+	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_FINGERPRINT", "HANDRAIL_DB_URL_FILE", "HANDRAIL_PUBLIC_URL", "HANDRAIL_TRUSTED_PROXIES"} {
 		t.Setenv(name, "")
 	}
 }
@@ -168,7 +180,15 @@ func waitForHealth(t *testing.T, addr string, log *syncBuffer) {
 }
 
 func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
-	root := testFingerprint
+	root, db := testFingerprint, dbURLFile(t)
+	remoteDB := filepath.Join(t.TempDir(), "remote")
+	if err := os.WriteFile(remoteDB, []byte("postgres://handrail:hunter2hunter2@db.internal.example/stepca?sslmode=require"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emptyDB := filepath.Join(t.TempDir(), "empty")
+	if err := os.WriteFile(emptyDB, []byte("  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	dataIsAFile := filepath.Join(t.TempDir(), "file")
 	if err := os.WriteFile(dataIsAFile, nil, 0o600); err != nil {
 		t.Fatal(err)
@@ -181,17 +201,20 @@ func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
 		code int
 		want string
 	}{
-		{"nothing", nil, 2, "not configured: -data (HANDRAIL_DATA), -ca-url (HANDRAIL_CA_URL), -ca-fingerprint (HANDRAIL_CA_FINGERPRINT)"},
+		{"nothing", nil, 2, "not configured: -data (HANDRAIL_DATA), -ca-url (HANDRAIL_CA_URL), -ca-fingerprint (HANDRAIL_CA_FINGERPRINT), -db-url-file (HANDRAIL_DB_URL_FILE)"},
 		{"no CA", []string{"-data", data}, 2, "not configured: -ca-url (HANDRAIL_CA_URL), -ca-fingerprint"},
-		{"trusted proxy by name", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-trusted-proxy", "proxy.internal.example"}, 2, "-trusted-proxy: invalid IP address or CIDR range: proxy.internal.example"},
+		{"trusted proxy by name", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-trusted-proxy", "proxy.internal.example"}, 2, "-trusted-proxy: invalid IP address or CIDR range: proxy.internal.example"},
 		{"stray argument", []string{"-data", data, "serve"}, 2, `unexpected argument "serve"`},
-		{"data directory is a file", []string{"-data", dataIsAFile, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root}, 1, "opening the store"},
-		{"fingerprint is not one", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", "root_ca.crt"}, 1, "64 hexadecimal characters"},
-		{"CA over plain HTTP", []string{"-data", data, "-ca-url", "http://ca.invalid", "-ca-fingerprint", root}, 1, "must start with https://"},
-		{"bad public URL", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "handrail.example"}, 1, "-public-url"},
-		{"plain HTTP public URL beyond this machine", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "http://handrail.example"}, 1, "only accepted for a loopback address"},
-		{"beyond loopback without a public URL", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root}, 1, "-public-url (HANDRAIL_PUBLIC_URL) is required"},
-		{"beyond loopback without an account", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-public-url", "https://handrail.example"}, 1, "no accounts yet"},
+		{"data directory is a file", []string{"-data", dataIsAFile, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db}, 1, "opening the store"},
+		{"fingerprint is not one", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", "root_ca.crt", "-db-url-file", db}, 1, "64 hexadecimal characters"},
+		{"no database file", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", filepath.Join(data, "none")}, 1, "reading the database connection file"},
+		{"empty database file", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", emptyDB}, 1, "is empty"},
+		{"database on another machine without verified TLS", []string{"-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", remoteDB}, 1, "sslmode=verify-full"},
+		{"CA over plain HTTP", []string{"-data", data, "-ca-url", "http://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db}, 1, "must start with https://"},
+		{"bad public URL", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-public-url", "handrail.example"}, 1, "-public-url"},
+		{"plain HTTP public URL beyond this machine", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-public-url", "http://handrail.example"}, 1, "only accepted for a loopback address"},
+		{"beyond loopback without a public URL", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db}, 1, "-public-url (HANDRAIL_PUBLIC_URL) is required"},
+		{"beyond loopback without an account", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-public-url", "https://handrail.example"}, 1, "no accounts yet"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -421,5 +444,33 @@ func TestEnvOr(t *testing.T) {
 	t.Setenv("HANDRAIL_TEST_ENVOR", "set")
 	if got := envOr("HANDRAIL_TEST_ENVOR", "fallback"); got != "set" {
 		t.Errorf("set variable: got %q, want %q", got, "set")
+	}
+}
+
+// A database that stays down is one line in the log, not one every thirty
+// seconds; a different failure, and the recovery, are each said once.
+func TestInventoryLogSaysEachChangeOnce(t *testing.T) {
+	var buf bytes.Buffer
+	report := inventoryLog(slog.New(slog.NewTextHandler(&buf, nil)))
+	down, denied := errors.New("connection refused"), errors.New("permission denied")
+	for _, err := range []error{nil, nil, down, down, down, denied, denied, nil, nil, down} {
+		report(err)
+	}
+	lines := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	var got []string
+	for _, l := range lines {
+		switch {
+		case strings.Contains(l, "connection refused"):
+			got = append(got, "down")
+		case strings.Contains(l, "permission denied"):
+			got = append(got, "denied")
+		case strings.Contains(l, "being read again"):
+			got = append(got, "recovered")
+		default:
+			got = append(got, "?")
+		}
+	}
+	if strings.Join(got, ",") != "down,denied,recovered,down" {
+		t.Errorf("logged %v:\n%s", got, buf.String())
 	}
 }
