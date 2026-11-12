@@ -407,10 +407,13 @@ func newRevocationView(rev *inventory.Revocation, known []inventory.ProvisionerC
 		v.Reason = fmt.Sprintf("Reason code %d", rev.ReasonCode)
 	}
 	switch {
+	// What step-ca records and no more (authority.RevokeOptions, 0.30.2).
+	// An ACME revocation may have been asked for by an account or signed
+	// with the certificate's own key; the record does not say which.
 	case rev.ACME:
-		v.How = "Through ACME, by the account that held the certificate"
+		v.How = "Through ACME"
 	case rev.MTLS:
-		v.How = "With the certificate's own key"
+		v.How = "By the certificate itself, over mutual TLS"
 	default:
 		v.How = "With a provisioner's token"
 	}
