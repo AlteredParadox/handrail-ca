@@ -282,7 +282,12 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "no-referrer")
+		// Not "no-referrer". Under that policy a browser sends "Origin:
+		// null" with every form it posts, even to the page's own site, and
+		// sameOriginWrites then refuses the form: nobody could sign in.
+		// "same-origin" still tells other sites nothing (a link out carries
+		// no referrer) and lets a form of ours say where it came from.
+		h.Set("Referrer-Policy", "same-origin")
 		next.ServeHTTP(w, r)
 	})
 }
