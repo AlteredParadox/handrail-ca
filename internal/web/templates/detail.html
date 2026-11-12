@@ -170,6 +170,26 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </section>
 {{end}}
 
+{{with .History}}
+<section class="card" id="history">
+<div class="card-head">
+<h2>History</h2>
+{{if or .Events .Unread}}<a href="{{.URL}}">{{if .More}}All of it{{else}}On the history page{{end}}</a>{{end}}
+</div>
+{{if .Unread}}
+<p class="problem">The history could not be read from handrail-ca's store just now. That does not mean there is none.</p>
+{{else if .Events}}
+<ul class="events">
+{{range .Events}}<li><span class="nowrap">{{.When}}</span> <span class="strong">{{.Actor}}</span> {{.What}} <span class="badge {{.Badge}}">{{.Outcome}}</span>{{with .Detail}}<div class="sub detail">{{.}}</div>{{end}}</li>
+{{end}}
+</ul>
+{{if .More}}<p class="muted">Earlier entries are on the <a href="{{.URL}}">history page</a>.</p>{{end}}
+{{else}}
+<p class="muted">Nothing has been done to this certificate through handrail-ca. What the CA itself recorded is above.</p>
+{{end}}
+</section>
+{{end}}
+
 {{with .PEM}}
 <section class="card">
 <h2>Certificate (PEM)</h2>

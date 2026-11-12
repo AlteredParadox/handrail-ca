@@ -83,6 +83,8 @@ func (s *Store) AppendHistory(ctx context.Context, e Event) error {
 type HistoryQuery struct {
 	// Serial limits the result to one certificate's events.
 	Serial string
+	// Action limits the result to one kind of event.
+	Action string
 	// Before limits the result to events older than this ID, for paging.
 	Before int64
 	// Limit is the most rows returned; 0 means 100, and 1000 is the cap.
@@ -100,8 +102,8 @@ func (s *Store) History(ctx context.Context, q HistoryQuery) ([]Event, error) {
 	}
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id, at, actor, action, outcome, serial, subject, detail, remote FROM history
-		  WHERE (?1 = '' OR serial = ?1) AND (?2 <= 0 OR id < ?2)
-		  ORDER BY id DESC LIMIT ?3`, q.Serial, q.Before, limit)
+		  WHERE (?1 = '' OR serial = ?1) AND (?2 <= 0 OR id < ?2) AND (?4 = '' OR action = ?4)
+		  ORDER BY id DESC LIMIT ?3`, q.Serial, q.Before, limit, q.Action)
 	if err != nil {
 		return nil, err
 	}

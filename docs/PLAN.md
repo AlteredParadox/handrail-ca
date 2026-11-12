@@ -670,7 +670,15 @@ server that answers `/healthz`.
   serial number, for a subject nobody could type). Details under "Acting on
   the CA" in section 4. Checked on the development CA through the pages
   (`make dev-test`).
-- The history's own page.
+- Done: the history's page, at `/history`: what was done through
+  handrail-ca, newest first, fifty to a page, with who, what, the outcome,
+  the certificate and the address it came from. It can be narrowed to one
+  kind of event and to one certificate, and a certificate's own page shows
+  the last five things done to it. Everyone who signs in can read it,
+  viewers included. Text in it comes from requests and from the CA, and
+  is escaped like any other. If the store cannot be read the page says
+  that, not that nothing was recorded. It shows only what went through
+  handrail-ca: what the CA did for anyone else is in the certificate list.
 - A device cookie, as its own change: a browser that has signed in as a
   user before keeps a sign-in allowance of its own for that name, so that
   someone hammering a known user name cannot keep its owner out of the UI

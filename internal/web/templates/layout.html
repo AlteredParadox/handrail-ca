@@ -35,6 +35,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <nav aria-label="Main">
 <a href="{{.Base}}/"{{if or (eq .Page "list.html") (eq .Page "detail.html") (eq .Page "revoke.html")}} aria-current="page"{{end}}>Certificates</a>
 <a href="{{.Base}}/names"{{if eq .Page "names.html"}} aria-current="page"{{end}}>Names in use</a>
+<a href="{{.Base}}/history"{{if eq .Page "history.html"}} aria-current="page"{{end}}>History</a>
 <a href="{{.Base}}/status"{{if eq .Page "status.html"}} aria-current="page"{{end}}>CA status</a>
 </nav>
 <div class="who">
