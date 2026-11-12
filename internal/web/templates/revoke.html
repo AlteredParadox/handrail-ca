@@ -22,7 +22,19 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <div class="narrow">
 <nav class="crumbs" aria-label="Breadcrumb"><a href="{{$base}}/">Certificates</a> <span aria-hidden="true">/</span> <a href="{{$base}}/certificates/{{.Serial}}">{{.Title}}</a> <span aria-hidden="true">/</span> <span>Revoke</span></nav>
 
-{{if .Unrecorded}}
+{{if .Unconfirmed}}
+<h1>Revoked, but the CA did not confirm it</h1>
+<section class="card caution" role="alert">
+<p>The CA's database holds the revocation this request asked for, so the CA treats the certificate as revoked.</p>
+<p>The CA's answer to the request, though, was not a confirmation: {{.Unconfirmed.CA}}</p>
+<p>If the answer was only lost or late, nothing more is needed. If the CA reported a failure, something it does after recording a revocation may not have been done.
+{{if not .CRLKnown}}Whether this CA publishes a revocation list could not be determined. If it does, the list may not have been rebuilt, and systems that check it would not see this revocation yet.
+{{else if .CRLPublished}}<strong>This CA publishes a revocation list</strong>, and may rebuild it at that point: systems that check the list may not see this revocation until it is next rebuilt.
+{{end}}The CA's own log says what went wrong.</p>
+{{with .Unconfirmed.Clock}}<p><strong>{{.}}</strong></p>{{end}}
+<p class="muted">The <a href="{{$base}}/certificates/{{.Serial}}">certificate's page</a> shows the record. Nothing needs to be sent again.</p>
+</section>
+{{else if .Unrecorded}}
 <h1>The CA confirmed the revocation</h1>
 <section class="card">
 <p>The CA answered that the certificate is revoked. {{if .Unrecorded.Database}}Its database could not be read afterwards to see the record: {{.Unrecorded.Database}}{{else}}Its database did not show the record when it was read just afterwards.{{end}}</p>

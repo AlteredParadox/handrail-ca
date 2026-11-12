@@ -97,6 +97,12 @@ type revokeData struct {
 	// database did not show afterwards; the page then says so, with no
 	// form.
 	Unrecorded *unrecorded
+	// Unconfirmed is set when the CA's database holds the revocation that
+	// was asked for although the CA's answer was not a confirmation. The
+	// certificate is revoked; the page says so, with what the CA said,
+	// since a CA that reports a failure after recording a revocation may
+	// have left something undone.
+	Unconfirmed *revokeFailure
 }
 
 // unrecorded describes a confirmed revocation whose record was not seen.
@@ -324,6 +330,12 @@ func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 	event.Outcome, event.Detail = outcome.outcome, asked+"; "+outcome.detail
 	s.record(r, event)
 	switch {
+	case outcome.unconfirmed != nil:
+		// Revoked, and the CA said something other than yes. That is not
+		// passed over on the way to the certificate's page: it is shown.
+		data := s.newRevokeData(r, s.opts.Inventory.Snapshot(), c, reason, typedNote)
+		data.Unconfirmed = outcome.unconfirmed
+		s.renderRevoke(w, r, http.StatusOK, data)
 	case rev != nil:
 		// It is revoked, by this request or by another: its page shows the
 		// record, and says which.
@@ -351,7 +363,9 @@ func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 // revoked is what became of a revocation, for the history and the page.
 type revoked struct {
 	outcome, detail string
-	failure         *revokeFailure
+	// failure is set when the certificate was not revoked, or that is not
+	// known; unconfirmed, when it was revoked without the CA's yes.
+	failure, unconfirmed *revokeFailure
 }
 
 // revokeOutcome works out what became of a revocation from what the CA
@@ -381,7 +395,7 @@ func revokeOutcome(sendErr, readErr error, rev *inventory.Revocation, reason int
 		return revoked{outcome: store.OutcomeFailed, failure: failure,
 			detail: "not revoked: " + sendErr.Error() + "; the CA's database held no revocation for it when read afterwards"}
 	case ours(rev, reason, note, started):
-		return revoked{outcome: store.OutcomeOK,
+		return revoked{outcome: store.OutcomeOK, unconfirmed: failure,
 			detail: "the CA's answer was not a confirmation (" + sendErr.Error() + "), but its database holds this revocation"}
 	}
 	return revoked{outcome: store.OutcomeFailed,

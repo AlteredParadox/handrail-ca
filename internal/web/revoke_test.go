@@ -251,9 +251,12 @@ func TestRevokeOutcomes(t *testing.T) {
 	already := &ca.StatusError{Status: 400, Message: "certificate with serial number '101' is already revoked"}
 	lost := errors.New(`Post "https://ca.internal.example:9000/1.0/revoke": context deadline exceeded`)
 	down := errors.New("connection refused")
+	failedAfter := &ca.StatusError{Status: 500, Message: "The certificate authority encountered an Internal Server Error."}
 
 	tests := []struct {
 		name string
+		// prepare sets the site up before anyone signs in.
+		prepare func(s *site)
 		// ca is what the CA does: what it records, and what it answers.
 		ca func(s *site, r ca.Revocation) error
 		// dbDown makes the database unreadable once the request has been
@@ -281,11 +284,43 @@ func TestRevokeOutcomes(t *testing.T) {
 			detail:  "not revoked: the CA answered 401: The request lacked necessary authorization to be completed.; the CA's database held no revocation for it when read afterwards",
 		},
 		{
-			name:     "the answer was lost, and the record is there",
-			ca:       func(s *site, r ca.Revocation) error { s.caRecords(r); return lost },
-			redirect: "/certificates/101?revoked=now#revocation",
-			outcome:  store.OutcomeOK,
-			detail:   "the CA's answer was not a confirmation (" + lost.Error() + "), but its database holds this revocation",
+			// Revoked, and said to be so, but not as confirmed: what the CA
+			// answered is on the page.
+			name:   "the answer was lost, and the record is there",
+			ca:     func(s *site, r ca.Revocation) error { s.caRecords(r); return lost },
+			status: http.StatusOK,
+			page: []string{"Revoked, but the CA did not confirm it", "The CA's database holds the revocation this request asked for",
+				"was not a confirmation: Post &#34;https://ca.internal.example:9000/1.0/revoke&#34;: context deadline exceeded",
+				"If the answer was only lost or late, nothing more is needed.", "The CA's own log says what went wrong.",
+				`<a href="/certificates/101">certificate's page</a>`, "Nothing needs to be sent again."},
+			absent:  []string{"The CA confirmed", `action="/certificates/101/revoke"`, "Revoke this certificate?", "was not revoked", "revocation list"},
+			outcome: store.OutcomeOK,
+			detail:  "the CA's answer was not a confirmation (" + lost.Error() + "), but its database holds this revocation",
+		},
+		{
+			// step-ca records the revocation and then fails to rebuild its
+			// revocation list: the certificate is revoked, the list is not
+			// known to carry it, and the page says both.
+			name:    "recorded, then the CA reported a failure, on a CA with a revocation list",
+			prepare: func(s *site) { s.ca.crl = ca.CRL{Published: true} },
+			ca:      func(s *site, r ca.Revocation) error { s.caRecords(r); return failedAfter },
+			status:  http.StatusOK,
+			page: []string{"Revoked, but the CA did not confirm it", "was not a confirmation: the CA answered 500: The certificate authority encountered an Internal Server Error.",
+				"<strong>This CA publishes a revocation list</strong>, and may rebuild it at that point",
+				"systems that check the list may not see this revocation until it is next rebuilt"},
+			absent:  []string{"The CA confirmed", "could not be determined", `action="/certificates/101/revoke"`},
+			outcome: store.OutcomeOK,
+			detail:  "the CA's answer was not a confirmation (" + failedAfter.Error() + "), but its database holds this revocation",
+		},
+		{
+			name:    "recorded, then the CA reported a failure, and whether there is a list is not known",
+			prepare: func(s *site) { s.ca.crlErr = errors.New("connection refused") },
+			ca:      func(s *site, r ca.Revocation) error { s.caRecords(r); return failedAfter },
+			status:  http.StatusOK,
+			page:    []string{"Revoked, but the CA did not confirm it", "Whether this CA publishes a revocation list could not be determined. If it does, the list may not have been rebuilt"},
+			absent:  []string{"The CA confirmed", "<strong>This CA publishes a revocation list</strong>"},
+			outcome: store.OutcomeOK,
+			detail:  "the CA's answer was not a confirmation (" + failedAfter.Error() + "), but its database holds this revocation",
 		},
 		{
 			name: "revoked by someone else in the meantime",
@@ -333,6 +368,9 @@ func TestRevokeOutcomes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newSite(t, "http://127.0.0.1:8080")
+			if tt.prepare != nil {
+				tt.prepare(s)
+			}
 			b := s.browser()
 			wantRedirect(t, b.signIn("alice", alicePassword), "/")
 			token := tokenIn(t, b.get("/certificates/101/revoke"))
@@ -409,9 +447,14 @@ func TestRevokeOutcomeTellsOursFromAnothers(t *testing.T) {
 		if got.outcome != tt.want || got.failure != nil {
 			t.Errorf("%s: outcome %q (%s), want %q and no failure to show", name, got.outcome, got.detail, tt.want)
 		}
+		// Ours without the CA's yes is never passed off as confirmed: what
+		// the CA said goes with it. Another's has nothing of ours to show.
+		if ours := tt.want == store.OutcomeOK; ours != (got.unconfirmed != nil) || (ours && got.unconfirmed.CA != "no answer") {
+			t.Errorf("%s: unconfirmed = %+v", name, got.unconfirmed)
+		}
 	}
 	// With the CA's confirmation there is nothing to tell apart.
-	if got := revokeOutcome(nil, nil, record(func(r *inventory.Revocation) { r.ReasonCode = 1 }), 4, "rotated", started); got.outcome != store.OutcomeOK {
+	if got := revokeOutcome(nil, nil, record(func(r *inventory.Revocation) { r.ReasonCode = 1 }), 4, "rotated", started); got.outcome != store.OutcomeOK || got.unconfirmed != nil {
 		t.Errorf("confirmed by the CA: %+v", got)
 	}
 	if clockWords(-90*time.Second) != "The CA's clock is 1 minute behind this machine's." {

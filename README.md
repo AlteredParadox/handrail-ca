@@ -83,7 +83,9 @@ started with `-read-only` refuses for everyone.
 The request goes to the CA once. Whatever the CA answers, handrail-ca then
 reads the CA's database again and tells you what it found there: revoked,
 not revoked, or not known because neither the answer nor the database
-could be had. The attempt and the outcome are both written to the history
+could be had. When the database holds the revocation but the CA answered
+with an error, it says both, with the CA's words: a CA that fails after
+recording a revocation may not have rebuilt its revocation list. The attempt and the outcome are both written to the history
 and the log, with who asked and from where. It does not depend on the
 CA's database being readable: if the certificate list is stale, the page
 says so and the revocation still goes to the CA.
