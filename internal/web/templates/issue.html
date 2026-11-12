@@ -65,11 +65,18 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </dl>
 {{range .Differs}}<p class="problem">Not as asked: {{.}}.</p>{{end}}
 <div class="actions">
-{{range .Files}}<a class="button" download="{{.Name}}" href="{{.URL}}">{{.Label}}</a>
+{{range .Files}}<button type="button" class="button" hidden data-save-name="{{.Name}}" data-save-type="{{.Type}}" data-save-body="{{.Body}}">{{.Label}}</button>
 {{end}}</div>
-<p class="sub">The files are inside this page: saving one fetches nothing from handrail-ca.{{if not .PFX}} They can also be copied from below.{{end}}</p>
+<p class="sub" data-save-on hidden>The files are inside this page: saving one fetches nothing from handrail-ca.{{if not .PFX}} They can also be copied from below.{{end}}</p>
+<p class="sub" data-save-off>The buttons that save these as files need JavaScript, which is not running on this page. {{if .PFX}}The PFX file is below as text instead, with how to turn it back into the file.{{else}}Copy the key and the certificate from below instead.{{end}}</p>
+<script src="{{$base}}/static/save.js" defer></script>
 {{if .PFX}}
-<p class="callout info">The PFX file holds the key, the certificate and its chain, and opens with {{if .MadePassword}}the password above{{else}}your password{{end}}. It is not text, so it is not shown here: save it with the button above. {{if .OlderPFX}}<strong>It is the kind for older devices</strong>, protected with Triple DES and SHA-1. That is weak{{if not .MadePassword}}, and a password a person chose can be found from the file quickly{{end}}: treat the file as you would an unprotected key, and delete it once it has been imported.{{else}}It is protected with AES-256, which Windows 10 and Windows Server 2019 or newer, OpenSSL 1.1.1 or newer and Java 12 or newer can read. A device that cannot open it needs the kind for older devices. {{if .MadePassword}}Delete the file once it has been imported.{{else}}Someone who gets hold of the file can try passwords against it about four times as fast as against a PEM key from here, so what protects it is how hard your password is to guess: delete the file once it has been imported.{{end}}{{end}}</p>
+<p class="callout info">The PFX file holds the key, the certificate and its chain, and opens with {{if .MadePassword}}the password above{{else}}your password{{end}}. <span data-save-on hidden>Save it with the button above. </span>{{if .OlderPFX}}<strong>It is the kind for older devices</strong>, protected with Triple DES and SHA-1. That is weak{{if not .MadePassword}}, and a password a person chose can be found from the file quickly{{end}}: treat the file as you would an unprotected key, and delete it once it has been imported.{{else}}It is protected with AES-256, which Windows 10 and Windows Server 2019 or newer, OpenSSL 1.1.1 or newer and Java 12 or newer can read. A device that cannot open it needs the kind for older devices. {{if .MadePassword}}Delete the file once it has been imported.{{else}}Someone who gets hold of the file can try passwords against it about four times as fast as against a PEM key from here, so what protects it is how hard your password is to guess: delete the file once it has been imported.{{end}}{{end}}</p>
+<div data-save-off>
+<h3>PFX file, as base64 text</h3>
+<pre class="pem key">{{.PFXText}}</pre>
+<p class="sub">Copy all of it into a file, say <code>pfx.txt</code>, and turn it back into the PFX file with <code>base64 -d pfx.txt &gt; {{(index .Files 0).Name}}</code> (on Windows, <code>certutil -decode pfx.txt {{(index .Files 0).Name}}</code>).</p>
+</div>
 {{else}}
 <h3>Private key</h3>
 <pre class="pem key">{{.KeyPEM}}</pre>

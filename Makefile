@@ -3,7 +3,7 @@ BINARY := handrail-ca
 # this with the tag; local builds report the git description, or "dev".
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 
-.PHONY: build run test vet notices notices-check license-headers license-check dev-up dev-verify dev-test dev-measure dev-down clean
+.PHONY: build run test vet jscheck notices notices-check license-headers license-check dev-up dev-verify dev-test dev-measure dev-down clean
 
 # `notices` runs FIRST: THIRD_PARTY_LICENSES.md is embedded into the binary
 # (legal.go), so regenerating it here means what ships always matches what
@@ -21,6 +21,28 @@ test:
 vet:
 	@test -z "$$(gofmt -l .)" || (gofmt -l . && exit 1)
 	go vet ./...
+
+# The front end has one script and no build step, so what catches a
+# reference to an undefined name (a ReferenceError at the moment a button
+# is pressed, invisible to `node --check` and to every Go test) is a
+# linter. ESLint is the one npm dependency (owner's decision, 2026-11-12),
+# pinned with its whole tree by package-lock.json and installed with
+# `npm ci` and scripts off, so nothing from the registry runs at install
+# and CI and a release lint with exactly the code the lockfile names.
+# None of it reaches the binary. One package in ESLint's tree ships Go
+# source, which `go vet ./...` and `go test ./...` would take for a package
+# of this module; the go.mod written into node_modules makes Go leave the
+# whole directory alone. Needs node; without npm ESLint is skipped with a
+# notice locally, but under CI that is a failure, never a weaker pass.
+jscheck:
+	node --check internal/web/static/save.js
+	node --test internal/web/save_test.mjs
+	@if command -v npm >/dev/null 2>&1; then \
+		npm ci --ignore-scripts --no-audit --no-fund --silent && \
+		printf 'module node-modules.invalid\n' > node_modules/go.mod && \
+		npm exec --no -- eslint -c scripts/eslint.config.mjs internal/web/static/save.js internal/web/save_test.mjs; \
+	elif [ -n "$$CI" ]; then echo "jscheck: npm not found and CI is set; ESLint is required here" >&2; exit 1; \
+	else echo "jscheck: npm not found, ESLint skipped"; fi
 
 # Regenerate the third-party notices from the modules actually linked in.
 notices:

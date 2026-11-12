@@ -158,7 +158,13 @@ read back here with OpenSSL only.
   certificate does not have this problem, and is the better way wherever
   it is possible.
 - The files are inside the page itself, so saving one asks handrail-ca
-  for nothing: there is no address the key can be fetched from.
+  for nothing: there is no address the key can be fetched from. The
+  buttons are worked by a small script that handrail-ca serves, which
+  saves each file from the page under a random `blob:` name; a browser
+  keeps the address of what it downloads in its history, and that name
+  says nothing. With JavaScript off the buttons are not shown: the key
+  and certificate are copied from the page's text, and a PFX file is
+  given as base64 text with the command that turns it back into the file.
 - If the CA does not answer with a certificate, the key is discarded and
   the page says so. If a certificate for it turns up in the CA's database
   all the same, handrail-ca says that nobody has its key and offers to
@@ -425,6 +431,7 @@ make vet            # gofmt + go vet
 make test           # go test ./...
 make license-check  # every first-party source carries the AGPL notice
 make license-headers  # stamp the notice on new files (git add them first)
+make jscheck        # the page script: syntax, its test, ESLint (needs node and npm)
 make notices        # regenerate THIRD_PARTY_LICENSES.md after a dependency change
 ```
 

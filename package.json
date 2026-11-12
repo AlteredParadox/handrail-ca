@@ -1,0 +1,12 @@
+{
+  "name": "handrail-ca-frontend-checks",
+  "private": true,
+  "description": "Pins the linter `make jscheck` runs on the embedded front end; handrail-ca itself has no JavaScript build or dependencies.",
+  "license": "AGPL-3.0-or-later",
+  "devDependencies": {
+    "eslint": "10.14.0"
+  },
+  "overrides": {
+    "minimatch": "^11.0.5"
+  }
+}

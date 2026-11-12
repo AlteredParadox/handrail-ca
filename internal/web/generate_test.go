@@ -29,6 +29,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"html"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -559,25 +560,26 @@ func TestGenerateAgainAfterAnUnknownOutcome(t *testing.T) {
 	})
 }
 
-var fileLinkOnPage = regexp.MustCompile(`<a class="button" download="([^"]*)" href="data:application/x-p(?:em-file|kcs12);base64,([^"]+)">([^<]*)</a>`)
+var fileLinkOnPage = regexp.MustCompile(`<button type="button" class="button" hidden data-save-name="([^"]*)" data-save-type="application/x-p(?:em-file|kcs12)" data-save-body="([^"]+)">([^<]*)</button>`)
 
 // filesOn are the files a page carries to be saved, by name.
 func filesOn(t *testing.T, body string) (names []string, files map[string]string) {
 	t.Helper()
 	files = map[string]string{}
 	for _, m := range fileLinkOnPage.FindAllStringSubmatch(body, -1) {
-		// As a browser reads the address: the page's escaping undone, then
-		// the address's own, and what is left is the file in base64.
-		address, err := url.PathUnescape(html.UnescapeString(m[2]))
-		if err != nil {
-			t.Fatalf("the address of the file %s does not read: %v", m[1], err)
-		}
-		text, err := base64.StdEncoding.DecodeString(address)
+		// As the page's script reads the attribute: the page's escaping
+		// undone, and what is left is the file in base64.
+		text, err := base64.StdEncoding.DecodeString(html.UnescapeString(m[2]))
 		if err != nil {
 			t.Fatalf("the file %s on the page does not decode: %v", m[1], err)
 		}
 		names = append(names, m[1])
 		files[m[1]] = string(text)
+	}
+	// No file is ever its own address: a browser keeps the addresses of
+	// its downloads, and a private key was found kept that way.
+	if strings.Contains(body, "data:") {
+		t.Error("the page has a data: address in it")
 	}
 	return names, files
 }
@@ -600,7 +602,18 @@ func TestGenerateOffersTheFilesToSave(t *testing.T) {
 	if want := []string{"git-server-01.key", "git-server-01.pem", "git-server-01-chain.pem", "git-server-01-key-and-chain.pem"}; !reflect.DeepEqual(names, want) {
 		t.Fatalf("files offered: %v, want %v", names, want)
 	}
-	wantBody(t, rec, ">Download key</a>", ">Download certificate</a>", ">Download chain</a>", ">Key and chain in one file</a>", "saving one fetches nothing from handrail-ca")
+	wantBody(t, rec, ">Download key</button>", ">Download certificate</button>", ">Download chain</button>", ">Key and chain in one file</button>", "saving one fetches nothing from handrail-ca")
+	// The buttons are worked by the page's script, which is the only one
+	// and comes from handrail-ca itself. Until it has run they are hidden
+	// and the page says what to do without them.
+	wantBody(t, rec, `<script src="/static/save.js" defer></script>`, `<p class="sub" data-save-on hidden>`,
+		`<p class="sub" data-save-off>The buttons that save these as files need JavaScript, which is not running on this page. Copy the key and the certificate from below instead.</p>`)
+	if strings.Count(body, "<script") != 1 {
+		t.Errorf("%d scripts on the page", strings.Count(body, "<script"))
+	}
+	if strings.Contains(b.get("/issue/generate").Body.String(), "<script") {
+		t.Error("the form has a script on it")
+	}
 
 	// The files are what the page shows, to the byte.
 	shown := pemOnPage.FindAllString(html.UnescapeString(regexp.MustCompile(`(?s)<h3>Private key</h3>.*`).FindString(body)), -1)
@@ -721,7 +734,7 @@ func TestGenerateAsAPFXFile(t *testing.T) {
 			rec := b.do(http.MethodPost, "/issue/generate", form)
 			wantStatus(t, rec, http.StatusOK)
 			body := rec.Body.String()
-			wantBody(t, rec, "Save the PFX file now. This page is the only place it is.", "inside a PFX file that opens with the password you gave", ">Download PFX file</a>")
+			wantBody(t, rec, "Save the PFX file now. This page is the only place it is.", "inside a PFX file that opens with the password you gave", ">Download PFX file</button>")
 			wantBody(t, rec, tt.says...)
 			if strings.Contains(body, "ZgotmplZ") {
 				t.Fatal("a link on the page was blanked by the template's own escaping")
@@ -734,8 +747,20 @@ func TestGenerateAsAPFXFile(t *testing.T) {
 			if want := []string{"git.internal.example.pfx", "git.internal.example.pem", "git.internal.example-chain.pem"}; !reflect.DeepEqual(names, want) {
 				t.Fatalf("files offered: %v, want %v", names, want)
 			}
-			if !strings.Contains(body, `download="git.internal.example.pfx" href="data:application/x-pkcs12;base64,`) {
+			if !strings.Contains(body, `data-save-name="git.internal.example.pfx" data-save-type="application/x-pkcs12" data-save-body="`) {
 				t.Error("the PFX file is not offered as one")
+			}
+			// For a browser that does not run the script, the file is on
+			// the page as base64 text, with how to turn it back; it is
+			// the same file.
+			wantBody(t, rec, "The PFX file is below as text instead", "<h3>PFX file, as base64 text</h3>", "base64 -d pfx.txt &gt; git.internal.example.pfx", "certutil -decode pfx.txt git.internal.example.pfx")
+			text := regexp.MustCompile(`(?s)<h3>PFX file, as base64 text</h3>\s*<pre class="pem key">([^<]+)</pre>`).FindStringSubmatch(body)
+			if text == nil {
+				t.Fatal("the PFX file is not on the page as text")
+			}
+			asText, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(html.UnescapeString(text[1]), "\n", ""))
+			if err != nil || string(asText) != files["git.internal.example.pfx"] {
+				t.Errorf("the PFX file as text is not the file the button saves (%v)", err)
 			}
 
 			// The file opens with the password, and holds the certificate's
@@ -848,7 +873,7 @@ func TestGenerateWhenThePFXFileCannotBeMade(t *testing.T) {
 	rec := b.do(http.MethodPost, "/issue/generate", form)
 	wantStatus(t, rec, http.StatusOK)
 	wantBody(t, rec, "The PFX file that was asked for could not be made", "The key is handed over below as PEM instead, encrypted with the same password.",
-		"Save the private key now.", ">Download key</a>")
+		"Save the private key now.", ">Download key</button>")
 	blocks := pemBlocks(t, rec.Body.String())
 	if len(blocks) != 4 || blocks[0].Type != "ENCRYPTED PRIVATE KEY" {
 		t.Fatalf("%d PEM blocks, the first a %q", len(blocks), blocks[0].Type)
@@ -1041,6 +1066,60 @@ func TestGenerateMadePasswordRefusals(t *testing.T) {
 	rec = b.do(http.MethodPost, "/issue/generate", form)
 	if rec.Code == http.StatusOK || madePassword.MatchString(rec.Body.String()) {
 		t.Errorf("answered %d, or with a password for a key that was thrown away", rec.Code)
+	}
+}
+
+// The script that saves the files is served by handrail-ca as a script,
+// and neither it nor any page makes a file its own address: a browser
+// keeps the addresses of its downloads in its history, and Chromium was
+// found to keep a whole private key that way.
+func TestNoFileIsItsOwnAddress(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	rec := s.browser().get("/static/save.js")
+	wantStatus(t, rec, http.StatusOK)
+	if got := rec.Header().Get("Content-Type"); !strings.HasPrefix(got, "text/javascript") {
+		t.Errorf("the script is served as %q", got)
+	}
+	script := rec.Body.String()
+	for _, want := range []string{"URL.createObjectURL(new Blob(", "URL.revokeObjectURL(address)", `button.getAttribute("data-save-body")`} {
+		if !strings.Contains(script, want) {
+			t.Errorf("the script does not have %q in it", want)
+		}
+	}
+	entries, err := fs.ReadDir(templateFS, "templates")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sources := map[string]string{"static/save.js": strings.Join(regexp.MustCompile(`(?s)/\*.*?\*/|//[^\n]*`).Split(script, -1), "")}
+	for _, e := range entries {
+		text, err := fs.ReadFile(templateFS, "templates/"+e.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		sources["templates/"+e.Name()] = string(text)
+	}
+	if len(sources) < 5 {
+		t.Fatalf("only %d sources read", len(sources))
+	}
+	for name, text := range sources {
+		if strings.Contains(text, "data:") {
+			t.Errorf("%s has a data: address in it", name)
+		}
+	}
+	// And nothing in the package can mark an address as safe to put on a
+	// page unescaped, which is what a data: link needed.
+	files, err := filepath.Glob("*.go")
+	if err != nil || len(files) < 10 {
+		t.Fatalf("%d Go files found: %v", len(files), err)
+	}
+	for _, name := range files {
+		text, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.HasSuffix(name, "_test.go") && strings.Contains(string(text), "template.URL") {
+			t.Errorf("%s uses template.URL", name)
+		}
 	}
 }
 
