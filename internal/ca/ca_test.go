@@ -554,6 +554,36 @@ func TestProvisioners(t *testing.T) {
 	}
 }
 
+// A provisioner's own certificate template is read from the list, as
+// step-ca 0.30.2 sends it for a provisioner given one with
+// `--x509-template`, or for one whose template is a file on the CA.
+func TestProvisionerTemplates(t *testing.T) {
+	f := newFakeCA(t)
+	f.mux.HandleFunc("GET /provisioners", rawRoute(`{"provisioners":[
+ {"type":"JWK","name":"plain","options":{"x509":{},"ssh":{}}},
+ {"type":"JWK","name":"none"},
+ {"type":"JWK","name":"inline","options":{"x509":{"template":"{\n\t\"subject\": {{ toJson .Insecure.CR.Subject }},\n\t\"sans\": {{ toJson .SANs }}\n}\n"},"ssh":{}}},
+ {"type":"JWK","name":"file","options":{"x509":{"templateFile":"templates/leaf.tpl"}}},
+ {"type":"JWK","name":"huge","options":{"x509":{"template":"`+strings.Repeat("x", maxTemplate+100)+`"}}}
+]}`))
+	got, err := f.client(t).Provisioners(context.Background())
+	if err != nil || len(got) != 5 {
+		t.Fatalf("%d provisioners, %v", len(got), err)
+	}
+	if got[0].HasTemplate() || got[1].HasTemplate() {
+		t.Errorf("provisioners without a template are said to have one: %+v %+v", got[0], got[1])
+	}
+	if !got[2].HasTemplate() || got[2].Template != "{\n\t\"subject\": {{ toJson .Insecure.CR.Subject }},\n\t\"sans\": {{ toJson .SANs }}\n}\n" {
+		t.Errorf("inline template = %q", got[2].Template)
+	}
+	if !got[3].HasTemplate() || got[3].Template != "" || got[3].TemplateFile != "templates/leaf.tpl" {
+		t.Errorf("template in a file: %+v", got[3])
+	}
+	if !got[4].HasTemplate() || len(got[4].Template) > maxTemplate+100 || !strings.HasSuffix(got[4].Template, "(the rest is not shown)") {
+		t.Errorf("an enormous template is kept at %d bytes", len(got[4].Template))
+	}
+}
+
 func TestProvisionersFollowsPages(t *testing.T) {
 	f := newFakeCA(t)
 	pages := map[string]string{

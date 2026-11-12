@@ -175,6 +175,11 @@ func (s *server) session(r *http.Request) (*signedInUser, error) {
 // is sent to the sign-in page. A posted form must also carry the session's
 // form token.
 func (s *server) signedIn(next http.HandlerFunc) http.HandlerFunc {
+	return s.signedInUpTo(maxForm, next)
+}
+
+// signedInUpTo is signedIn for a form that may be larger than the others.
+func (s *server) signedInUpTo(limit int64, next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		u, err := s.session(r)
@@ -189,8 +194,14 @@ func (s *server) signedIn(next http.HandlerFunc) http.HandlerFunc {
 		}
 		r = r.WithContext(context.WithValue(r.Context(), contextKey{}, u))
 		if r.Method != http.MethodGet && r.Method != http.MethodHead {
-			r.Body = http.MaxBytesReader(w, r.Body, maxForm)
-			if err := r.ParseForm(); err != nil || !validFormToken(u.token, r.PostForm.Get("form_token")) {
+			r.Body = http.MaxBytesReader(w, r.Body, limit)
+			err := r.ParseForm()
+			var tooLarge *http.MaxBytesError
+			if errors.As(err, &tooLarge) {
+				s.errorPage(w, r, http.StatusRequestEntityTooLarge, "What was sent is larger than this form takes.")
+				return
+			}
+			if err != nil || !validFormToken(u.token, r.PostForm.Get("form_token")) {
 				s.errorPage(w, r, http.StatusForbidden, "This form was not sent from a page of your current session. Go back, reload the page and try again.")
 				return
 			}

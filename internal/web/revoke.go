@@ -150,6 +150,15 @@ func (s *server) mayRevoke(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
+// canAct reports whether the signed-in user may change anything on the
+// CA through handrail-ca: an operator, on a handrail-ca that has a
+// provisioner. The pages use it to decide what to offer; the handlers
+// refuse for themselves.
+func (s *server) canAct(r *http.Request) bool {
+	u := currentUser(r)
+	return u != nil && u.user.Role == store.RoleOperator && s.opts.CA.ProvisionerState().Configured
+}
+
 // revocable finds the certificate a revocation is asked for. It works from
 // the inventory's picture alone: the page must come up while the CA's
 // database is down, which is when a certificate may most need revoking.

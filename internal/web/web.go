@@ -72,6 +72,9 @@ type CA interface {
 	// Revoke asks the CA to record a certificate as revoked. An error does
 	// not mean it was not: see ca.Client.Revoke.
 	Revoke(ctx context.Context, r ca.Revocation) error
+	// Sign asks the CA to sign a request that ca.ReadRequest has read. An
+	// error does not mean no certificate was issued: see ca.Client.Sign.
+	Sign(ctx context.Context, r *ca.Request, validity time.Duration) (*ca.Issued, error)
 }
 
 // Store is what the pages need from the store (*store.Store).
@@ -156,6 +159,9 @@ type server struct {
 	// historyBroken is set while the last history write failed; every page
 	// then says that history is not being recorded.
 	historyBroken atomic.Bool
+
+	// issues keeps a signing form sent twice from giving two certificates.
+	issues recentIssues
 }
 
 // New returns the handler for the whole site.
@@ -238,6 +244,8 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("POST /account/password", s.signedIn(s.changePassword))
 	mux.HandleFunc("GET /{$}", s.signedIn(s.listPage))
 	mux.HandleFunc("POST /refresh", s.signedIn(s.refreshInventory))
+	mux.HandleFunc("GET /issue", s.signedIn(s.issueForm))
+	mux.HandleFunc("POST /issue", s.signedInUpTo(maxIssueForm, s.issue))
 	mux.HandleFunc("GET /names", s.signedIn(s.namesPage))
 	mux.HandleFunc("GET /history", s.signedIn(s.historyPage))
 	mux.HandleFunc("GET /certificates/{serial}", s.signedIn(s.detailPage))

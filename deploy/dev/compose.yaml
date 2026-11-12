@@ -53,6 +53,7 @@ services:
       - ca-data:/home/step
       - ./ca-entrypoint.sh:/dev-entrypoint.sh:ro
       - ./seed.sh:/dev-seed.sh:ro
+      - ./leaf-subject.tpl:/dev-leaf-subject.tpl:ro
     networks:
       default:
         # The CA's own name, and the names the seed's ACME requests are

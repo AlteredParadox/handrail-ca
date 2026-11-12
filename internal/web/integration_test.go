@@ -20,6 +20,10 @@ import (
 	"bytes"
 	"context"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"fmt"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -226,4 +230,173 @@ func TestIntegrationRevokeThroughThePages(t *testing.T) {
 	if len(events) != 2 || events[1].Outcome != "ok" || !strings.HasSuffix(events[1].Detail, "confirmed by the CA and recorded in its database") {
 		t.Errorf("history: %+v", events)
 	}
+}
+
+// devSite is the test site with the real CA client, acting through the
+// named provisioner of the development CA, and the real inventory.
+func devSite(t *testing.T, provisioner string) (*site, *ca.Client, *inventory.Inventory) {
+	t.Helper()
+	caURL, fingerprint := os.Getenv("HANDRAIL_DEV_CA_URL"), os.Getenv("HANDRAIL_DEV_CA_FINGERPRINT")
+	pwFile, dbFile := os.Getenv("HANDRAIL_DEV_PROVISIONER_PASSWORD_FILE"), os.Getenv("HANDRAIL_DEV_DB_URL_FILE")
+	if caURL == "" || fingerprint == "" || pwFile == "" || dbFile == "" {
+		t.Skip("no development CA: run `make dev-up` and `make dev-test`")
+	}
+	pw, err := os.ReadFile(pwFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := ca.New(ca.Config{URL: caURL, Fingerprint: fingerprint, Provisioner: &ca.ProvisionerConfig{Name: provisioner, Password: strings.TrimSpace(string(pw))}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newSite(t, "http://127.0.0.1:8080")
+	s.server.opts.CA = client
+	// The site's clock is fixed in the past; what is issued here is dated
+	// by the real CA, so the pages need the real time.
+	s.server.opts.Now = time.Now
+	conn, err := os.ReadFile(dbFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := inventory.OpenPostgres(string(conn), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(db.Close)
+	inv := inventory.New(db)
+	if err := inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	s.server.opts.Inventory = inv
+	return s, client, inv
+}
+
+var issuedPage = regexp.MustCompile(`^/certificates/(\d+)\?issued=(\w+)$`)
+
+// Issuing through the pages, against the development CA: a request is
+// pasted, read, signed for a week, and the certificate that the CA's own
+// database then holds is the one the page said it would be, with a chain
+// that verifies to the root. The whole path: the form, the provisioner's
+// key, the token, step-ca, the re-read of its database, the history.
+func TestIntegrationIssueThroughThePages(t *testing.T) {
+	s, client, inv := devSite(t, "handrail")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+
+	first := b.get("/issue")
+	wantStatus(t, first, http.StatusOK)
+	// The limits are the development CA's: a longest of ninety days set
+	// on the provisioner, the rest left to the CA.
+	wantBody(t, first, "<dt>Longest</dt><dd>90 days</dd>", `<dt>Default</dt><dd><span class="muted">The CA's own</span></dd>`)
+
+	name := fmt.Sprintf("pages-%d.handrail.test", time.Now().UnixNano()%1_000_000_000)
+	csr := newCSR(t, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: name, Organization: []string{"Example Org"}}, DNSNames: []string{name}, IPAddresses: []net.IP{net.ParseIP("10.20.6.1")},
+	})
+	page, form := b.readCSR(csr)
+	for _, want := range []string{"<dt>Common name</dt><dd>" + name + "</dd>", "10.20.6.1", "Only the common name of the subject is kept.",
+		`<option value="2160h0m0s">90 days (the longest this provisioner allows)</option>`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page lacks %q", want)
+		}
+	}
+	if strings.Contains(page, "certificate template of its own") || strings.Contains(page, "365 days") {
+		t.Error("the page speaks of a template the provisioner does not have, or offers more than its longest validity")
+	}
+
+	form.Set("validity", "168h0m0s")
+	rec := b.do(http.MethodPost, "/issue", form)
+	m := issuedPage.FindStringSubmatch(rec.Header().Get("Location"))
+	if rec.Code != http.StatusSeeOther || m == nil || m[2] != "now" {
+		t.Fatalf("signing: %d to %q; body: %.400s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	serial := m[1]
+
+	// The certificate's page, from the CA's database.
+	cert := b.get("/certificates/" + serial + "?issued=now")
+	wantStatus(t, cert, http.StatusOK)
+	wantBody(t, cert, "<h1>"+name+"</h1>", "Issued. This is the certificate the CA signed for the request.", "10.20.6.1", ">Not revoked<",
+		"7 days", `<span class="strong">alice</span> Issue <span class="badge ok">Done</span>`)
+	if strings.Contains(cert.Body.String(), "Example Org") {
+		t.Error("the certificate carries the organisation, which the default template drops")
+	}
+	if inv.Snapshot().Certificate(serial) == nil {
+		t.Fatal("the certificate is not in the inventory after issuing")
+	}
+	chain := parsePEM(t, b.get("/certificates/"+serial+"/chain").Body.Bytes())
+	if len(chain) != 2 {
+		t.Fatalf("the chain has %d certificates", len(chain))
+	}
+	root, err := client.Root(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, inters := x509.NewCertPool(), x509.NewCertPool()
+	roots.AddCert(root)
+	inters.AddCert(chain[1])
+	if _, err := chain[0].Verify(x509.VerifyOptions{Roots: roots, Intermediates: inters, DNSName: name, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		t.Errorf("the issued certificate does not verify for its name: %v", err)
+	}
+	if d := chain[0].NotAfter.Sub(chain[0].NotBefore); d != 7*24*time.Hour+time.Minute {
+		t.Errorf("validity = %s, want the week asked for and the CA's minute", d)
+	}
+	block, _ := pem.Decode([]byte(csr))
+	request, _ := x509.ParseCertificateRequest(block.Bytes)
+	if !bytes.Equal(chain[0].RawSubjectPublicKeyInfo, request.RawSubjectPublicKeyInfo) {
+		t.Error("the certificate is not for the request's key")
+	}
+
+	events := s.issueEvents()
+	if len(events) != 2 || events[1].Outcome != "ok" || events[1].Serial != serial || !strings.Contains(events[1].Detail, "validity: 7 days; issued, valid until ") {
+		t.Errorf("history: %+v", events)
+	}
+
+	// The same form again: no second certificate.
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/"+serial+"?issued=before")
+
+	// A name the CA's policy does not allow is refused in the CA's words,
+	// and nothing is issued.
+	_, outside := b.readCSR(newCSR(t, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "outside.example.org"}, DNSNames: []string{"outside.example.org"}}))
+	rec = b.do(http.MethodPost, "/issue", outside)
+	wantStatus(t, rec, http.StatusBadGateway)
+	wantBody(t, rec, "No certificate was issued", "The CA refused the request", "dns name &#34;outside.example.org&#34; not allowed")
+	// Longer than the provisioner allows is refused here, before the CA
+	// is asked.
+	_, long := b.readCSR(newCSR(t, &x509.CertificateRequest{Subject: pkix.Name{CommonName: name}, DNSNames: []string{name}}))
+	long.Set("validity", "custom")
+	long.Set("custom_n", "91")
+	long.Set("custom_unit", "days")
+	rec = b.do(http.MethodPost, "/issue", long)
+	wantStatus(t, rec, http.StatusUnprocessableEntity)
+	wantBody(t, rec, "longest validity is 90 days")
+}
+
+// Through the development CA's provisioner that has the guide's template:
+// the page says there is a template, shows it, and the certificate comes
+// back with the request's whole subject, which is not reported as a
+// difference.
+func TestIntegrationIssueUnderATemplate(t *testing.T) {
+	s, _, _ := devSite(t, "handrail-template")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	name := fmt.Sprintf("tpl-%d.handrail.test", time.Now().UnixNano()%1_000_000_000)
+	page, form := b.readCSR(newCSR(t, &x509.CertificateRequest{
+		Subject: pkix.Name{CommonName: name, Organization: []string{"Example Org"}, Country: []string{"DE"}}, DNSNames: []string{name},
+	}))
+	for _, want := range []string{"This provisioner has a certificate template of its own on the CA.", "{{ toJson .Insecure.CR.Subject }}",
+		"<dt>Request's subject</dt><dd>CN=" + name + ",O=Example Org,C=DE</dd>"} {
+		if !strings.Contains(page, want) {
+			t.Errorf("the page lacks %q", want)
+		}
+	}
+	if strings.Contains(page, "Only the common name of the subject is kept") {
+		t.Error("the page says the subject will be cut down, under a template that keeps it")
+	}
+	rec := b.do(http.MethodPost, "/issue", form)
+	m := issuedPage.FindStringSubmatch(rec.Header().Get("Location"))
+	if rec.Code != http.StatusSeeOther || m == nil || m[2] != "now" {
+		t.Fatalf("signing: %d to %q; body: %.400s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	cert := b.get("/certificates/" + m[1])
+	wantBody(t, cert, "CN="+name+",O=Example Org,C=DE", "handrail-template <span")
 }

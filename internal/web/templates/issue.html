@@ -1,0 +1,184 @@
+<!--
+handrail-ca — a lightweight web UI for step-ca.
+Copyright (C) 2026 AlteredParadox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+{{define "content"}}
+{{$base := .Base}}{{$token := .FormToken}}
+{{with .Data}}
+<div class="page-head">
+<div>
+<h1>Issue a certificate</h1>
+<p class="muted">Signed by the CA through the <span class="strong ink">{{.Provisioner}}</span> provisioner.</p>
+</div>
+</div>
+
+{{if .Unlisted}}
+<section class="card">
+<div class="card-head"><h2>The CA issued the certificate</h2><span class="badge ok">Issued</span></div>
+<dl>
+<dt>Subject</dt><dd>{{.Unlisted.Subject}}</dd>
+<dt>Serial</dt><dd class="mono small">{{.Unlisted.Serial}}</dd>
+<dt>Expires</dt><dd>{{.Unlisted.Expires}}</dd>
+</dl>
+<p class="callout warn"><strong>Copy it from this page.</strong> {{if .Unlisted.Database}}The CA's database could not be read afterwards ({{.Unlisted.Database}}){{else}}The CA's database did not show it when it was read just afterwards{{end}}, so handrail-ca has no page for it yet. It will be in the certificate list once the database has been read.</p>
+<h3>Certificate</h3>
+<pre class="pem">{{.Unlisted.PEM}}</pre>
+<h3>Certificate and chain</h3>
+<pre class="pem">{{.Unlisted.Chain}}</pre>
+</section>
+{{else}}
+
+{{with .Failure}}
+<section class="card failure" role="alert">
+{{if .NotSent}}
+<h2>No certificate was issued</h2>
+<p>The request could not be sent to the CA: {{.CA}}</p>
+<p>Nothing was changed. The <a href="{{$base}}/status">CA status</a> page says what handrail-ca can and cannot reach.</p>
+{{else if and .Unknown .Database}}
+<h2>It is not known whether a certificate was issued</h2>
+<p>The request was sent, and no certificate came back: {{.CA}}</p>
+<p>The CA's database could not be read to see whether one was issued all the same: {{.Database}}</p>
+<p>Before signing again, look at the <a href="{{$base}}/status">CA status</a> page and, once the list is being read again, at the <a href="{{$base}}/">certificates</a>. Signing again would give a second certificate if the first was issued.</p>
+{{else if .Unknown}}
+<h2>It is not known yet whether a certificate was issued</h2>
+<p>The request was sent, and no certificate came back: {{.CA}}</p>
+<p>The CA's database held no new certificate for this request's key when it was read just afterwards. That does not settle it: the CA may have received the request and still be working on it.</p>
+<p>Look at the <a href="{{$base}}/?sort=issued">newest certificates</a> in a minute. If there is none for this request then, sign again.</p>
+{{else}}
+<h2>No certificate was issued</h2>
+<p>The CA refused the request: {{.CA}}</p>
+{{with .OddCommonName}}<p>The CA gives no reason with this answer; its own log has it. One cause is known. The request's common name, <span class="mono">{{.}}</span>, cannot be read as a name, and a CA with a name policy answers like this for such a common name unless the policy allows it by itself. The setup guide, section 2, has the command for the CA's administrator.</p>{{end}}
+{{end}}
+{{with .Clock}}<p><strong>{{.}}</strong> The CA only accepts a request stamped within a minute of its own time, so nothing handrail-ca asks will be accepted until the clocks agree.</p>{{end}}
+</section>
+{{end}}
+
+<div class="split">
+<form method="post" action="{{$base}}/issue" class="main-col">
+<input type="hidden" name="form_token" value="{{$token}}">
+
+<section class="card">
+<div>
+<h2>1. Paste the certificate signing request</h2>
+<p class="sub">The private key stays where the request was made. handrail-ca never sees it.</p>
+</div>
+{{if and .Problem (not .Request)}}<p class="problem" role="alert">Not read: {{.Problem}}.</p>{{end}}
+<div class="field">
+<label for="csr">CSR in PEM format</label>
+<textarea id="csr" name="csr" rows="9" class="mono" spellcheck="false" autocomplete="off" required>{{.CSR}}</textarea>
+</div>
+<div><button type="submit" name="step" value="read" class="secondary">{{if .Request}}Read it again{{else}}Read request{{end}}</button></div>
+</section>
+
+{{with .Request}}
+<section class="card">
+<div>
+<h2>2. Check what will be signed</h2>
+<p class="sub">Read from the request above. This is what handrail-ca will ask the CA to put in the certificate.</p>
+</div>
+<dl>
+<dt>Common name</dt><dd>{{.CommonName}}{{if .CommonNameFromName}} <span class="sub">taken from the names: the request has no common name, and the CA wants one</span>{{end}}</dd>
+{{range .Names}}<dt>{{.Label}}</dt><dd><ul class="names">{{range .Values}}<li class="mono small">{{.}}</li>{{end}}</ul></dd>
+{{end}}
+{{if .RequestSubject}}<dt>Request's subject</dt><dd>{{.RequestSubject}}</dd>{{end}}
+<dt>Public key</dt><dd>{{.PublicKey}}</dd>
+<dt>Request signature</dt><dd class="good">Valid</dd>
+</dl>
+{{if .CommonNameApart}}<p class="callout info">The common name is not one of the request's names. A CA with a name policy holds the common name to that policy too: it has to be a name the policy allows, or be allowed by itself. The setup guide, section 2, says how.</p>{{end}}
+{{if .NameAdded}}<p class="callout info">The request lists no names of its own. The certificate will carry its common name as its one name.</p>{{end}}
+{{if .SubjectNotCopied}}<p class="callout warn"><strong>Only the common name of the subject is kept.</strong> The request's subject is <span class="mono">{{.SubjectNotCopied}}</span>; the CA's default certificate template drops the rest. If the certificate needs it, the CA's administrator has to give this provisioner a template (the setup guide says how).</p>{{end}}
+{{if or $.Data.Template $.Data.TemplateFile}}
+<p class="callout info"><strong>This provisioner has a certificate template of its own on the CA.</strong> The template decides the certificate's subject, its usages, and what else it takes from the request. The names are still held to the CA's name policy. After signing, the certificate's page says where it differs from the names above.</p>
+{{if $.Data.Template}}<details><summary>The template, as the CA publishes it</summary><pre class="pem">{{$.Data.Template}}</pre></details>
+{{else}}<p class="sub">The template is a file on the CA's host (<span class="mono">{{$.Data.TemplateFile}}</span>); the CA does not publish its text.</p>{{end}}
+{{else}}
+<p class="sub">Key usage and other extensions are set by the CA, for a server and a client certificate both. What the request asks for beyond its names is not copied.</p>
+{{end}}
+</section>
+
+<section class="card">
+<h2>3. Choose how long it is valid</h2>
+{{if $.Data.Problem}}<p class="problem" role="alert">Not signed: {{$.Data.Problem}}.</p>{{end}}
+<div class="validity">
+<div class="field short">
+<label for="validity">Validity</label>
+<select id="validity" name="validity">
+{{range $.Data.Validities}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+{{end}}
+</select>
+</div>
+<div class="field tiny">
+<label for="custom_n">Another length</label>
+<input id="custom_n" name="custom_n" type="text" inputmode="numeric" value="{{$.Data.CustomN}}" autocomplete="off">
+</div>
+<div class="field tiny">
+<label for="custom_unit">In</label>
+<select id="custom_unit" name="custom_unit">
+<option value="days"{{if ne $.Data.CustomUnit "hours"}} selected{{end}}>days</option>
+<option value="hours"{{if eq $.Data.CustomUnit "hours"}} selected{{end}}>hours</option>
+</select>
+</div>
+</div>
+<p class="sub">Counted from the moment the CA signs. The CA dates the start one minute back, so the certificate is valid a minute longer than this.</p>
+</section>
+
+<input type="hidden" name="checked" value="{{$.Data.Checked}}">
+<div class="actions">
+<button type="submit" name="step" value="sign" class="primary wide">Sign certificate</button>
+<a class="cancel" href="{{$base}}/">Cancel</a>
+</div>
+{{end}}
+</form>
+
+<aside class="side-col">
+<section class="card">
+<h2>Provisioner limits</h2>
+{{if .Limits.Problem}}
+<p class="problem">The provisioner's limits could not be read from the CA: {{.Limits.Problem}}</p>
+<p class="sub">A request outside them is refused by the CA.</p>
+{{else}}
+<dl>
+<dt>Provisioner</dt><dd>{{.Provisioner}} <span class="sub">JWK</span></dd>
+<dt>Shortest</dt><dd>{{if .Limits.Shortest}}{{.Limits.Shortest}}{{else}}<span class="muted">The CA's own</span>{{end}}</dd>
+<dt>Default</dt><dd>{{if .Limits.Default}}{{.Limits.Default}}{{else}}<span class="muted">The CA's own</span>{{end}}</dd>
+<dt>Longest</dt><dd>{{if .Limits.Longest}}{{.Limits.Longest}}{{else}}<span class="muted">The CA's own</span>{{end}}</dd>
+</dl>
+<p class="sub">These are set on the CA, not here. Where the provisioner sets none, the CA's own limit applies (5 minutes at the shortest and 24 hours otherwise, unless its configuration says differently), and a request outside it is refused by the CA.</p>
+{{end}}
+</section>
+<section class="card">
+<h2>Making a CSR</h2>
+<p class="sub">On the machine that will use the certificate, with the step CLI:</p>
+<pre class="code">step certificate create \
+  git.internal.example \
+  git.csr git.key --csr \
+  --san git.internal.example \
+  --san 10.20.0.14 \
+  --no-password --insecure</pre>
+<p class="sub">Leave the last line out to have the key encrypted with a password. Or with OpenSSL:</p>
+<pre class="code">openssl req -new -nodes \
+  -newkey ec -pkeyopt ec_paramgen_curve:P-256 \
+  -keyout git.key -out git.csr \
+  -subj "/CN=git.internal.example" \
+  -addext "subjectAltName=DNS:git.internal.example,IP:10.20.0.14"</pre>
+<p class="sub">Paste the <span class="mono">.csr</span> file here. The <span class="mono">.key</span> file never leaves that machine.</p>
+</section>
+</aside>
+</div>
+{{end}}
+{{end}}
+{{end}}

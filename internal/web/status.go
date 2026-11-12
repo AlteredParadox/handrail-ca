@@ -66,6 +66,9 @@ type caSnapshot struct {
 
 	Provisioners        []provisionerView
 	ProvisionersProblem string
+	// listed is the same list as the CA sent it, for the pages that need
+	// more of a provisioner than the status page shows.
+	listed []ca.Provisioner
 
 	CRL        ca.CRL
 	CRLNext    string
@@ -189,6 +192,7 @@ func readCA(ctx context.Context, client CA, now time.Time) *caSnapshot {
 	for _, cert := range inters {
 		snap.Intermediates = append(snap.Intermediates, newCertView(cert, now))
 	}
+	snap.listed = provisioners
 	for _, p := range provisioners {
 		snap.Provisioners = append(snap.Provisioners, provisionerView{
 			Name: p.Name, Type: p.Type,
