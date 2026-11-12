@@ -383,6 +383,83 @@ func TestRevokeFailures(t *testing.T) {
 		if err == nil || errors.As(err, &se) {
 			t.Errorf("err = %v, want a failure that is not an answer", err)
 		}
+		// Nothing listens there any more: the request went nowhere, and
+		// the error says so.
+		var notSent *NotSentError
+		if !errors.As(err, &notSent) {
+			t.Errorf("err = %#v, want a NotSentError", err)
+		}
+	})
+}
+
+// Only a failure that kept the request from being sent says so. A request
+// the CA received, and this client gave up waiting on, may yet be acted
+// on: its error must not claim otherwise.
+func TestRevokeSaysWhenNothingWasSent(t *testing.T) {
+	notSent := func(err error) bool {
+		var e *NotSentError
+		return errors.As(err, &e)
+	}
+	ctx := context.Background()
+
+	t.Run("the CA has the request and does not answer in time", func(t *testing.T) {
+		f := newFakeCA(t)
+		f.lists(newTestProvisioner(t, "P-256", "").entry())
+		received, done := make(chan struct{}), make(chan struct{})
+		t.Cleanup(func() { close(done) })
+		f.mux.HandleFunc("POST /1.0/revoke", func(_ http.ResponseWriter, r *http.Request) {
+			_, _ = io.ReadAll(r.Body)
+			close(received)
+			<-done
+		})
+		c, err := New(Config{URL: f.srv.URL, Fingerprint: Fingerprint(f.pki.root), Timeout: 300 * time.Millisecond,
+			Provisioner: &ProvisionerConfig{Name: "handrail", Password: testPassword}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		err = c.Revoke(ctx, Revocation{Serial: "5"})
+		<-received
+		if err == nil || notSent(err) {
+			t.Errorf("err = %#v, want a failure that does not claim the request was never sent", err)
+		}
+	})
+	t.Run("the CA answered", func(t *testing.T) {
+		f := newFakeCA(t)
+		f.lists(newTestProvisioner(t, "P-256", "").entry())
+		rec := f.revocations()
+		rec.status, rec.answer = 500, "boom"
+		if err := f.acting(t, testPassword, nil).Revoke(ctx, Revocation{Serial: "5"}); err == nil || notSent(err) {
+			t.Errorf("err = %#v, want an answer, not a NotSentError", err)
+		}
+	})
+	t.Run("the key could not be opened", func(t *testing.T) {
+		f := newFakeCA(t)
+		f.lists(newTestProvisioner(t, "P-256", "").entry())
+		rec := f.revocations()
+		if err := f.acting(t, "not the password", nil).Revoke(ctx, Revocation{Serial: "5"}); !notSent(err) {
+			t.Errorf("err = %#v, want a NotSentError", err)
+		}
+		rec.sent(t, 0)
+	})
+	t.Run("the server is not the CA", func(t *testing.T) {
+		f := newFakeCA(t)
+		c, err := New(Config{URL: f.srv.URL, Fingerprint: Fingerprint(newTestPKI(t).root), Timeout: 5 * time.Second,
+			Provisioner: &ProvisionerConfig{Name: "handrail", Password: testPassword}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := c.Revoke(ctx, Revocation{Serial: "5"}); !notSent(err) {
+			t.Errorf("err = %#v, want a NotSentError", err)
+		}
+	})
+	t.Run("not a revocation this client sends", func(t *testing.T) {
+		f := newFakeCA(t)
+		if err := f.acting(t, testPassword, nil).Revoke(ctx, Revocation{Serial: "0x10"}); !notSent(err) {
+			t.Errorf("err = %#v, want a NotSentError", err)
+		}
+		if err := f.client(t).Revoke(ctx, Revocation{Serial: "5"}); !notSent(err) || !errors.Is(err, ErrNoProvisioner) {
+			t.Errorf("without a provisioner: %#v", err)
+		}
 	})
 }
 

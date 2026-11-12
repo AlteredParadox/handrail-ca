@@ -231,17 +231,21 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, limit i
 
 // postJSON sends one JSON body to the CA over the pinned connection and
 // returns the answer. It is sent once: nothing here retries, since a
-// request that changes the CA must have its outcome checked first.
+// request that changes the CA must have its outcome checked first. A
+// failure that kept the request from being sent at all is a NotSentError.
 func (c *Client) postJSON(ctx context.Context, path string, body any, limit int64) ([]byte, error) {
 	hc, err := c.client(ctx)
 	if err != nil {
-		return nil, err
+		return nil, &NotSentError{Err: err}
 	}
 	sent, err := json.Marshal(body)
 	if err != nil {
-		return nil, err
+		return nil, &NotSentError{Err: err}
 	}
 	_, answer, err := c.send(ctx, hc, http.MethodPost, path, nil, sent, limit)
+	if err != nil && neverLeft(err) {
+		err = &NotSentError{Err: err}
+	}
 	return answer, err
 }
 

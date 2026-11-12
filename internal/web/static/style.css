@@ -554,6 +554,7 @@ table.certs th[aria-sort="descending"] a::after {
 }
 
 .actions {
+  align-items: center;
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -684,10 +685,6 @@ label .ink {
 input.mono {
   font-family: var(--mono);
   font-size: 14px;
-}
-
-.actions {
-  align-items: center;
 }
 
 button.danger {

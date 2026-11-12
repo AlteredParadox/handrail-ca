@@ -82,8 +82,10 @@ started with `-read-only` refuses for everyone.
 
 The request goes to the CA once. Whatever the CA answers, handrail-ca then
 reads the CA's database again and tells you what it found there: revoked,
-not revoked, or not known because neither the answer nor the database
-could be had. When the database holds the revocation but the CA answered
+not revoked, or not known. "Not revoked" is said only when the CA refused
+or the request could not be sent at all. If no answer came back, the page
+says it is not known yet and to look again in a minute, even when the
+database shows nothing: the CA may still be working on the request. When the database holds the revocation but the CA answered
 with an error, it says both, with the CA's words: a CA that fails after
 recording a revocation may not have rebuilt its revocation list. The attempt and the outcome are both written to the history
 and the log, with who asked and from where. It does not depend on the
