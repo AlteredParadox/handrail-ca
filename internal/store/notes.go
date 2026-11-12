@@ -110,30 +110,37 @@ func ParseLabels(typed string) ([]string, error) {
 
 // Note returns what is recorded about a certificate. A certificate nobody
 // has written about has an empty note, which is not an error.
+//
+// The text and the labels come from one statement, so they are as one
+// save left them: read apart, a save landing in between would pair one
+// note's text and author with another's labels.
 func (s *Store) Note(ctx context.Context, serial string) (Note, error) {
 	n := Note{Serial: serial}
-	var at int64
-	err := s.db.QueryRowContext(ctx, `SELECT note, updated_at, updated_by FROM cert_notes WHERE serial = ?`, serial).Scan(&n.Text, &at, &n.UpdatedBy)
-	if errors.Is(err, sql.ErrNoRows) {
-		return n, nil
-	}
-	if err != nil {
-		return Note{}, err
-	}
-	n.UpdatedAt = unix(at)
-	rows, err := s.db.QueryContext(ctx, `SELECT label FROM cert_labels WHERE serial = ? ORDER BY label`, serial)
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT n.note, n.updated_at, n.updated_by, l.label
+		  FROM cert_notes n
+		  LEFT JOIN cert_labels l ON l.serial = n.serial
+		 WHERE n.serial = ?
+		 ORDER BY l.label`, serial)
 	if err != nil {
 		return Note{}, err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var label string
-		if err := rows.Scan(&label); err != nil {
+		var at int64
+		var label sql.NullString
+		if err := rows.Scan(&n.Text, &at, &n.UpdatedBy, &label); err != nil {
 			return Note{}, err
 		}
-		n.Labels = append(n.Labels, label)
+		n.UpdatedAt = unix(at)
+		if label.Valid {
+			n.Labels = append(n.Labels, label.String)
+		}
 	}
-	return n, rows.Err()
+	if err := rows.Err(); err != nil {
+		return Note{}, err
+	}
+	return n, nil
 }
 
 // SetNote replaces what is recorded about a certificate: its text and all

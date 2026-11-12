@@ -40,6 +40,9 @@ import (
 // maxShownNames is how many names of each kind the detail page lists.
 const maxShownNames = 200
 
+// stamp is how the detail page writes a moment.
+const stamp = "2006-01-02 15:04 UTC"
+
 // detailData is what a certificate's page shows.
 type detailData struct {
 	Serial      string // decimal: the certificate's address in handrail-ca
@@ -196,7 +199,7 @@ func (s *server) noteFor(r *http.Request, serial string) *noteView {
 	view.Text, view.Labels = note.Text, note.Labels
 	view.Typed, view.TypedLabels = note.Text, strings.Join(note.Labels, ", ")
 	if !note.UpdatedAt.IsZero() {
-		view.Updated = note.UpdatedAt.UTC().Format("2006-01-02 15:04 UTC") + " by " + note.UpdatedBy
+		view.Updated = note.UpdatedAt.UTC().Format(stamp) + " by " + note.UpdatedBy
 	}
 	return view
 }
@@ -281,7 +284,6 @@ func (s *server) saveNote(w http.ResponseWriter, r *http.Request) {
 
 // fillCertificate puts what the certificate itself says into data.
 func fillCertificate(data *detailData, cert *x509.Certificate, now time.Time) {
-	const stamp = "2006-01-02 15:04 UTC"
 	data.CommonName = cert.Subject.CommonName
 	data.Subject = cert.Subject.String()
 	data.Issuer = cert.Issuer.CommonName
@@ -398,7 +400,7 @@ func newRevocationView(rev *inventory.Revocation, known []inventory.ProvisionerC
 		}
 	}
 	if !rev.RevokedAt.IsZero() {
-		v.When = rev.RevokedAt.UTC().Format("2006-01-02 15:04 UTC")
+		v.When = rev.RevokedAt.UTC().Format(stamp)
 	}
 	v.Reason = revocationReasons[rev.ReasonCode]
 	if v.Reason == "" {

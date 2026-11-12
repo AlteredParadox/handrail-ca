@@ -191,3 +191,46 @@ func TestOpenAddsNotesToAnOlderStore(t *testing.T) {
 		t.Errorf("a note after the upgrade: %v", err)
 	}
 }
+
+// A note read while another save replaces it is one save's or the
+// other's: never one's text with the other's labels.
+func TestNoteIsReadWhole(t *testing.T) {
+	s := newStore(t)
+	ctx := context.Background()
+	versions := []Note{
+		{Serial: "101", Text: "first", Labels: []string{"a", "b"}, UpdatedAt: t0, UpdatedBy: "alice"},
+		{Serial: "101", Text: "second", Labels: []string{"c"}, UpdatedAt: t0.Add(time.Hour), UpdatedBy: "bob"},
+	}
+	if err := s.SetNote(ctx, versions[0]); err != nil {
+		t.Fatal(err)
+	}
+	stop := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				done <- nil
+				return
+			default:
+			}
+			if err := s.SetNote(ctx, versions[i%2]); err != nil {
+				done <- err
+				return
+			}
+		}
+	}()
+	for range 300 {
+		n, err := s.Note(ctx, "101")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !reflect.DeepEqual(n, versions[0]) && !reflect.DeepEqual(n, versions[1]) {
+			t.Fatalf("a note that was never saved: %+v", n)
+		}
+	}
+	close(stop)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
