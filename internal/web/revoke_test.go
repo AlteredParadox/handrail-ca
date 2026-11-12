@@ -212,7 +212,7 @@ func TestRevokeRefusals(t *testing.T) {
 	if events := s.revokeEvents(); len(events) != 0 {
 		t.Errorf("history has revocations nobody made: %+v", events)
 	}
-	if rev := s.inv.Snapshot().Revocation("101"); rev != nil {
+	if s.inv.Snapshot().Revocation("101") != nil {
 		t.Error("the certificate is revoked")
 	}
 }
@@ -252,6 +252,8 @@ func TestRevokeOutcomes(t *testing.T) {
 	lost := errors.New(`Post "https://ca.internal.example:9000/1.0/revoke": context deadline exceeded`)
 	down := errors.New("connection refused")
 	failedAfter := &ca.StatusError{Status: 500, Message: "The certificate authority encountered an Internal Server Error."}
+	gateway := &ca.StatusError{Status: 504}
+	unsent := &ca.NotSentError{Err: errors.New("dial tcp 10.20.0.2:9000: connect: connection refused")}
 
 	tests := []struct {
 		name string
@@ -274,14 +276,59 @@ func TestRevokeOutcomes(t *testing.T) {
 			name:   "refused, and nothing recorded",
 			ca:     func(*site, ca.Revocation) error { return refused },
 			status: http.StatusBadGateway,
-			page: []string{"The certificate was not revoked", "The CA did not confirm the request: the CA answered 401: The request lacked necessary authorization",
+			page: []string{"The certificate was not revoked", "The CA refused the request: the CA answered 401: The request lacked necessary authorization",
 				"holds no revocation for this certificate. Nothing was changed.",
 				"The CA&#39;s clock is 5 minutes ahead of this machine&#39;s.", "within a minute of its own time",
 				// The form is there to send again, with the note kept.
 				`action="/certificates/101/revoke"`, `value="rotated"`, `<option value="4" selected>`},
-			absent:  []string{"It is not known", "The CA confirmed"},
+			absent:  []string{"It is not known", "The CA confirmed", "could not be sent"},
 			outcome: store.OutcomeFailed,
 			detail:  "not revoked: the CA answered 401: The request lacked necessary authorization to be completed.; the CA's database held no revocation for it when read afterwards",
+		},
+		{
+			// No answer, and no record at the one look taken: the CA may
+			// still be at it. Nothing here says "not revoked".
+			name:   "no answer, and no record yet",
+			ca:     func(*site, ca.Revocation) error { return lost },
+			status: http.StatusBadGateway,
+			page: []string{"It is not known yet whether the certificate was revoked", "no answer came back from the CA: Post &#34;https://ca.internal.example:9000/1.0/revoke&#34;: context deadline exceeded",
+				"held no revocation for this certificate when it was read just afterwards. That does not settle it",
+				`Look at the <a href="/certificates/101">certificate's page</a> in a minute.`, "Sending it again is safe either way",
+				`action="/certificates/101/revoke"`},
+			absent:  []string{"The certificate was not revoked", "Nothing was changed", "could not be read", "The CA refused"},
+			outcome: store.OutcomeUnknown,
+			detail:  "not confirmed: " + lost.Error() + "; the CA's database held no revocation for it when read just afterwards, which does not settle it",
+		},
+		{
+			// A proxy in front of the CA gave up waiting: the same.
+			name:    "a gateway timed out, and no record yet",
+			ca:      func(*site, ca.Revocation) error { return gateway },
+			status:  http.StatusBadGateway,
+			page:    []string{"It is not known yet whether the certificate was revoked", "the CA answered 504"},
+			absent:  []string{"The certificate was not revoked", "Nothing was changed"},
+			outcome: store.OutcomeUnknown,
+			detail:  "not confirmed: the CA answered 504; the CA's database held no revocation for it when read just afterwards, which does not settle it",
+		},
+		{
+			// Never sent: certain, with or without the database.
+			name:   "the request could not be sent, and the database cannot be read",
+			ca:     func(*site, ca.Revocation) error { return unsent },
+			dbDown: true,
+			status: http.StatusBadGateway,
+			page: []string{"The certificate was not revoked", "The request could not be sent to the CA: dial tcp 10.20.0.2:9000: connect: connection refused",
+				"Nothing was changed.", `action="/certificates/101/revoke"`},
+			absent:  []string{"It is not known", "The CA refused", "Its database"},
+			outcome: store.OutcomeFailed,
+			detail:  "not revoked: the request could not be sent: dial tcp 10.20.0.2:9000: connect: connection refused",
+		},
+		{
+			name:    "the request could not be sent",
+			ca:      func(*site, ca.Revocation) error { return unsent },
+			status:  http.StatusBadGateway,
+			page:    []string{"The certificate was not revoked", "The request could not be sent to the CA", "Nothing was changed."},
+			absent:  []string{"It is not known"},
+			outcome: store.OutcomeFailed,
+			detail:  "not revoked: the request could not be sent: dial tcp 10.20.0.2:9000: connect: connection refused",
 		},
 		{
 			// Revoked, and said to be so, but not as confirmed: what the CA
@@ -408,6 +455,47 @@ func TestRevokeOutcomes(t *testing.T) {
 	}
 }
 
+// A request the CA was slow with: handrail-ca gives up waiting, finds no
+// record, and says it does not know yet. The CA then finishes. The next
+// read of its database shows the revocation, and nothing was ever said
+// that this contradicts.
+func TestRevocationThatLandsAfterThePageSaidNotKnown(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	token := tokenIn(t, b.get("/certificates/101/revoke"))
+	var late ca.Revocation
+	s.ca.revoke = func(_ context.Context, r ca.Revocation) error {
+		late = r
+		return errors.New(`Post "https://ca.internal.example:9000/1.0/revoke": context deadline exceeded (Client.Timeout exceeded while awaiting headers)`)
+	}
+	rec := b.do(http.MethodPost, "/certificates/101/revoke", revokeFormValues(token, "1", "", "web1.internal.example"))
+	wantStatus(t, rec, http.StatusBadGateway)
+	wantBody(t, rec, "It is not known yet whether the certificate was revoked")
+	for _, absent := range []string{"was not revoked", "Nothing was changed"} {
+		if strings.Contains(rec.Body.String(), absent) {
+			t.Errorf("the page says %q of a request the CA may still complete", absent)
+		}
+	}
+	if events := s.revokeEvents(); len(events) != 2 || events[1].Outcome != store.OutcomeUnknown {
+		t.Fatalf("history: %+v", events)
+	}
+	wantBody(t, b.get("/certificates/101"), ">Not revoked<")
+
+	// The CA gets there in the end, and the next read shows it.
+	s.clock.advance(20 * time.Second)
+	s.caRecords(late)
+	if err := s.inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantBody(t, b.get("/certificates/101"), `<span class="badge bad">Revoked</span>`, "Key compromise")
+	// Sent again in the meantime, it is not sent twice.
+	wantRedirect(t, b.do(http.MethodPost, "/certificates/101/revoke", revokeFormValues(token, "1", "", "web1.internal.example")), "/certificates/101")
+	if len(s.ca.sent()) != 1 {
+		t.Errorf("the CA was asked %d times", len(s.ca.sent()))
+	}
+}
+
 // The page of a certificate found revoked by someone else says whose
 // record it is showing.
 func TestRevokedBeforeTheRequest(t *testing.T) {
@@ -452,6 +540,12 @@ func TestRevokeOutcomeTellsOursFromAnothers(t *testing.T) {
 		if ours := tt.want == store.OutcomeOK; ours != (got.unconfirmed != nil) || (ours && got.unconfirmed.CA != "no answer") {
 			t.Errorf("%s: unconfirmed = %+v", name, got.unconfirmed)
 		}
+	}
+	// A request that was never sent did not make any record, whatever the
+	// record looks like.
+	unsent := &ca.NotSentError{Err: failed}
+	if got := revokeOutcome(unsent, nil, record(func(*inventory.Revocation) {}), 4, "rotated", started); got.outcome != store.OutcomeFailed || got.unconfirmed != nil || got.failure != nil {
+		t.Errorf("never sent, with a record that looks like ours: %+v", got)
 	}
 	// With the CA's confirmation there is nothing to tell apart.
 	if got := revokeOutcome(nil, nil, record(func(r *inventory.Revocation) { r.ReasonCode = 1 }), 4, "rotated", started); got.outcome != store.OutcomeOK || got.unconfirmed != nil {
@@ -568,7 +662,7 @@ func TestRevokeIsSeenThroughWhenTheBrowserLeaves(t *testing.T) {
 	}
 	b.ctx = gone
 	b.do(http.MethodPost, "/certificates/101/revoke", revokeFormValues(token, "1", "", "web1.internal.example"))
-	if rev := s.inv.Snapshot().Revocation("101"); rev == nil {
+	if s.inv.Snapshot().Revocation("101") == nil {
 		t.Error("the revocation was given up, or the database was not read afterwards")
 	}
 	if events := s.revokeEvents(); len(events) != 2 || events[1].Outcome != store.OutcomeOK {
