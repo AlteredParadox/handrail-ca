@@ -19,8 +19,10 @@ package ca
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -165,6 +167,37 @@ func ReadRequest(pemText string) (*Request, error) {
 		r.SubjectNotCopied = clip(whole)
 	}
 	return r, nil
+}
+
+// NewRequest makes a certificate signing request for a key, with a common
+// name and names typed by a person, and reads it back as ReadRequest
+// would: what comes out is checked like any pasted request, and says what
+// the certificate will carry. Each name is put in the request as the kind
+// the CA will take it for (see splitNames), so the two agree. The common
+// name may be empty if there are names.
+func NewRequest(key crypto.Signer, commonName string, names []string) (*Request, error) {
+	if len(names) > maxRequestNames {
+		return nil, fmt.Errorf("%d names, more than the %d handrail-ca asks for in one certificate", len(names), maxRequestNames)
+	}
+	tmpl := &x509.CertificateRequest{}
+	tmpl.Subject.CommonName = commonName
+	dns, ips, emails, uris := splitNames(names)
+	tmpl.DNSNames, tmpl.EmailAddresses = dns, emails
+	for _, ip := range ips {
+		tmpl.IPAddresses = append(tmpl.IPAddresses, net.ParseIP(ip))
+	}
+	for _, u := range uris {
+		parsed, err := url.Parse(u)
+		if err != nil {
+			return nil, fmt.Errorf("the name %q is not a URI", clip(u))
+		}
+		tmpl.URIs = append(tmpl.URIs, parsed)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
+	if err != nil {
+		return nil, fmt.Errorf("the request could not be made: %v", err)
+	}
+	return ReadRequest(string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der})))
 }
 
 // nameOnly is how a subject holding only this common name prints.

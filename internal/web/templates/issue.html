@@ -16,6 +16,30 @@ You should have received a copy of the GNU Affero General Public License
 along with this program. If not, see <https://www.gnu.org/licenses/>.
 -->
 
+{{define "validity"}}
+<div class="validity">
+<div class="field short">
+<label for="validity">Validity</label>
+<select id="validity" name="validity">
+{{range .Validities}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+{{end}}
+</select>
+</div>
+<div class="field tiny">
+<label for="custom_n">Another length</label>
+<input id="custom_n" name="custom_n" type="text" inputmode="numeric" value="{{.CustomN}}" autocomplete="off">
+</div>
+<div class="field tiny">
+<label for="custom_unit">In</label>
+<select id="custom_unit" name="custom_unit">
+<option value="days"{{if ne .CustomUnit "hours"}} selected{{end}}>days</option>
+<option value="hours"{{if eq .CustomUnit "hours"}} selected{{end}}>hours</option>
+</select>
+</div>
+</div>
+<p class="sub">Counted from the moment the CA signs. The CA dates the start one minute back, so the certificate is valid a minute longer than this.</p>
+{{end}}
+
 {{define "content"}}
 {{$base := .Base}}{{$token := .FormToken}}
 {{with .Data}}
@@ -26,7 +50,28 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </div>
 </div>
 
-{{if .Unlisted}}
+{{if .Generated}}
+{{with .Generated}}
+<section class="card">
+<div class="card-head"><h2>The certificate and its private key</h2><span class="badge ok">Issued</span></div>
+<p class="callout warn"><strong>Save the private key now. This page is the only place it is.</strong> handrail-ca made it for this one answer and has not kept it: not in its store, not in its log. Leave or reload this page and it is gone, and the certificate with it is of no use. Reloading does not make another.</p>
+<dl>
+<dt>Subject</dt><dd>{{if .Subject}}{{.Subject}}{{else}}<span class="muted">Empty</span>{{end}}</dd>
+<dt>Serial</dt><dd class="mono small">{{.Serial}}</dd>
+<dt>Expires</dt><dd>{{.Expires}}</dd>
+<dt>Key</dt><dd>{{.Kind}}, not encrypted</dd>
+</dl>
+{{range .Differs}}<p class="problem">Not as asked: {{.}}.</p>{{end}}
+<h3>Private key</h3>
+<pre class="pem key">{{.KeyPEM}}</pre>
+<h3>Certificate</h3>
+<pre class="pem">{{.PEM}}</pre>
+<h3>Certificate and chain</h3>
+<pre class="pem">{{.Chain}}</pre>
+<p class="sub">The key is in PKCS #8 PEM with no password: keep it readable by the service that uses it and by nobody else. {{if .URL}}The certificate, without its key, can be had again from <a href="{{.URL}}">its page</a>.{{else}}The certificate will be in the list once the CA's database has been read again.{{end}}</p>
+</section>
+{{end}}
+{{else if .Unlisted}}
 <section class="card">
 <div class="card-head"><h2>The CA issued the certificate</h2><span class="badge ok">Issued</span></div>
 <dl>
@@ -41,6 +86,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <pre class="pem">{{.Unlisted.Chain}}</pre>
 </section>
 {{else}}
+
+{{if .CanGenerate}}
+<nav class="modes" aria-label="How to provide the key">
+<a class="button{{if not .Generate}} on{{end}}" href="{{$base}}/issue"{{if not .Generate}} aria-current="true"{{end}}>I have a CSR</a>
+<a class="button{{if .Generate}} on{{end}}" href="{{$base}}/issue/generate"{{if .Generate}} aria-current="true"{{end}}>Generate a key for me</a>
+</nav>
+{{end}}
 
 {{with .Failure}}
 <section class="card failure" role="alert">
@@ -63,11 +115,53 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <p>The CA refused the request: {{.CA}}</p>
 {{with .OddCommonName}}<p>The CA gives no reason with this answer; its own log has it. One cause is known. The request's common name, <span class="mono">{{.}}</span>, cannot be read as a name, and a CA with a name policy answers like this for such a common name unless the policy allows it by itself. The setup guide, section 2, has the command for the CA's administrator.</p>{{end}}
 {{end}}
+{{if .KeyDiscarded}}<p>The key handrail-ca made for this request has been discarded. {{if .Unknown}}If a certificate does turn up, it is for that key, which nobody has: revoke it.{{else}}Sending the form again makes a new one.{{end}}</p>{{end}}
 {{with .Clock}}<p><strong>{{.}}</strong> The CA only accepts a request stamped within a minute of its own time, so nothing handrail-ca asks will be accepted until the clocks agree.</p>{{end}}
 </section>
 {{end}}
 
 <div class="split">
+{{if .Generate}}
+<form method="post" action="{{$base}}/issue/generate" class="main-col">
+<input type="hidden" name="form_token" value="{{$token}}">
+<input type="hidden" name="once" value="{{.Generate.Once}}">
+
+<section class="card">
+<div>
+<h2>1. Describe the certificate</h2>
+<p class="sub">handrail-ca creates the key pair and the request for you.</p>
+</div>
+<p class="callout warn">The private key is created on this server, shown to you once on the next page, and never stored or logged. Save it before you leave that page. If you can make a CSR on the machine that will use the certificate, that is the safer path: the key then never leaves that machine.</p>
+{{if .Problem}}<p class="problem" role="alert">Nothing was made or sent: {{.Problem}}.</p>{{end}}
+<div class="field">
+<label for="common_name">Common name</label>
+<input id="common_name" name="common_name" type="text" value="{{.Generate.CommonName}}" maxlength="256" autocomplete="off" spellcheck="false">
+</div>
+<div class="field">
+<label for="names">Names and addresses, one per line</label>
+<textarea id="names" name="names" rows="4" class="mono" spellcheck="false" autocomplete="off">{{.Generate.Names}}</textarea>
+<p class="sub">DNS names, IP addresses, email addresses, URIs. With none, the certificate carries the common name as its one name; with no common name, it takes the first name as one.</p>
+</div>
+<div class="field short">
+<label for="key">Key type</label>
+<select id="key" name="key">
+{{range .Generate.Kinds}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+{{end}}
+</select>
+</div>
+</section>
+
+<section class="card">
+<h2>2. Choose how long it is valid</h2>
+{{template "validity" .}}
+</section>
+
+<div class="actions">
+<button type="submit" class="primary wide">Generate key and sign</button>
+<a class="cancel" href="{{$base}}/">Cancel</a>
+</div>
+</form>
+{{else}}
 <form method="post" action="{{$base}}/issue" class="main-col">
 <input type="hidden" name="form_token" value="{{$token}}">
 
@@ -113,27 +207,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <section class="card">
 <h2>3. Choose how long it is valid</h2>
 {{if $.Data.Problem}}<p class="problem" role="alert">Not signed: {{$.Data.Problem}}.</p>{{end}}
-<div class="validity">
-<div class="field short">
-<label for="validity">Validity</label>
-<select id="validity" name="validity">
-{{range $.Data.Validities}}<option value="{{.Value}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
-{{end}}
-</select>
-</div>
-<div class="field tiny">
-<label for="custom_n">Another length</label>
-<input id="custom_n" name="custom_n" type="text" inputmode="numeric" value="{{$.Data.CustomN}}" autocomplete="off">
-</div>
-<div class="field tiny">
-<label for="custom_unit">In</label>
-<select id="custom_unit" name="custom_unit">
-<option value="days"{{if ne $.Data.CustomUnit "hours"}} selected{{end}}>days</option>
-<option value="hours"{{if eq $.Data.CustomUnit "hours"}} selected{{end}}>hours</option>
-</select>
-</div>
-</div>
-<p class="sub">Counted from the moment the CA signs. The CA dates the start one minute back, so the certificate is valid a minute longer than this.</p>
+{{template "validity" $.Data}}
 </section>
 
 <input type="hidden" name="checked" value="{{$.Data.Checked}}">
@@ -143,6 +217,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </div>
 {{end}}
 </form>
+{{end}}
 
 <aside class="side-col">
 <section class="card">
@@ -159,6 +234,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </dl>
 <p class="sub">These are set on the CA, not here. Where the provisioner sets none, the CA's own limit applies (5 minutes at the shortest and 24 hours otherwise, unless its configuration says differently), and a request outside it is refused by the CA.</p>
 {{end}}
+{{if and .Generate (or .Template .TemplateFile)}}<p class="sub">This provisioner has a certificate template of its own on the CA, which decides the certificate's subject and usages.</p>{{end}}
 </section>
 <section class="card">
 <h2>Making a CSR</h2>
@@ -175,7 +251,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
   -keyout git.key -out git.csr \
   -subj "/CN=git.internal.example" \
   -addext "subjectAltName=DNS:git.internal.example,IP:10.20.0.14"</pre>
-<p class="sub">Paste the <span class="mono">.csr</span> file here. The <span class="mono">.key</span> file never leaves that machine.</p>
+<p class="sub">Paste the <span class="mono">.csr</span> file {{if .Generate}}under "I have a CSR"{{else}}here{{end}}. The <span class="mono">.key</span> file never leaves that machine.</p>
 </section>
 </aside>
 </div>

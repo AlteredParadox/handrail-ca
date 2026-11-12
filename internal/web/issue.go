@@ -83,6 +83,13 @@ type issueData struct {
 	// Unlisted is set when the CA issued a certificate that the inventory
 	// does not have yet: the page then hands it over itself.
 	Unlisted *unlistedView
+
+	// CanGenerate says the other way of issuing is on: handrail-ca making
+	// the key. Generate is its form, when that is the page shown, and
+	// Generated its one answer.
+	CanGenerate bool
+	Generate    *generateView
+	Generated   *generatedView
 }
 
 type requestView struct {
@@ -120,6 +127,8 @@ type limitsView struct {
 type issueFailure struct {
 	NotSent, Unknown    bool
 	CA, Clock, Database string
+	// KeyDiscarded is set when handrail-ca had made the key: it is gone.
+	KeyDiscarded bool
 	// OddCommonName is the request's common name, set when the CA
 	// answered with an error that gives no reason and the common name is
 	// one a name policy cannot read as a name: the one cause of that
@@ -226,7 +235,8 @@ func (s *server) newIssueData(r *http.Request, csr string, chosen string) (issue
 		Provisioner: s.opts.CA.ProvisionerState().Name, CSR: csr,
 		CustomN: r.PostForm.Get("custom_n"), CustomUnit: r.PostForm.Get("custom_unit"),
 		Template: p.Template, TemplateFile: p.TemplateFile,
-		Limits: limitsView{Problem: problem},
+		Limits:      limitsView{Problem: problem},
+		CanGenerate: !s.opts.NoKeyGeneration,
 	}
 	if d := p.Claims.MinTLSCertDuration; d > 0 {
 		data.Limits.Shortest = validity(d)

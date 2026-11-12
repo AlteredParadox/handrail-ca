@@ -17,8 +17,9 @@ page: after a confirmation that names the certificate and says what
 revoking will and will not do on your CA. Operators can issue a certificate
 for a certificate signing request: paste it, check what will be signed,
 choose how long it is valid. A history page lists what was done through
-handrail-ca, by whom and from where. Having handrail-ca make the key for
-you is not built yet; the [build plan](docs/PLAN.md) has the order.
+handrail-ca, by whom and from where. Where a request cannot be made on
+the machine itself, handrail-ca can make the key and show it once. The
+[build plan](docs/PLAN.md) has what comes next.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.
@@ -61,6 +62,7 @@ export HANDRAIL_PROVISIONER_PASSWORD_FILE=/etc/handrail-ca/provisioner_password
 | `-provisioner` | `HANDRAIL_PROVISIONER` | Name of the JWK provisioner on the CA that handrail-ca acts through. The CA must hold that provisioner's encrypted key, which is how `step ca provisioner add --create` leaves it. |
 | `-provisioner-password-file` | `HANDRAIL_PROVISIONER_PASSWORD_FILE` | File holding that provisioner's password. handrail-ca fetches the encrypted key from the CA, opens it with this password and keeps it in memory only. Keep the file readable by handrail-ca's user alone. |
 | `-read-only` | `HANDRAIL_READ_ONLY=1` | View only: no provisioner is used, and nothing can be issued or revoked. One of this and the two settings above is required; giving both is refused. |
+| `-no-key-generation` | `HANDRAIL_NO_KEY_GENERATION=1` | Do not offer to generate private keys. Certificates are then issued for pasted certificate signing requests only. |
 | `-listen` | `HANDRAIL_LISTEN` | Listen address; `127.0.0.1:8080` unless set. |
 | `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. |
 | `-trusted-proxy` | `HANDRAIL_TRUSTED_PROXIES` | Addresses or CIDR ranges of the reverse proxies in front, comma-separated. Set it whenever there is one. |
@@ -111,6 +113,30 @@ and "no certificate was issued" is said only when the CA refused or
 nothing was sent; otherwise handrail-ca looks for a new certificate with
 the request's key before saying it does not know. The same form sent
 twice gives one certificate.
+
+#### When handrail-ca makes the key
+
+The Issue page has a second way, "Generate a key for me", for a device
+that cannot make a request of its own. You type the common name and the
+names, choose a kind of key (ECDSA P-256 or P-384, Ed25519, RSA 3072) and
+a validity, and handrail-ca makes the key pair and the request, has the CA
+sign it, and answers with one page that holds the private key, the
+certificate and its chain.
+
+- That page is the only place the key ever is. It is not written to
+  handrail-ca's store or log, and it is not kept in memory after the page
+  has been sent. Leave the page and the key is gone; reloading it does not
+  bring it back, and does not make another.
+- The key is shown as unencrypted PKCS #8 PEM, over the connection to your
+  browser. Anyone who can read that connection, the browser's memory or
+  the screen has it. A request made on the machine that will use the
+  certificate does not have this problem, and is the better way wherever
+  it is possible.
+- If the CA does not answer with a certificate, the key is discarded and
+  the page says so. If a certificate for it turns up in the CA's database
+  all the same, handrail-ca says that nobody has its key and offers to
+  revoke it.
+- `-no-key-generation` switches this way off.
 
 ### Revoking
 

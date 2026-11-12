@@ -552,3 +552,55 @@ func TestReadRequestKeepsTheRequestWhole(t *testing.T) {
 		t.Error("the request to be sent is not the request that was read")
 	}
 }
+
+// A request made here from what a person typed reads back as what they
+// typed, each name as the kind the CA will take it for.
+func TestNewRequest(t *testing.T) {
+	key := newKey(t, "P-256")
+	r, err := NewRequest(key, "git.internal.example", []string{"git.internal.example", "git", "10.20.0.14", "2001:db8::1", "ops@internal.example", "spiffe://internal.example/app"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := Request{
+		CommonName: "git.internal.example", DNSNames: []string{"git.internal.example", "git"}, IPAddresses: []string{"10.20.0.14", "2001:db8::1"},
+		EmailAddresses: []string{"ops@internal.example"}, URIs: []string{"spiffe://internal.example/app"},
+		sans: []string{"git.internal.example", "git", "10.20.0.14", "2001:db8::1", "ops@internal.example", "spiffe://internal.example/app"},
+	}
+	if !reflect.DeepEqual(r.CSR.PublicKey, key.Public()) || r.CSR.CheckSignature() != nil {
+		t.Error("the request is not for the key, or not signed with it")
+	}
+	if len(r.CSR.IPAddresses) != 2 || len(r.CSR.URIs) != 1 || len(r.CSR.EmailAddresses) != 1 || len(r.CSR.DNSNames) != 2 {
+		t.Errorf("the request's own names: %v %v %v %v", r.CSR.DNSNames, r.CSR.IPAddresses, r.CSR.EmailAddresses, r.CSR.URIs)
+	}
+	r.CSR, r.PEM = nil, ""
+	if !reflect.DeepEqual(*r, want) {
+		t.Errorf("read back as\n%+v\nwant\n%+v", *r, want)
+	}
+
+	// The shapes ReadRequest tells apart, made here.
+	if r, err := NewRequest(key, "", []string{"a.internal.example"}); err != nil || !r.CommonNameFromName || r.CommonName != "a.internal.example" {
+		t.Errorf("names and no common name: %+v, %v", r, err)
+	}
+	if r, err := NewRequest(key, "a.internal.example", nil); err != nil || !r.NameAdded || len(r.DNSNames) != 1 {
+		t.Errorf("a common name and no names: %+v, %v", r, err)
+	}
+	for name, tt := range map[string]struct {
+		cn    string
+		names []string
+		want  string
+	}{
+		"nothing":         {"", nil, "no common name and no names"},
+		"too many names":  {"a", make([]string, maxRequestNames+1), "more than the 100"},
+		"a name too long": {"a", []string{strings.Repeat("a", maxRequestName+1)}, "a name longer than"},
+	} {
+		if _, err := NewRequest(key, tt.cn, tt.names); err == nil || !strings.Contains(err.Error(), tt.want) {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+	// Every kind of key that is offered makes a request the CA signs for.
+	for _, kind := range []string{"P-384", "Ed25519", "RSA"} {
+		if _, err := NewRequest(newKey(t, kind), "a.internal.example", nil); err != nil {
+			t.Errorf("a %s key: %v", kind, err)
+		}
+	}
+}

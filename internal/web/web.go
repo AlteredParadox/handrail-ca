@@ -129,6 +129,9 @@ type Options struct {
 	// learn the client's address.
 	TrustedProxies []netip.Prefix
 	Log            *slog.Logger
+	// NoKeyGeneration switches off the way of issuing in which
+	// handrail-ca makes the private key.
+	NoKeyGeneration bool
 	// Now is the clock; nil means time.Now.
 	Now func() time.Time
 }
@@ -160,8 +163,10 @@ type server struct {
 	// then says that history is not being recorded.
 	historyBroken atomic.Bool
 
-	// issues keeps a signing form sent twice from giving two certificates.
+	// issues keeps a signing form sent twice from giving two certificates,
+	// and onces a key-generating form from making two keys.
 	issues recentIssues
+	onces  usedForms
 }
 
 // New returns the handler for the whole site.
@@ -246,6 +251,8 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("POST /refresh", s.signedIn(s.refreshInventory))
 	mux.HandleFunc("GET /issue", s.signedIn(s.issueForm))
 	mux.HandleFunc("POST /issue", s.signedInUpTo(maxIssueForm, s.issue))
+	mux.HandleFunc("GET /issue/generate", s.signedIn(s.generateForm))
+	mux.HandleFunc("POST /issue/generate", s.signedIn(s.generate))
 	mux.HandleFunc("GET /names", s.signedIn(s.namesPage))
 	mux.HandleFunc("GET /history", s.signedIn(s.historyPage))
 	mux.HandleFunc("GET /certificates/{serial}", s.signedIn(s.detailPage))

@@ -268,7 +268,7 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	// an address anyone can write must not make an old one look fresh.
 	if said := r.URL.Query().Get("issued"); now.Sub(cert.NotBefore) < justIssued+5*time.Minute && now.After(cert.NotBefore.Add(-5*time.Minute)) {
 		switch said {
-		case "now", "differs", "found", "before":
+		case "now", "differs", "found", "before", "keyless":
 			data.JustIssued = said
 		}
 	}
