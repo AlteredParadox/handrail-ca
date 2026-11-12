@@ -694,7 +694,9 @@ As built in milestone 1:
 permissions. The schema carries a version and is migrated forward on start;
 a binary older than the file refuses to open it. History rows are only ever
 appended. A backup is a copy of the file taken with SQLite's own backup
-command, which the deployment notes will give.
+command, which the README gives ("Backing up"): tried against a running
+handrail-ca, a plain copy of the file lacked an account added a moment
+before, and the backup command's copy had it and started a server.
 
 **Audit.** Every sign-in, issue and revoke, attempted and completed, is
 written to the store's history and as one structured log line: who, what,
@@ -962,13 +964,23 @@ Milestone 4 is complete with this. Not built in it: renewing or
 re-issuing an existing certificate from its page.
 
 **M5. First release, v0.1.0.**
-- Deployment documentation: creating the provisioner with its name policy
-  and lifetime cap, the read-only database account (`GRANT SELECT` on three
-  tables), reverse proxy and container examples, backing up the store, what
-  revocation means. [ca-setup.md](ca-setup.md) is the start of it.
-- A security review of the whole tree before the tag; `scan` added to the
-  required checks if it is not already.
-- Screenshots, release notes, the GHCR image.
+- Done: deployment documentation. [ca-setup.md](ca-setup.md) has the
+  provisioner with its name policy and lifetime cap, the read-only
+  database account and the certificate for PostgreSQL; the README has the
+  reverse proxy and container examples, what revocation means, and backing
+  up the store, each tried before it was written down.
+- A security review of the whole tree before the tag. The owner runs it,
+  on a machine set up for that, outside this repository; it is not done
+  by the changes here and nothing here records its outcome. `scan` is
+  already a required check.
+- Done: pictures in the README, of the development CA.
+- Done: the release workflow was run once without a tag (a manual run
+  builds both binaries and the image and publishes nothing), so that the
+  tag is not the first thing ever to run it.
+- At the tag: the workflow makes the release with its binaries, their
+  checksums and notes from the merged pull requests, and pushes the image
+  to GHCR. A package on GHCR starts out private: making it public is a
+  setting on the package, by the owner.
 
 **Later, unordered:** the MySQL inventory source; OIDC sign-in; expiry notifications and a Prometheus endpoint; SSH certificates;
 ACME order and account views; provisioner management through the admin API;
