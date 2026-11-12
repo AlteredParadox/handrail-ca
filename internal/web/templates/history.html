@@ -1,0 +1,85 @@
+<!--
+handrail-ca — a lightweight web UI for step-ca.
+Copyright (C) 2026 AlteredParadox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+{{define "content"}}
+{{$base := .Base}}
+{{with .Data}}
+<div class="page-head">
+<div>
+<h1>History</h1>
+<p class="muted">What was done through handrail-ca, by whom and from where, newest first. Rows are only ever added. Certificates issued or revoked on the CA by other means are not here: the certificate list has those.</p>
+</div>
+</div>
+
+{{if .Problem}}
+<section class="card">
+<h2>The history could not be read</h2>
+<p class="problem">{{.Problem}}</p>
+</section>
+{{else}}
+
+<form class="card filters" method="get" action="{{$base}}/history">
+<div class="field">
+<label for="action">Show</label>
+<select id="action" name="action">
+<option value="">Everything</option>
+{{range .Actions}}<option value="{{.Action}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+{{end}}
+</select>
+</div>
+{{if .Serial}}<input type="hidden" name="serial" value="{{.Serial}}">{{end}}
+<button type="submit" class="primary">Apply</button>
+{{if .AllURL}}<a class="clear" href="{{.AllURL}}">Clear</a>{{end}}
+</form>
+
+{{if .Serial}}
+<p class="list-note standalone">Only what was done to {{if .CertificateURL}}<a href="{{.CertificateURL}}">{{if .Subject}}{{.Subject}}{{else}}this certificate{{end}}</a>{{else}}the certificate{{end}} with serial number <span class="mono small">{{.Serial}}</span>.{{if not .CertificateURL}} That serial number is not in the certificate list as handrail-ca has read it.{{end}}</p>
+{{end}}
+
+<section class="card flush" aria-label="History">
+{{if .Events}}
+<div class="scroll">
+<table class="history">
+<thead>
+<tr><th scope="col">When</th><th scope="col">Who</th><th scope="col">What</th><th scope="col">Outcome</th><th scope="col">Certificate and detail</th><th scope="col">From</th></tr>
+</thead>
+<tbody>
+{{range .Events}}
+<tr>
+<td class="nowrap">{{.When}}</td>
+<td>{{.Actor}}</td>
+<td>{{.What}}</td>
+<td><span class="badge {{.Badge}}">{{.Outcome}}</span></td>
+<td>{{if .Serial}}<div>{{if .URL}}<a class="strong" href="{{.URL}}">{{if .Subject}}{{.Subject}}{{else}}Serial {{.SerialShort}}{{end}}</a>{{else}}<span class="strong">{{if .Subject}}{{.Subject}}{{else}}Serial {{.SerialShort}}{{end}}</span>{{end}} <span class="sub mono" title="{{.Serial}}">{{.SerialShort}}</span></div>{{end}}{{with .Detail}}<div class="sub detail">{{.}}</div>{{end}}</td>
+<td class="mono small nowrap">{{.Remote}}</td>
+</tr>
+{{end}}
+</tbody>
+</table>
+</div>
+{{else}}
+<p class="empty">{{if or .Serial .Action .NewestURL}}Nothing in the history matches.{{else}}Nothing has been recorded yet.{{end}}</p>
+{{end}}
+<div class="list-foot">
+<span>{{if .NewestURL}}<a href="{{.NewestURL}}">Back to the newest</a>{{end}}</span>
+<span class="pager">{{if .OlderURL}}<a href="{{.OlderURL}}" rel="next">Older</a>{{end}}</span>
+</div>
+</section>
+{{end}}
+{{end}}
+{{end}}

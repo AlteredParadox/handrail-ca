@@ -492,6 +492,17 @@ func TestHistory(t *testing.T) {
 	if err != nil || len(next) != 2 || next[0].ID >= page[1].ID {
 		t.Errorf("second page = %+v, %v", next, err)
 	}
+	// One kind of event, alone and together with a certificate.
+	revokes, err := s.History(ctx, HistoryQuery{Action: ActionRevoke})
+	if err != nil || len(revokes) != 2 || revokes[0].Outcome != OutcomeOK {
+		t.Errorf("History(action) = %+v, %v", revokes, err)
+	}
+	if none, err := s.History(ctx, HistoryQuery{Action: ActionSignIn, Serial: "1234"}); err != nil || len(none) != 0 {
+		t.Errorf("History(action, serial) = %+v, %v", none, err)
+	}
+	if one, err := s.History(ctx, HistoryQuery{Action: ActionRevoke, Before: revokes[0].ID}); err != nil || len(one) != 1 || one[0].Outcome != OutcomeAttempt {
+		t.Errorf("History(action, before) = %+v, %v", one, err)
+	}
 	if capped, _ := s.History(ctx, HistoryQuery{Limit: 1_000_000}); len(capped) != 4 {
 		t.Errorf("a huge limit returned %d events", len(capped))
 	}

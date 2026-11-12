@@ -83,6 +83,7 @@ type Store interface {
 	TouchSession(ctx context.Context, token store.TokenHash, now time.Time) error
 	DeleteSession(ctx context.Context, token store.TokenHash) error
 	AppendHistory(ctx context.Context, e store.Event) error
+	History(ctx context.Context, q store.HistoryQuery) ([]store.Event, error)
 	Note(ctx context.Context, serial string) (store.Note, error)
 	SetNote(ctx context.Context, n store.Note) error
 }
@@ -235,6 +236,7 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("GET /{$}", s.signedIn(s.listPage))
 	mux.HandleFunc("POST /refresh", s.signedIn(s.refreshInventory))
 	mux.HandleFunc("GET /names", s.signedIn(s.namesPage))
+	mux.HandleFunc("GET /history", s.signedIn(s.historyPage))
 	mux.HandleFunc("GET /certificates/{serial}", s.signedIn(s.detailPage))
 	mux.HandleFunc("GET /certificates/{serial}/{form}", s.signedIn(s.certificateFile))
 	mux.HandleFunc("POST /certificates/{serial}/note", s.signedIn(s.saveNote))

@@ -14,8 +14,9 @@ name the CA's certificates carry, by domain and network, which is what a
 name policy on the CA has to allow. Operators can keep a note and labels on
 a certificate, for what the CA does not record, and can revoke one from its
 page: after a confirmation that names the certificate and says what
-revoking will and will not do on your CA. Issuing is not built yet; the
-[build plan](docs/PLAN.md) has the order.
+revoking will and will not do on your CA. A history page lists what was
+done through handrail-ca, by whom and from where. Issuing is not built yet;
+the [build plan](docs/PLAN.md) has the order.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.

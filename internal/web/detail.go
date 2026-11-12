@@ -93,6 +93,10 @@ type detailData struct {
 	// certificate. Nil for a row that is not a certificate.
 	Note *noteView
 
+	// History is what was done to the certificate through handrail-ca.
+	// Nil for a row that is not a certificate.
+	History *certificateEvents
+
 	// CanRevoke is set for an operator looking at a certificate that has
 	// no revocation record, on a handrail-ca that can act on the CA.
 	// ReadOnly is set when the same operator cannot because handrail-ca
@@ -244,6 +248,7 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	fillCertificate(&data, cert, now)
 	data.Summary = summarySentence(status, summary, snap.Revocation(summary.Serial), now)
 	data.Note = note
+	data.History = s.certificateEvents(r, summary.Serial)
 	if u := currentUser(r); u.user.Role == store.RoleOperator && data.Revocation == nil {
 		acting := s.opts.CA.ProvisionerState().Configured
 		data.CanRevoke, data.ReadOnly = acting, !acting

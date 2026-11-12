@@ -718,6 +718,30 @@ a.cancel {
   padding: 0 12px;
 }
 
+/* History */
+table.history td {
+  vertical-align: top;
+}
+
+.detail {
+  overflow-wrap: anywhere;
+}
+
+.list-note.standalone {
+  border-top: 0;
+  margin: 0;
+  padding: 0;
+}
+
+ul.events {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
 /* A certificate's note */
 form.note {
   display: flex;

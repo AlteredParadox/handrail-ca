@@ -282,6 +282,9 @@ type brokenStore struct {
 	*store.Store
 	historyErr, sessionErr, createErr, credentialsErr atomic.Pointer[error]
 	noteErr, setNoteErr                               atomic.Pointer[error]
+	// readHistoryErr fails the reading of the history; historyErr, above,
+	// the writing of it.
+	readHistoryErr atomic.Pointer[error]
 	// beforeCreate runs between the password check and the session being
 	// created, where a concurrent `user passwd` could land. beforeChange
 	// runs at the same point of a change of password.
@@ -307,6 +310,13 @@ func (b *brokenStore) SetNote(ctx context.Context, n store.Note) error {
 		return *err
 	}
 	return b.Store.SetNote(ctx, n)
+}
+
+func (b *brokenStore) History(ctx context.Context, q store.HistoryQuery) ([]store.Event, error) {
+	if err := b.readHistoryErr.Load(); err != nil {
+		return nil, *err
+	}
+	return b.Store.History(ctx, q)
 }
 
 func (b *brokenStore) AppendHistory(ctx context.Context, e store.Event) error {
@@ -685,6 +695,7 @@ func TestPagesNeedASession(t *testing.T) {
 	b := newSite(t, "http://127.0.0.1:8080").browser()
 	wantRedirect(t, b.get("/"), "/sign-in")
 	wantRedirect(t, b.get("/status"), "/sign-in")
+	wantRedirect(t, b.get("/history"), "/sign-in")
 	wantRedirect(t, b.do(http.MethodPost, "/sign-out", url.Values{}), "/sign-in")
 	// A cookie that is not one of ours is no session.
 	b.cookies[sessionCookie] = "not-base64-of-32-bytes"
