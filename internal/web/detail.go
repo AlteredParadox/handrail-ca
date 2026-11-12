@@ -139,6 +139,9 @@ type extensionView struct {
 type revocationView struct {
 	When, Reason, Detail, How, By string
 	Problem                       string
+	// IssuedOverACME is set when the revoked certificate came from an ACME
+	// provisioner: its client can still order another.
+	IssuedOverACME bool
 }
 
 // found is the certificate a request is about.
@@ -230,6 +233,7 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	}
 	if rev := snap.Revocation(summary.Serial); rev != nil {
 		data.Revocation = newRevocationView(rev, snap.Provisioners())
+		data.Revocation.IssuedOverACME = summary.Provisioner.Type == acmeType
 	}
 	if cert == nil {
 		data.Title = "Serial " + shortSerial(summary.Serial)

@@ -65,9 +65,13 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <section class="card">
 <h2>What revoking does on this CA</h2>
 <ul class="plain">
-<li>The CA records the certificate as revoked and refuses to renew it.</li>
+<li>The CA records this certificate as revoked and refuses to renew it.</li>
+<li>It does not stop a new certificate being issued for the same names. The CA does not look at revocations when it is asked for a new one.</li>
 <li>It cannot be undone. A replacement has to be issued as a new certificate.</li>
 </ul>
+{{if .ACME}}
+<p class="callout warn"><strong>This certificate was issued over ACME.</strong> An ACME client does not renew the certificate it has: it orders a new one each time, and the CA will fill that order. Revoking does not stop the machine from getting another certificate for these names. That has to be stopped on the machine itself.</p>
+{{end}}
 {{if .Expired}}
 <p class="callout info">This certificate has already expired, so nothing that checks dates accepts it any more. Revoking it only adds the record.</p>
 {{else if not .CRLKnown}}

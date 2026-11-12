@@ -48,6 +48,10 @@ const (
 	oursWithin = 2 * time.Minute
 )
 
+// acmeType is step-ca's name for the type of an ACME provisioner, as it
+// records it beside each certificate.
+const acmeType = "ACME"
+
 // revokeReasons are the reasons offered, in the order shown: RFC 5280's,
 // less the ones that do not describe an operator revoking a certificate (a
 // compromised CA, a hold, removal from a list).
@@ -65,6 +69,9 @@ type revokeData struct {
 	Expired         bool
 	Provisioner     string
 	ProvisionerType string
+	// ACME is set for a certificate issued by an ACME provisioner, whose
+	// client gets its next certificate by a new order, revoked or not.
+	ACME bool
 
 	// What a revocation will mean on this CA: CRLKnown is false when the
 	// CA could not be asked whether it publishes a revocation list.
@@ -183,7 +190,7 @@ func (s *server) newRevokeData(r *http.Request, snap *inventory.Snapshot, c *inv
 		Serial: c.Serial, Title: c.Subject,
 		Subject: c.Subject, Names: row.Names, SerialHex: groupedBy(c.SerialHex, 4),
 		Expires: expiry(c.NotAfter, now), ExpiresDay: c.NotAfter.UTC().Format("2006-01-02"), Expired: !c.NotAfter.After(now),
-		Provisioner: c.Provisioner.Name, ProvisionerType: c.Provisioner.Type,
+		Provisioner: c.Provisioner.Name, ProvisionerType: c.Provisioner.Type, ACME: c.Provisioner.Type == acmeType,
 		Stale: snap.State.Problem,
 		Note:  note, MaxNote: maxRevokeNote,
 	}

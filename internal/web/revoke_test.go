@@ -68,7 +68,7 @@ func TestRevoke(t *testing.T) {
 		"Revoke this certificate?", `<a href="/certificates/101">web1.internal.example</a>`,
 		`<dd class="strong">web1.internal.example</dd>`, "2027-02-09, in 3 months", "handrail <span",
 		// What it means here: the test CA publishes no revocation list.
-		"refuses to renew it", "It cannot be undone",
+		"refuses to renew it", "It does not stop a new certificate being issued for the same names.", "It cannot be undone",
 		"This CA does not publish a revocation list.", "will keep accepting it until it expires on 2027-02-09",
 		`<form method="post" action="/certificates/101/revoke" class="card revoke">`,
 		`<option value="0" selected>Unspecified</option>`, `<option value="1">Key compromise</option>`, `<option value="4">Superseded</option>`,
@@ -448,6 +448,38 @@ func TestRevokePageSaysWhatRevokingMeans(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Revoking stops a certificate being renewed, not a new one being issued,
+// and for a certificate that came over ACME that is how its client gets
+// every certificate: the page says so before, and the certificate's page
+// after.
+func TestRevokePageSaysWhatRevokingDoesNotStop(t *testing.T) {
+	const always, acme = "It does not stop a new certificate being issued for the same names.", "This certificate was issued over ACME."
+	s := newSite(t, "http://127.0.0.1:8080")
+	overACME := leafRow(t, 201, "acme.internal.example", t0.Add(-time.Hour), t0.Add(24*time.Hour))
+	overACME.Data = []byte(`{"provisioner":{"id":"p2","name":"acme","type":"ACME"}}`)
+	s.addRows(overACME)
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+
+	form := b.get("/certificates/101/revoke")
+	wantBody(t, form, always)
+	if strings.Contains(form.Body.String(), acme) {
+		t.Error("a certificate from a JWK provisioner is said to have come over ACME")
+	}
+	form = b.get("/certificates/201/revoke")
+	wantBody(t, form, always, acme, "it orders a new one each time, and the CA will fill that order", "That has to be stopped on the machine itself.")
+
+	wantRedirect(t, b.do(http.MethodPost, "/certificates/201/revoke", revokeFormValues(tokenIn(t, form), "1", "", "acme.internal.example")),
+		"/certificates/201?revoked=now#revocation")
+	wantBody(t, b.get("/certificates/201"), "it will issue a new one for the same names", "This certificate was issued over ACME. Its client does not renew")
+	// The certificate the fixture has revoked came from a JWK provisioner.
+	page := b.get("/certificates/103")
+	wantBody(t, page, "it will issue a new one for the same names")
+	if strings.Contains(page.Body.String(), "issued over ACME") {
+		t.Error("a revoked certificate from a JWK provisioner is said to have come over ACME")
 	}
 }
 

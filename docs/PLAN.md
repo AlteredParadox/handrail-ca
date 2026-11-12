@@ -186,6 +186,15 @@ Revoke (`api/revoke.go`, `authority/tls.go`):
   rebuilds the list afterwards: if that fails, the answer is a 500 and the
   certificate is revoked (`authority/tls.go`, `Revoke`; read, not seen).
   The token is used up when the request is authorized, before either.
+- A revocation stops one thing: renewing or rekeying that certificate by
+  presenting it. It does not stop a new certificate for the same names.
+  The CA does not look at revocations when it signs: the same provisioner
+  issues the name again, and so does ACME, whose clients never renew by
+  presenting a certificate but place a new order each time. A machine
+  that gets its certificates over ACME therefore keeps getting them after
+  one is revoked (`make dev-verify` does exactly this). The revoke page
+  says so, and says it again, louder, for a certificate that came from an
+  ACME provisioner.
 - Revoking writes `revoked_x509_certs`, which blocks renewal and rekey of
   that certificate. Relying parties learn of it only through the CRL, and
   only if `crl.enabled` is set in ca.json (`GET /1.0/crl`, 404 when off).

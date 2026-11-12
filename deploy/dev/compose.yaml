@@ -61,6 +61,8 @@ services:
           - ca.handrail.test
           - acme1.handrail.test
           - acme2.handrail.test
+          # For `make dev-verify`, which issues and revokes its own.
+          - acme3.handrail.test
     ports:
       - "127.0.0.1:19000:9000"
     healthcheck:
