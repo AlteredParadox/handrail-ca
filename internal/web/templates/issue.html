@@ -57,7 +57,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{else if .Unknown}}
 <h2>It is not known yet whether a certificate was issued</h2>
 <p>The request was sent, and no certificate came back: {{.CA}}</p>
-{{if .Incomplete}}<p>The CA's database was read just afterwards, but the certificates new to it could not all be read to look for one with this request's key. So one may be there.</p>
+{{if .Unsure}}<p>The CA's database was read just afterwards, and that does not settle it: {{.Unsure}}.</p>
 {{else}}<p>The CA's database held no new certificate for this request's key when it was read just afterwards. That does not settle it: the CA may have received the request and still be working on it.</p>{{end}}
 <p>Look at the <a href="{{$base}}/?sort=issued">newest certificates</a> in a minute. If there is none for this request then, sign again.</p>
 {{else}}

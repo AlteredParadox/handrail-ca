@@ -464,14 +464,18 @@ why.
   same ten minutes. The same form sent again does not go to the CA
   until that attempt is accounted for: the database is read, and if it
   holds the attempt's certificate, that is the answer and nothing is
-  sent. If it cannot be read, or the attempt is less than a minute and a
-  half old (the token it carried is good for a minute), the form is
-  refused, since sending it could give a second certificate. So it is
-  when the search itself was not complete: a new certificate could not
-  be read, or there were more new ones than are looked through. Finding
-  nothing then is not knowing. Only a database that was read, searched
-  to the end and shows nothing, after that time, lets the request go
-  out again.
+  sent. If it cannot be read, or the attempt is less than three minutes
+  old, the form is refused, since sending it could give a second
+  certificate: the token the attempt carried is good for a minute, the CA
+  accepts it for a minute more against clocks that differ, and a request
+  accepted at the last moment still has to be worked through. So it is
+  when the search settles nothing: a new certificate could not be read,
+  there were more new ones than are looked through, or a certificate for
+  the request's key was issued at that moment with other names, which a
+  provisioner's template can do and which is then named for the operator
+  to look at. Finding no exact match then is not knowing. Only a
+  database that was read, searched to the end and shows nothing of the
+  kind, after that time, lets the request go out again.
 
   What a certificate's page says about the request that led to it
   ("issued", "differs from what was asked", "found after a lost answer")

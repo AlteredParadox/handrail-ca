@@ -61,11 +61,12 @@ const (
 	// request has just led there: it asks the page to say what happened.
 	arrived = "?issued=1"
 	// issueSettles is how long after a signing request went out the CA
-	// may still act on it: the token it carried is good for a minute.
+	// may still act on it. The token it carried is good for a minute, the
+	// CA accepts it for a minute more against clocks that differ, and a
+	// request accepted at the last moment still has to be worked through.
 	// After that, a database that shows no certificate for it means none
 	// was issued.
-	issueSettles = tokenGood + 30*time.Second
-	tokenGood    = time.Minute
+	issueSettles = 3 * time.Minute
 	// issuedWithin is how far a certificate's start may lie from the
 	// moment a request was sent and still be taken for that request's:
 	// the CA dates a certificate a minute back, by its own clock.
@@ -132,9 +133,10 @@ type limitsView struct {
 // issueFailure describes a signing request that did not come back with a
 // certificate. The fields mean what revokeFailure's do.
 type issueFailure struct {
-	// Incomplete is set with Unknown when the CA's database was read but
-	// the certificates new to it could not all be looked at.
-	Incomplete          bool
+	// Unsure is set with Unknown when the CA's database was read and the
+	// search of it for this request's certificate settles nothing, and
+	// says why.
+	Unsure              string
 	NotSent, Unknown    bool
 	CA, Clock, Database string
 	// OddCommonName is the request's common name, set when the CA
@@ -597,17 +599,16 @@ func (s *server) settleEarlier(ctx context.Context, req *ca.Request, earlier iss
 	if err := s.opts.Inventory.Refresh(ctx); err != nil {
 		return "", "the CA's database cannot be read to find out: " + err.Error()
 	}
-	serial, complete := s.issuedFor(ctx, earlier.before, s.opts.Inventory.Snapshot(), req, earlier.sentAt)
+	serial, unsure := s.issuedFor(ctx, earlier.before, s.opts.Inventory.Snapshot(), req, earlier.sentAt)
 	if serial != "" {
 		return serial, ""
 	}
-	if !complete {
-		// Nothing found is not nothing there: not all of what might be
-		// that attempt's certificate could be looked at.
-		return "", "the certificates that have appeared in the CA's database since could not all be read to look for it"
+	if unsure != "" {
+		// Nothing found is not nothing there.
+		return "", unsure
 	}
 	if s.opts.Now().Sub(earlier.sentAt) < issueSettles {
-		return "", "it was made less than a minute ago and the CA may still be at it. Try again in a minute"
+		return "", "it was made less than " + span(issueSettles) + " ago, and the CA may still act on it. Try again after that"
 	}
 	return "", ""
 }
@@ -745,6 +746,10 @@ func newUnlistedView(issued *ca.Issued, readErr error, now time.Time) *unlistedV
 	return v
 }
 
+// notConfirmed begins the history's words for an attempt of unknown
+// outcome.
+const notConfirmed = "not confirmed: "
+
 // signed is what became of a signing request that did not come back with
 // a certificate.
 type signed struct {
@@ -781,21 +786,20 @@ func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, befor
 	if readErr != nil {
 		failure.Unknown, failure.Database = true, readErr.Error()
 		return signed{outcome: store.OutcomeUnknown, failure: failure,
-			detail: "not confirmed: " + sendErr.Error() + "; the CA's database could not be read to check: " + readErr.Error()}
+			detail: notConfirmed + sendErr.Error() + "; the CA's database could not be read to check: " + readErr.Error()}
 	}
-	serial, complete := s.issuedFor(ctx, before, after, req, sentAt)
+	serial, unsure := s.issuedFor(ctx, before, after, req, sentAt)
 	if serial != "" {
 		return signed{outcome: store.OutcomeOK, serial: serial,
 			detail: "the CA's answer was not a certificate (" + sendErr.Error() + "), but its database holds one for the request's key and names, issued since"}
 	}
 	failure.Unknown = true
-	if !complete {
-		failure.Incomplete = true
-		return signed{outcome: store.OutcomeUnknown, failure: failure,
-			detail: "not confirmed: " + sendErr.Error() + "; the certificates new to the CA's database could not all be read to look for it"}
+	if unsure != "" {
+		failure.Unsure = unsure
+		return signed{outcome: store.OutcomeUnknown, failure: failure, detail: notConfirmed + sendErr.Error() + "; " + unsure}
 	}
 	return signed{outcome: store.OutcomeUnknown, failure: failure,
-		detail: "not confirmed: " + sendErr.Error() + "; the CA's database held no new certificate for the request's key when read just afterwards, which does not settle it"}
+		detail: notConfirmed + sendErr.Error() + "; the CA's database held no new certificate for the request's key when read just afterwards, which does not settle it"}
 }
 
 // issuedFor looks among the certificates that are new to the inventory
@@ -804,15 +808,17 @@ func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, befor
 // that were issued long ago, and a key may have been used before. So the
 // certificate must carry the request's key, start within issuedWithin of
 // the moment the request was sent, and carry the names that were asked
-// for. Anything less is not taken for this request's.
+// for.
 //
-// complete says whether every candidate was looked at. It is false when
-// one could not be read, or there were more than are searched: finding
-// nothing then does not mean there is nothing, and the caller must not
-// take it to.
-func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapshot, req *ca.Request, sentAt time.Time) (serial string, complete bool) {
+// unsure is set, with no serial, when finding none does not mean there is
+// none, and says why: a candidate could not be read, there were more than
+// are searched, or a certificate for the request's key was issued at that
+// moment with other names, which a provisioner's template can do and
+// which may therefore be this request's. The caller must not take an
+// unsure search for an empty one.
+func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapshot, req *ca.Request, sentAt time.Time) (serial, unsure string) {
+	const unread = "the certificates new to the CA's database could not all be read to look for it"
 	looked := 0
-	complete = true
 	for _, c := range after.Certificates {
 		if c.Problem != "" || before.Certificate(c.Serial) != nil {
 			continue
@@ -821,24 +827,25 @@ func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapsho
 			continue
 		}
 		if looked++; looked > maxNewToSearch {
-			return "", false
+			return "", unread
 		}
 		der, err := s.opts.Inventory.DER(ctx, c.Serial)
 		if err != nil {
-			complete = false
+			unsure = unread
 			continue
 		}
 		cert, err := x509.ParseCertificate(der)
 		if err != nil {
-			complete = false
+			unsure = unread
 			continue
 		}
 		if !bytes.Equal(cert.RawSubjectPublicKeyInfo, req.CSR.RawSubjectPublicKeyInfo) {
 			continue
 		}
 		if len(nameDifferences(req, cert)) == 0 {
-			return c.Serial, true
+			return c.Serial, ""
 		}
+		unsure = "a certificate for this request's key was issued at that moment with other names than were asked for (serial " + c.Serial + "), and may be this request's"
 	}
-	return "", complete
+	return "", unsure
 }
