@@ -106,6 +106,11 @@ jobs:
           # password; readable by the image's unprivileged user.
           printf 'postgres://handrail:not-a-real-password@127.0.0.1:1/stepca?sslmode=disable\n' >"$RUNNER_TEMP/db_url"
           chmod 644 "$RUNNER_TEMP/db_url"
+          # So is the password of the provisioner handrail-ca acts through.
+          # The CA here does not exist, so the key is never opened: the
+          # server has to start and serve all the same.
+          printf 'not-a-real-password\n' >"$RUNNER_TEMP/provisioner_password"
+          chmod 644 "$RUNNER_TEMP/provisioner_password"
           # Listening beyond loopback with no account is refused, so one is
           # added first, the way an operator would.
           docker run --rm -v smoke-data:/data handrail-ca:ci user add -role operator smoke | grep -q '^Added operator smoke' || { echo "user add failed"; exit 1; }
@@ -113,6 +118,9 @@ jobs:
             --health-interval 2s -p 127.0.0.1:8080:8080 \
             -v smoke-data:/data -v "$RUNNER_TEMP/db_url:/run/secrets/handrail_db_url:ro" \
             -e HANDRAIL_DB_URL_FILE=/run/secrets/handrail_db_url \
+            -v "$RUNNER_TEMP/provisioner_password:/run/secrets/handrail_provisioner_password:ro" \
+            -e HANDRAIL_PROVISIONER=handrail \
+            -e HANDRAIL_PROVISIONER_PASSWORD_FILE=/run/secrets/handrail_provisioner_password \
             -e HANDRAIL_CA_URL=https://ca.invalid:9000 \
             -e HANDRAIL_CA_FINGERPRINT=0000000000000000000000000000000000000000000000000000000000000000 \
             -e HANDRAIL_PUBLIC_URL=http://127.0.0.1:8080 handrail-ca:ci
