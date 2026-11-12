@@ -57,6 +57,12 @@ const (
 	// provisioner's own limits are applied.
 	maxCustomDays = 3660
 	day           = 24 * time.Hour
+	// issueSettles is how long after a signing request went out the CA
+	// may still act on it: the token it carried is good for a minute.
+	// After that, a database that shows no certificate for it means none
+	// was issued.
+	issueSettles = tokenGood + 30*time.Second
+	tokenGood    = time.Minute
 	// issuedWithin is how far a certificate's start may lie from the
 	// moment a request was sent and still be taken for that request's:
 	// the CA dates a certificate a minute back, by its own clock.
@@ -178,6 +184,15 @@ type issuedAt struct {
 	// certificate was found in the inventory and never came in an answer.
 	issued *ca.Issued
 	at     time.Time
+
+	// uncertain is set, with no serial, for an attempt whose outcome was
+	// not learned: sent, no certificate back, and nothing to say the CA
+	// made none. before and sentAt are what a later look needs to tell
+	// that attempt's certificate from any other: the inventory as it was,
+	// and the moment the request went out.
+	uncertain bool
+	before    *inventory.Snapshot
+	sentAt    time.Time
 }
 
 // maxRememberedIssues bounds the requests remembered as just signed.
@@ -192,32 +207,42 @@ func (ri *recentIssues) forget(now time.Time) {
 	}
 }
 
-// begin claims a request for signing. It returns what the request was
-// given a moment ago, if it was (the entry then has a serial); busy means
-// another signing of the same request is under way.
+// begin claims a request for signing. It returns what is remembered of
+// the request from a moment ago. An entry with a serial means it was
+// given that certificate, and nothing is claimed. An uncertain entry
+// means an earlier attempt's outcome is not known: the request is claimed,
+// for the caller to settle that attempt before anything is sent again.
+// busy means another signing of the same request is under way.
 func (ri *recentIssues) begin(fingerprint string, now time.Time) (already issuedAt, busy bool) {
 	ri.mu.Lock()
 	defer ri.mu.Unlock()
 	ri.forget(now)
-	if d, ok := ri.done[fingerprint]; ok {
-		return d, false
-	}
 	if ri.inFlight[fingerprint] {
 		return issuedAt{}, true
 	}
+	if d, ok := ri.done[fingerprint]; ok && !d.uncertain {
+		return d, false
+	}
+	already = ri.done[fingerprint]
 	if ri.inFlight == nil {
 		ri.inFlight = map[string]bool{}
 	}
 	ri.inFlight[fingerprint] = true
-	return issuedAt{}, false
+	return already, false
 }
 
-// end releases a request; an entry with a serial is remembered.
+// end releases a request. An entry with a serial, or an uncertain one, is
+// remembered in place of whatever was; any other clears it: the request
+// was refused or never sent, and may be sent again.
 func (ri *recentIssues) end(fingerprint string, entry issuedAt) {
 	ri.mu.Lock()
 	defer ri.mu.Unlock()
 	delete(ri.inFlight, fingerprint)
-	if entry.serial == "" || len(ri.done) >= maxRememberedIssues {
+	if entry.serial == "" && !entry.uncertain {
+		delete(ri.done, fingerprint)
+		return
+	}
+	if _, replacing := ri.done[fingerprint]; !replacing && len(ri.done) >= maxRememberedIssues {
 		return
 	}
 	if ri.done == nil {
@@ -494,8 +519,29 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 		s.issuedAlready(w, r, data, already)
 		return
 	}
-	done := issuedAt{at: now}
+	// What is remembered of this request when the handler is done. It
+	// starts as what was: an earlier attempt of unknown outcome stays
+	// remembered unless this one settles it.
+	done := already
 	defer func() { s.issues.end(fingerprint, done) }()
+	if already.uncertain {
+		// Not sent again until the earlier attempt is accounted for.
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), issueTimeout)
+		serial, wait := s.settleEarlier(ctx, req, already)
+		cancel()
+		switch {
+		case serial != "":
+			done = issuedAt{serial: serial, how: "found", at: now}
+			s.record(r, store.Event{Actor: currentUser(r).user.Username, Action: store.ActionIssue, Outcome: store.OutcomeOK, Serial: serial, Subject: req.CommonName,
+				Detail: "the earlier attempt, whose outcome was not known, was given this certificate: the CA's database holds it now. Not signed again"})
+			http.Redirect(w, r, s.certificateURL(serial)+"?issued=1", http.StatusSeeOther)
+			return
+		case wait != "":
+			refuse(http.StatusConflict, "an earlier attempt to sign this request has an outcome that is not known yet, and "+wait+". It was not sent again: that could give a second certificate")
+			return
+		}
+	}
+	done = issuedAt{at: now}
 
 	u := currentUser(r)
 	asked := "names: " + strings.Join(requestNamesOf(req), ", ") + "; validity: " + validityWords(length)
@@ -548,8 +594,34 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, s.certificateURL(outcome.serial)+"?issued=1", http.StatusSeeOther)
 		return
 	}
+	if outcome.outcome == store.OutcomeUnknown {
+		// Remembered as that: the same form sent again settles this
+		// attempt first, and is not simply signed a second time.
+		done.uncertain, done.before, done.sentAt = true, before, sentAt
+	}
 	data.Failure = outcome.failure
 	s.renderIssue(w, r, http.StatusBadGateway, data)
+}
+
+// settleEarlier accounts for an earlier attempt to sign this request
+// whose outcome was not learned, before the request is sent again. The
+// CA's database is read now. If it holds the certificate that attempt was
+// given, its serial is returned and nothing more is sent. If it cannot be
+// read, or the attempt is too recent to have finished for certain, wait
+// says why the request is not sent again yet. With neither, the earlier
+// attempt issued nothing, as far as can be known, and the request may go
+// out again.
+func (s *server) settleEarlier(ctx context.Context, req *ca.Request, earlier issuedAt) (serial, wait string) {
+	if err := s.opts.Inventory.Refresh(ctx); err != nil {
+		return "", "the CA's database cannot be read to find out: " + err.Error()
+	}
+	if serial := s.issuedFor(ctx, earlier.before, s.opts.Inventory.Snapshot(), req, earlier.sentAt); serial != "" {
+		return serial, ""
+	}
+	if s.opts.Now().Sub(earlier.sentAt) < issueSettles {
+		return "", "it was made less than a minute ago and the CA may still be at it. Try again in a minute"
+	}
+	return "", ""
 }
 
 // issuedAlready answers a form for a request that was signed a moment

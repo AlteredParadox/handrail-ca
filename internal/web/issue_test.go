@@ -875,6 +875,92 @@ func TestIssuedNoticesComeFromWhatHappenedNotFromTheAddress(t *testing.T) {
 	}
 }
 
+// An attempt whose outcome was not learned is not forgotten. The same form
+// sent again does not go to the CA until the earlier attempt is accounted
+// for: a browser retrying a lost response must not get a second
+// certificate.
+func TestIssueAgainAfterAnUnknownOutcome(t *testing.T) {
+	lost := errors.New(`Post "https://ca.internal.example:9000/1.0/sign": context deadline exceeded`)
+	// start signs in, reads a request and sends it to a CA that issues a
+	// certificate but does not answer and has not stored it yet.
+	start := func(t *testing.T) (*site, *browser, url.Values, **ca.Issued) {
+		s := newSite(t, "http://127.0.0.1:8080")
+		b := s.browser()
+		wantRedirect(t, b.signIn("alice", alicePassword), "/")
+		_, form := b.readCSR(gitCSR(t))
+		var pending *ca.Issued
+		s.ca.sign = func(_ context.Context, r *ca.Request, d time.Duration) (*ca.Issued, error) {
+			pending = s.caSigns(r, d)
+			return nil, lost
+		}
+		rec := b.do(http.MethodPost, "/issue", form)
+		wantStatus(t, rec, http.StatusBadGateway)
+		wantBody(t, rec, "It is not known yet whether a certificate was issued")
+		return s, b, form, &pending
+	}
+
+	t.Run("the certificate has turned up since", func(t *testing.T) {
+		s, b, form, pending := start(t)
+		// The CA finished after all; the next read shows its certificate.
+		s.caStores((*pending).Certificate)
+		rec := b.do(http.MethodPost, "/issue", form)
+		wantRedirect(t, rec, "/certificates/5001?issued=1")
+		wantBody(t, b.get("/certificates/5001?issued=1"), "The CA's answer to the request did not arrive, but its database holds this certificate")
+		if n := len(s.ca.signings()); n != 1 {
+			t.Errorf("the CA was asked to sign %d times", n)
+		}
+		events := s.issueEvents()
+		if len(events) != 3 || events[1].Outcome != store.OutcomeUnknown || events[2].Outcome != store.OutcomeOK || events[2].Serial != "5001" ||
+			!strings.Contains(events[2].Detail, "the earlier attempt, whose outcome was not known, was given this certificate") {
+			t.Errorf("history: %+v", events)
+		}
+		// And from then on it is a request that was signed.
+		wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=again")
+	})
+
+	t.Run("the database cannot be read to find out", func(t *testing.T) {
+		s, b, form, _ := start(t)
+		s.clock.advance(5 * time.Minute)
+		s.rows.fail(errors.New("connection refused"))
+		rec := b.do(http.MethodPost, "/issue", form)
+		wantStatus(t, rec, http.StatusConflict)
+		wantBody(t, rec, "an earlier attempt to sign this request has an outcome that is not known yet", "the CA&#39;s database cannot be read to find out", "It was not sent again")
+		if n := len(s.ca.signings()); n != 1 {
+			t.Errorf("the CA was asked to sign %d times", n)
+		}
+	})
+
+	t.Run("too soon to know", func(t *testing.T) {
+		s, b, form, _ := start(t)
+		s.clock.advance(20 * time.Second)
+		rec := b.do(http.MethodPost, "/issue", form)
+		wantStatus(t, rec, http.StatusConflict)
+		wantBody(t, rec, "it was made less than a minute ago and the CA may still be at it", "It was not sent again")
+		if n := len(s.ca.signings()); n != 1 {
+			t.Errorf("the CA was asked to sign %d times", n)
+		}
+		// Still remembered: asking twice does not wear it down.
+		wantStatus(t, b.do(http.MethodPost, "/issue", form), http.StatusConflict)
+	})
+
+	t.Run("nothing was issued, as far as can be known", func(t *testing.T) {
+		s, b, form, _ := start(t)
+		// Long enough for the CA to have finished, the database read, and
+		// no certificate for this request in it: now it may be sent again.
+		s.clock.advance(2 * time.Minute)
+		s.ca.sign = func(_ context.Context, r *ca.Request, d time.Duration) (*ca.Issued, error) {
+			issued := s.caSigns(r, d)
+			s.caStores(issued.Certificate)
+			return issued, nil
+		}
+		rec := b.do(http.MethodPost, "/issue", form)
+		wantRedirect(t, rec, "/certificates/5002?issued=1")
+		if n := len(s.ca.signings()); n != 2 {
+			t.Errorf("the CA was asked to sign %d times, want the second, wanted, time", n)
+		}
+	})
+}
+
 // A request signed while the CA's database could not be read has no page
 // to go to. The form sent again (the first answer may never have reached
 // the browser) gets the same certificate again, and the CA is not asked a
