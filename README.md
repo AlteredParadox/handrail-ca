@@ -282,6 +282,47 @@ machine. Behind a reverse proxy, `HANDRAIL_PUBLIC_URL` is the proxy's
 `https://` address and `HANDRAIL_TRUSTED_PROXIES` the address the proxy
 reaches the container from (see above).
 
+### What it needs to run on
+
+Very little. handrail-ca is one process with no services of its own. It
+keeps a summary of every certificate the CA has issued in memory, so what
+it needs grows with the CA's database, slowly.
+
+Measured with 100,000 certificates in the CA's database, on two cores of a
+2016 Xeon with the database on the same machine
+([docs/PLAN.md](docs/PLAN.md), section 6, has the method):
+
+| | At 100,000 certificates |
+|---|---|
+| Memory | 311 MB at its highest, 157 MB after the first read |
+| Start | 4.3 to 4.6 seconds to read everything once; 0.25 to 0.28 seconds for each read after, every thirty seconds |
+| Pages | 0.06 to 0.26 seconds |
+| Disk | A 20 MB binary, and its store (`handrail.db` in the data directory): accounts, history, notes |
+
+About 720 bytes of memory go to each certificate, so a CA with a few
+thousand certificates needs a few megabytes for them. What then counts is
+the password check at sign-in, which takes 64 MB for a moment, two at a
+time at most.
+
+- **Two cores and 4 GB** is plenty, with room for a reverse proxy on the
+  same machine, up to at least the 100,000 certificates measured.
+- **One core and 1 GB** should do for a CA with a few thousand
+  certificates. That is arithmetic from the figures above, not something
+  that was run.
+
+Not measured: more than 100,000 certificates, a process that has run for
+weeks, or the CA's database on another machine, where each read also
+costs the network.
+
+Three things matter more than size:
+
+- It has to reach the CA's HTTPS port and the CA's PostgreSQL port
+  ([docs/ca-setup.md](docs/ca-setup.md), section 3).
+- Its clock has to agree with the CA's to within a minute, or the CA
+  refuses what it asks. Keep both on NTP.
+- Its only state is the data directory. Losing it loses accounts, history
+  and notes, and nothing about the certificates.
+
 ## Development
 
 ```sh
