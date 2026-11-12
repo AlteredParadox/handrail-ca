@@ -349,6 +349,14 @@ func TestIssueRefusals(t *testing.T) {
 	if strings.Contains(s.log.String(), "SECRETSECRET") {
 		t.Error("a pasted private key is in the log")
 	}
+	// The same for a key in a paste too large to be a request: the size
+	// is not what is said, and nothing of it is sent back.
+	rec = b.do(http.MethodPost, "/issue", url.Values{"form_token": {token}, "csr": {csr + strings.Repeat("x", 40<<10) + key}, "step": {"read"}})
+	wantStatus(t, rec, http.StatusUnprocessableEntity)
+	wantBody(t, rec, "this is a private key, not a certificate signing request")
+	if strings.Contains(rec.Body.String(), "SECRETSECRET") || strings.Contains(rec.Body.String(), "xxxxxxxx") {
+		t.Error("an oversized paste holding a private key was sent back to the browser")
+	}
 
 	for name, tt := range map[string]struct {
 		form url.Values
@@ -532,7 +540,39 @@ func TestIssueOutcomes(t *testing.T) {
 			redirect: "/certificates/5002?issued=found",
 			outcome:  store.OutcomeOK,
 			serial:   "5002",
-			detail:   "the CA's answer was not a certificate (" + lost.Error() + "), but its database holds one for the request's key, issued since",
+			detail:   "the CA's answer was not a certificate (" + lost.Error() + "), but its database holds one for the request's key and names, issued since",
+		},
+		{
+			// A certificate that is new to the inventory is not thereby new.
+			// One for the same key, issued an hour ago and only now seen, is
+			// not this request's: the outcome stays unknown.
+			name: "the answer was lost, and an older certificate for the same key turns up",
+			ca: func(s *site, r *ca.Request) (*ca.Issued, error) {
+				s.clock.advance(-time.Hour)
+				older := s.caSigns(r, 0).Certificate
+				s.clock.advance(time.Hour)
+				s.caStores(older)
+				return nil, lost
+			},
+			status:  http.StatusBadGateway,
+			page:    []string{"It is not known yet whether a certificate was issued"},
+			absent:  []string{"No certificate was issued"},
+			outcome: store.OutcomeUnknown,
+			detail:  "not confirmed: " + lost.Error() + "; the CA's database held no new certificate for the request's key when read just afterwards, which does not settle it",
+		},
+		{
+			// Nor is a new certificate for the same key with other names.
+			name: "the answer was lost, and a new certificate for the same key has other names",
+			ca: func(s *site, r *ca.Request) (*ca.Issued, error) {
+				other := *r
+				other.DNSNames = []string{"something-else.internal.example"}
+				s.caStores(s.caSigns(&other, 0).Certificate)
+				return nil, lost
+			},
+			status:  http.StatusBadGateway,
+			page:    []string{"It is not known yet whether a certificate was issued"},
+			outcome: store.OutcomeUnknown,
+			detail:  "not confirmed: " + lost.Error() + "; the CA's database held no new certificate for the request's key when read just afterwards, which does not settle it",
 		},
 		{
 			name: "issued, and the database cannot be read",

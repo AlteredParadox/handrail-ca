@@ -214,6 +214,11 @@ func TestReadRequestRefusals(t *testing.T) {
 		{"a 1024-bit RSA key", asPEM("CERTIFICATE REQUEST", weakDER), "RSA key has 1024 bits"},
 		{"no common name and no names", request(x509.CertificateRequest{Subject: pkix.Name{Organization: []string{"Example"}}}), "no common name and no names"},
 		{"too large", good + strings.Repeat(" ", maxCSR), "larger than"},
+		// A key is a key at any size and anywhere in the paste: no other
+		// refusal comes first.
+		{"a private key in a paste that is too large", good + strings.Repeat("x", maxCSR) + asPEM("PRIVATE KEY", keyDER), "this is a private key"},
+		{"a private key after a request", good + asPEM("EC PRIVATE KEY", keyDER), "this is a private key"},
+		{"a private key that is not well formed", "-----BEGIN RSA PRIVATE KEY-----\nnot base64 at all\n", "this is a private key"},
 		{"too many names", request(x509.CertificateRequest{DNSNames: many}), "more than the 100"},
 		{"a name too long", request(x509.CertificateRequest{DNSNames: []string{strings.Repeat("a", maxRequestName+1)}}), "a name longer than"},
 		// Names the CA would sort into another kind than the request has

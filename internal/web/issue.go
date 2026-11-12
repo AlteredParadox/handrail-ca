@@ -56,6 +56,10 @@ const (
 	// provisioner's own limits are applied.
 	maxCustomDays = 3660
 	day           = 24 * time.Hour
+	// issuedWithin is how far a certificate's start may lie from the
+	// moment a request was sent and still be taken for that request's:
+	// the CA dates a certificate a minute back, by its own clock.
+	issuedWithin = 5 * time.Minute
 )
 
 // offeredValidities are the lengths the page offers, where the
@@ -352,12 +356,16 @@ func requestFingerprint(req *ca.Request) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func (s *server) renderIssue(w http.ResponseWriter, r *http.Request, code int, data issueData) {
+	s.render(w, r, code, "issue.html", "Issue a certificate", data)
+}
+
 func (s *server) issueForm(w http.ResponseWriter, r *http.Request) {
 	if !s.mayIssue(w, r) {
 		return
 	}
 	data, _ := s.newIssueData(r, "", "")
-	s.render(w, r, http.StatusOK, "issue.html", "Issue a certificate", data)
+	s.renderIssue(w, r, http.StatusOK, data)
 }
 
 // issue reads a pasted request and, on the second step, has the CA sign
@@ -375,7 +383,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 	data, provisioner := s.newIssueData(r, pasted, r.PostForm.Get("validity"))
 	refuse := func(code int, problem string) {
 		data.Problem = problem
-		s.render(w, r, code, "issue.html", "Issue a certificate", data)
+		s.renderIssue(w, r, code, data)
 	}
 	req, err := ca.ReadRequest(pasted)
 	if err != nil {
@@ -388,7 +396,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 	}
 	data.Request, data.Checked = newRequestView(req, provisioner.HasTemplate()), requestFingerprint(req)
 	if r.PostForm.Get("step") != "sign" {
-		s.render(w, r, http.StatusOK, "issue.html", "Issue a certificate", data)
+		s.renderIssue(w, r, http.StatusOK, data)
 		return
 	}
 	if r.PostForm.Get("checked") != data.Checked {
@@ -426,6 +434,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), issueTimeout)
 	defer cancel()
 	before := s.opts.Inventory.Snapshot()
+	sentAt := s.opts.Now()
 	issued, sendErr := s.opts.CA.Sign(ctx, req, length)
 	readErr := s.opts.Inventory.Refresh(ctx)
 	after := s.opts.Inventory.Snapshot()
@@ -443,7 +452,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 			// Issued, and not in the inventory to be looked at: handed over
 			// here, since this answer is the only place it is.
 			data.Request, data.Unlisted = nil, newUnlistedView(issued, readErr, now)
-			s.render(w, r, http.StatusOK, "issue.html", "Issue a certificate", data)
+			s.renderIssue(w, r, http.StatusOK, data)
 			return
 		}
 		said := "now"
@@ -454,7 +463,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	outcome := s.issueOutcome(ctx, sendErr, readErr, before, after, req)
+	outcome := s.issueOutcome(ctx, sendErr, readErr, before, after, req, sentAt)
 	serial = outcome.serial
 	event.Serial, event.Outcome, event.Detail = outcome.serial, outcome.outcome, asked+"; "+outcome.detail
 	s.record(r, event)
@@ -463,7 +472,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data.Failure = outcome.failure
-	s.render(w, r, http.StatusBadGateway, "issue.html", "Issue a certificate", data)
+	s.renderIssue(w, r, http.StatusBadGateway, data)
 }
 
 func contains(list []string, s string) bool {
@@ -513,6 +522,16 @@ func validityWords(d time.Duration) string {
 // own: a template may well put more in the subject, and that is then
 // reported as what the subject is, not as a difference.
 func differences(req *ca.Request, cert *x509.Certificate, hasTemplate bool) []string {
+	out := nameDifferences(req, cert)
+	if !hasTemplate && cert.Subject.String() != "CN="+req.CommonName && cert.Subject.CommonName != req.CommonName {
+		out = append(out, fmt.Sprintf("the certificate's subject is %q, not the common name %q asked for", cert.Subject.String(), req.CommonName))
+	}
+	return out
+}
+
+// nameDifferences says where a certificate's names are not the names a
+// request was read as, kind by kind.
+func nameDifferences(req *ca.Request, cert *x509.Certificate) []string {
 	var out []string
 	var ips, uris []string
 	for _, ip := range cert.IPAddresses {
@@ -531,9 +550,6 @@ func differences(req *ca.Request, cert *x509.Certificate, hasTemplate bool) []st
 		if !sameSet(kind.got, kind.want) {
 			out = append(out, fmt.Sprintf("the certificate's %s are [%s], not the [%s] asked for", kind.what, strings.Join(kind.got, ", "), strings.Join(kind.want, ", ")))
 		}
-	}
-	if !hasTemplate && cert.Subject.String() != "CN="+req.CommonName && cert.Subject.CommonName != req.CommonName {
-		out = append(out, fmt.Sprintf("the certificate's subject is %q, not the common name %q asked for", cert.Subject.String(), req.CommonName))
 	}
 	return out
 }
@@ -586,7 +602,7 @@ type signed struct {
 // from the error (sendErr), whether the CA's database could be read
 // afterwards (readErr), and the certificates that are in it now and were
 // not before.
-func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, before, after *inventory.Snapshot, req *ca.Request) signed {
+func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, before, after *inventory.Snapshot, req *ca.Request, sentAt time.Time) signed {
 	failure := &issueFailure{CA: sendErr.Error()}
 	var refused *ca.StatusError
 	answered := errors.As(sendErr, &refused)
@@ -610,9 +626,9 @@ func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, befor
 		return signed{outcome: store.OutcomeUnknown, failure: failure,
 			detail: "not confirmed: " + sendErr.Error() + "; the CA's database could not be read to check: " + readErr.Error()}
 	}
-	if serial := s.issuedFor(ctx, before, after, req); serial != "" {
+	if serial := s.issuedFor(ctx, before, after, req, sentAt); serial != "" {
 		return signed{outcome: store.OutcomeOK, serial: serial,
-			detail: "the CA's answer was not a certificate (" + sendErr.Error() + "), but its database holds one for the request's key, issued since"}
+			detail: "the CA's answer was not a certificate (" + sendErr.Error() + "), but its database holds one for the request's key and names, issued since"}
 	}
 	failure.Unknown = true
 	return signed{outcome: store.OutcomeUnknown, failure: failure,
@@ -620,11 +636,20 @@ func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, befor
 }
 
 // issuedFor looks among the certificates that are new to the inventory
-// for one carrying the request's key, and returns its serial.
-func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapshot, req *ca.Request) string {
+// for the one this request was given, and returns its serial. New to the
+// inventory is not new: a stale inventory catching up shows certificates
+// that were issued long ago, and a key may have been used before. So the
+// certificate must carry the request's key, start within issuedWithin of
+// the moment the request was sent, and carry the names that were asked
+// for. Anything less is not taken for this request's, and the outcome
+// stays unknown.
+func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapshot, req *ca.Request, sentAt time.Time) string {
 	looked := 0
 	for _, c := range after.Certificates {
 		if c.Problem != "" || before.Certificate(c.Serial) != nil {
+			continue
+		}
+		if c.NotBefore.Before(sentAt.Add(-issuedWithin)) || c.NotBefore.After(sentAt.Add(issuedWithin)) {
 			continue
 		}
 		if looked++; looked > maxNewToSearch {
@@ -635,7 +660,10 @@ func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapsho
 			continue
 		}
 		cert, err := x509.ParseCertificate(der)
-		if err == nil && bytes.Equal(cert.RawSubjectPublicKeyInfo, req.CSR.RawSubjectPublicKeyInfo) {
+		if err != nil || !bytes.Equal(cert.RawSubjectPublicKeyInfo, req.CSR.RawSubjectPublicKeyInfo) {
+			continue
+		}
+		if len(nameDifferences(req, cert)) == 0 {
 			return c.Serial
 		}
 	}
