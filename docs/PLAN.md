@@ -339,8 +339,10 @@ worked out from both:
 | Confirmed | Does not show it, or cannot be read | ok | That the CA confirmed it and the record was not seen |
 | An error, or nothing | Holds this request's revocation | ok | That it is revoked and that the CA did not confirm it, with the CA's words |
 | An error, or nothing | Holds another revocation | failed | The certificate's page, saying it was revoked already |
-| An error, or nothing | Holds none | failed | That it was not revoked, with the CA's words, and the form again |
+| A refusal | Holds none | failed | That it was not revoked, with the CA's words, and the form again |
+| Nothing, or a gateway's error | Holds none | unknown | That it is not known yet, to look again in a minute, and the form again |
 | An error, or nothing | Cannot be read | unknown | That it is not known, with both reasons, and the form again |
+| The request could not be sent | Not needed | failed | That nothing was sent, and the form again |
 
 The third row is not shown as a plain success. A CA that reports a failure
 after recording a revocation may have left something undone: step-ca
@@ -352,9 +354,15 @@ one).
 A record counts as this request's when it carries the same reason and
 note, was made with a provisioner's token, and is dated no earlier than
 two minutes before the request (the CA stamps it with its own clock).
-"Holds none" is what was read just after: a request that timed out here
-and was still in flight at the CA could land later, and the next read of
-the database would show it. Nothing is ever sent a second time by
+"Holds none" is what was read just after, and that one look settles it
+only when the CA itself answered with a refusal. With no answer, or a
+502, 503 or 504 that a proxy in front of the CA would give, the CA may
+have the request and be working on it still (step-ca does not stop
+because the asker hung up), so the outcome is unknown, the page says to
+look again, and the next read of the database shows a revocation that
+landed late. A request that never left (the provisioner's key not open,
+no connection made, the CA's certificate not accepted) is the one failure
+that is certain without the database. Nothing is ever sent a second time by
 handrail-ca itself; sending again is the operator's decision, and is
 harmless, since step-ca refuses to revoke a certificate twice.
 

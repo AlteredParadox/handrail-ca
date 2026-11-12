@@ -118,10 +118,14 @@ type reasonOption struct {
 	Selected bool
 }
 
-// revokeFailure describes a revocation that was sent and not confirmed.
+// revokeFailure describes a revocation that was not confirmed.
 type revokeFailure struct {
-	// Unknown means the outcome could not be learned; otherwise the
-	// certificate was not revoked when the CA's database was read.
+	// NotSent means the request never left: nothing was changed.
+	NotSent bool
+	// Unknown means the outcome is not known: the request was sent, no
+	// answer settles it, and the CA's database either could not be read
+	// (Database says why) or showed no record yet. With neither set, the
+	// CA answered with a refusal and its database holds no record.
 	Unknown bool
 	// CA is what the CA said, or why it could not be asked.
 	CA string
@@ -383,23 +387,43 @@ func revokeOutcome(sendErr, readErr error, rev *inventory.Revocation, reason int
 
 	failure := &revokeFailure{CA: sendErr.Error()}
 	var refused *ca.StatusError
-	if errors.As(sendErr, &refused) && refused.ClockDifference != 0 {
+	answered := errors.As(sendErr, &refused)
+	if answered && refused.ClockDifference != 0 {
 		failure.Clock = clockWords(refused.ClockDifference)
 	}
+	var notSent *ca.NotSentError
+	failure.NotSent = errors.As(sendErr, &notSent)
 	switch {
+	case rev != nil && !failure.NotSent && ours(rev, reason, note, started):
+		return revoked{outcome: store.OutcomeOK, unconfirmed: failure,
+			detail: "the CA's answer was not a confirmation (" + sendErr.Error() + "), but its database holds this revocation"}
+	case rev != nil:
+		return revoked{outcome: store.OutcomeFailed,
+			detail: "revoked already by another request; the CA's database holds a revocation that is not this one (" + sendErr.Error() + ")"}
+	case failure.NotSent:
+		// Certain, whatever the database says or does not say.
+		return revoked{outcome: store.OutcomeFailed, failure: failure, detail: "not revoked: the request could not be sent: " + sendErr.Error()}
 	case readErr != nil:
 		failure.Unknown, failure.Database = true, readErr.Error()
 		return revoked{outcome: store.OutcomeUnknown, failure: failure,
 			detail: "not confirmed: " + sendErr.Error() + "; the CA's database could not be read to check: " + readErr.Error()}
-	case rev == nil:
+	case answered && !fromInBetween(refused.Status):
 		return revoked{outcome: store.OutcomeFailed, failure: failure,
 			detail: "not revoked: " + sendErr.Error() + "; the CA's database held no revocation for it when read afterwards"}
-	case ours(rev, reason, note, started):
-		return revoked{outcome: store.OutcomeOK, unconfirmed: failure,
-			detail: "the CA's answer was not a confirmation (" + sendErr.Error() + "), but its database holds this revocation"}
 	}
-	return revoked{outcome: store.OutcomeFailed,
-		detail: "revoked already by another request; the CA's database holds a revocation that is not this one (" + sendErr.Error() + ")"}
+	// No answer from the CA, and no record when its database was read.
+	// That does not settle it: the CA may have the request and be working
+	// on it still, and step-ca does not stop because the asker hung up.
+	failure.Unknown = true
+	return revoked{outcome: store.OutcomeUnknown, failure: failure,
+		detail: "not confirmed: " + sendErr.Error() + "; the CA's database held no revocation for it when read just afterwards, which does not settle it"}
+}
+
+// fromInBetween reports whether an error status is one a proxy in front
+// of the CA gives when the CA itself did not answer in time: the CA may
+// have the request all the same.
+func fromInBetween(status int) bool {
+	return status == http.StatusBadGateway || status == http.StatusServiceUnavailable || status == http.StatusGatewayTimeout
 }
 
 // ours says whether a revocation record is the one a request asked for:
