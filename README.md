@@ -418,8 +418,7 @@ SQLite's own backup command, which reads both and can be run while
 handrail-ca is serving:
 
 ```sh
-sqlite3 /var/lib/handrail-ca/handrail.db ".backup '/var/backups/handrail-ca/handrail-$(date +%F).db'"
-chmod 600 /var/backups/handrail-ca/handrail-*.db
+(umask 077 && sqlite3 /var/lib/handrail-ca/handrail.db ".backup '/var/backups/handrail-ca/handrail-$(date +%F).db'")
 ```
 
 Run it as the user handrail-ca runs as, with the paths your deployment
@@ -428,12 +427,14 @@ no shell, run it from a throwaway container that mounts the same volume:
 
 ```sh
 docker run --rm -v handrail-data:/data -v /var/backups/handrail-ca:/backup alpine:3 \
-  sh -c "apk add --no-cache sqlite >/dev/null && sqlite3 /data/handrail.db \".backup '/backup/handrail-$(date +%F).db'\" && chmod 600 /backup/handrail-*.db"
+  sh -c "apk add --no-cache sqlite >/dev/null && umask 077 && sqlite3 /data/handrail.db \".backup '/backup/handrail-$(date +%F).db'\""
 ```
 
-The backup is made readable by everyone unless its permissions are
-changed, which is what the `chmod` is for: it holds password hashes and
-the history, so keep it as you keep the store.
+The backup holds password hashes and the history, so keep it as you keep
+the store. The `umask 077` is what makes the file readable by its owner
+alone from the moment it is created; without it SQLite makes a file
+anyone on the machine can read. Keep the directory it goes into private
+as well.
 
 To restore, stop handrail-ca, put the backup in the data directory as
 `handrail.db` (owned by the user handrail-ca runs as, mode `600`, with no
