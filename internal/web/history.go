@@ -137,13 +137,12 @@ func (s *server) historyURL(serial, action string, before int64) string {
 	return s.base + "/history?" + q.Encode()
 }
 
-func (s *server) historyPage(w http.ResponseWriter, r *http.Request) {
-	asked := r.URL.Query()
-	data := historyData{Serial: asked.Get("serial")}
-	// What cannot be a serial number or an action narrows to nothing: it
-	// is dropped, not searched for.
-	if len(data.Serial) > maxKeyInAddress {
-		data.Serial = ""
+// historyAsked reads what the page was asked to show. What cannot be a
+// serial number, an action or a page marker narrows to nothing: it is
+// dropped, not searched for.
+func historyAsked(asked url.Values) (data historyData, before int64) {
+	if serial := asked.Get("serial"); len(serial) <= maxKeyInAddress {
+		data.Serial = serial
 	}
 	for _, a := range historyActions {
 		selected := a.action == asked.Get("action")
@@ -156,7 +155,11 @@ func (s *server) historyPage(w http.ResponseWriter, r *http.Request) {
 	if err != nil || before < 0 {
 		before = 0
 	}
+	return data, before
+}
 
+func (s *server) historyPage(w http.ResponseWriter, r *http.Request) {
+	data, before := historyAsked(r.URL.Query())
 	// One more than a page, to know whether there is an older one.
 	events, err := s.opts.Store.History(r.Context(), store.HistoryQuery{Serial: data.Serial, Action: data.Action, Before: before, Limit: historyPageSize + 1})
 	if err != nil {
@@ -178,15 +181,24 @@ func (s *server) historyPage(w http.ResponseWriter, r *http.Request) {
 	if data.Serial != "" || data.Action != "" {
 		data.AllURL = s.historyURL("", "", 0)
 	}
-	if data.Serial != "" {
-		if c := s.opts.Inventory.Snapshot().Certificate(data.Serial); c != nil {
-			data.Subject = c.Subject
-			if path, ok := certificatePath(data.Serial); ok {
-				data.CertificateURL = s.base + path
-			}
-		}
-	}
+	s.nameNarrowedCertificate(&data)
 	s.render(w, r, http.StatusOK, "history.html", "History", data)
+}
+
+// nameNarrowedCertificate fills in the subject and the page of the
+// certificate the history is narrowed to, when the inventory has it.
+func (s *server) nameNarrowedCertificate(data *historyData) {
+	if data.Serial == "" {
+		return
+	}
+	c := s.opts.Inventory.Snapshot().Certificate(data.Serial)
+	if c == nil {
+		return
+	}
+	data.Subject = c.Subject
+	if path, ok := certificatePath(data.Serial); ok {
+		data.CertificateURL = s.base + path
+	}
 }
 
 // certificateEvents is what a certificate's own page shows of its history.
