@@ -24,6 +24,7 @@ import (
 	"net"
 	"net/url"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 )
@@ -169,5 +170,41 @@ func TestNamesInUseLeavesNoneOut(t *testing.T) {
 	usage := snap.NamesInUse(ViewActive, now)
 	if len(usage.Kinds) != 2 || usage.Kinds[0].Names != names || usage.Kinds[1].Names != 1 {
 		t.Errorf("names counted: %+v", usage.Kinds)
+	}
+}
+
+// Names too long to show whole are still counted whole: two that differ
+// only past the point where they are cut for display are two names, and
+// the summary has the name itself, not the shortened one.
+func TestNamesInUseCountsLongNamesWhole(t *testing.T) {
+	src := &fakeSource{certs: map[string]RawCertificate{}}
+	now := time.Date(2026, 11, 11, 12, 0, 0, 0, time.UTC)
+	long := "spiffe://internal.example/" + strings.Repeat("a", maxText)
+	one, _ := url.Parse(long + "/one")
+	two, _ := url.Parse(long + "/two")
+	longCN := strings.Repeat("service ", 40) + "one"
+	src.add(RawCertificate{Serial: "1", DER: newDER(t, "1", func(c *x509.Certificate) {
+		c.Subject = pkix.Name{CommonName: longCN}
+		c.DNSNames = []string{"short.internal.example"}
+		c.URIs = []*url.URL{one, two}
+	})})
+	inv := newInventory(src, &now)
+	if err := inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	snap := inv.Snapshot()
+	// For showing, the names are bounded as before.
+	c := snap.Certificates[0]
+	if len(c.Names) != 3 || c.MoreNames != 0 || c.Names[1].Value != clip(one.String()) || c.Names[1].Value == one.String() || c.Subject == longCN {
+		t.Fatalf("the names kept for showing: %+v, subject %d characters", c.Names, len(c.Subject))
+	}
+	usage := snap.NamesInUse(ViewActive, now)
+	want := []KindUsage{
+		{Kind: DNS, Names: 1, Groups: []NameGroup{{Label: "internal.example", Certificates: 1, Names: []NameUse{{"short.internal.example", 1}}}}},
+		{Kind: URI, Names: 2, Groups: []NameGroup{{Label: "spiffe://internal.example", Certificates: 1, Names: []NameUse{{one.String(), 1}, {two.String(), 1}}}}},
+		{Kind: CommonName, Names: 1, Groups: []NameGroup{{Label: "", Certificates: 1, Names: []NameUse{{longCN, 1}}}}},
+	}
+	if !reflect.DeepEqual(usage.Kinds, want) {
+		t.Errorf("long names in use:\n got %+v\nwant %+v", usage.Kinds, want)
 	}
 }

@@ -113,17 +113,28 @@ func (s *Snapshot) NamesInUse(view View, now time.Time) NameUsage {
 			continue
 		}
 		usage.Certificates++
+		// Every name whole: Names, unless that list was shortened.
+		names, commonName := c.Names, c.Subject
+		if c.exactNames != nil {
+			names = c.exactNames
+			for _, name := range names {
+				if name.Kind == CommonName {
+					commonName = name.Value
+				}
+			}
+		}
 		// The common name is counted by itself only when none of the
 		// names is the same.
 		named := !c.hasCommonName
-		for _, names := range [][]Name{c.Names, c.moreNames} {
-			for _, name := range names {
-				count(c, name.Kind, name.Value)
-				named = named || strings.EqualFold(name.Value, c.Subject)
+		for _, name := range names {
+			if name.Kind == CommonName {
+				continue
 			}
+			count(c, name.Kind, name.Value)
+			named = named || strings.EqualFold(name.Value, commonName)
 		}
 		if !named {
-			count(c, CommonName, c.Subject)
+			count(c, CommonName, commonName)
 		}
 	}
 

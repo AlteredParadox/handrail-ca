@@ -133,9 +133,13 @@ type Certificate struct {
 	// hasCommonName says that Subject is the subject's common name, and
 	// not the whole subject shown for want of one.
 	hasCommonName bool
-	// moreNames are the names beyond maxNames, kept so that the summary of
-	// names in use leaves none out. Nil for nearly every certificate.
-	moreNames []Name
+	// exactNames is every name, whole, kept only when Names does not say
+	// as much: when there are more than maxNames, or one was too long to
+	// show whole. The summary of names in use counts from it, so that it
+	// leaves no name out and takes no two for one. A common name too long
+	// to show whole is in it too, as a name of kind CommonName. Nil for
+	// nearly every certificate.
+	exactNames []Name
 }
 
 // Revocation is what the CA recorded when a certificate was revoked.
@@ -532,8 +536,13 @@ func summarise(row RawCertificate) *Certificate {
 	c.NotBefore, c.NotAfter = cert.NotBefore.UTC(), cert.NotAfter.UTC()
 	c.subjectKey = strings.ToLower(c.Subject)
 	c.hasCommonName = cert.Subject.CommonName != ""
-	c.Names, c.moreNames = namesOf(cert)
-	c.MoreNames = len(c.moreNames)
+	c.Names, c.MoreNames, c.exactNames = namesOf(cert)
+	if cn := strings.ToValidUTF8(cert.Subject.CommonName, string(utf8.RuneError)); cn != "" && cn != c.Subject {
+		if c.exactNames == nil {
+			c.exactNames = append([]Name{}, c.Names...)
+		}
+		c.exactNames = append(c.exactNames, Name{Kind: CommonName, Value: cn})
+	}
 	c.haystack = haystackOf(c, cert)
 	return c
 }
@@ -582,16 +591,16 @@ func provisionerOf(data []byte) Provisioner {
 	return Provisioner{ID: clip(record.Provisioner.ID), Name: clip(record.Provisioner.Name), Type: clip(record.Provisioner.Type)}
 }
 
-// namesOf lists a certificate's subject alternative names: the first
-// maxNames of them, and the rest apart.
-func namesOf(cert *x509.Certificate) (names, more []Name) {
+// namesOf lists a certificate's subject alternative names three ways:
+// the first maxNames of them, each bounded, for showing; how many more
+// there are; and, only when those two do not say everything, every name
+// whole. That is when there are more than maxNames, or one is too long to
+// be shown whole. It is as bounded as the certificate, which the Source
+// caps.
+func namesOf(cert *x509.Certificate) (shown []Name, more int, exact []Name) {
+	var all []Name
 	add := func(kind NameKind, value string) {
-		name := Name{Kind: kind, Value: clip(value)}
-		if len(names) < maxNames {
-			names = append(names, name)
-		} else {
-			more = append(more, name)
-		}
+		all = append(all, Name{Kind: kind, Value: strings.ToValidUTF8(value, string(utf8.RuneError))})
 	}
 	for _, name := range cert.DNSNames {
 		add(DNS, name)
@@ -605,7 +614,21 @@ func namesOf(cert *x509.Certificate) (names, more []Name) {
 	for _, uri := range cert.URIs {
 		add(URI, uri.String())
 	}
-	return names, more
+	whole := true
+	for i, name := range all {
+		if i >= maxNames {
+			more++
+			whole = false
+			continue
+		}
+		bounded := clip(name.Value)
+		whole = whole && bounded == name.Value
+		shown = append(shown, Name{Kind: name.Kind, Value: bounded})
+	}
+	if !whole {
+		exact = all
+	}
+	return shown, more, exact
 }
 
 // readRevocation reads a row of the revocation table. The fields are the

@@ -22,9 +22,12 @@ import (
 	"crypto/x509/pkix"
 	"errors"
 	"fmt"
+	"html"
 	"math/big"
 	"net"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -59,10 +62,10 @@ func TestNamesPage(t *testing.T) {
 		"DNS names", `<span class="sub">4 names</span>`,
 		`<span class="strong">internal.example</span>`, `<span class="strong">apps.internal.example</span>`, `<span class="strong">Single-label names</span>`,
 		// web1 is in both certificates, and leads to them in the list.
-		`<a class="mono small" href="/?q=web1.internal.example">web1.internal.example</a> <span class="sub">in 2 certificates</span>`,
-		`href="/?q=%2A.apps.internal.example"`,
+		`<a class="mono small" href="/?admin=1&amp;q=web1.internal.example">web1.internal.example</a> <span class="sub">in 2 certificates</span>`,
+		`href="/?admin=1&amp;q=%2A.apps.internal.example"`,
 		"IP addresses", "10.20.0.0/24", "Email addresses", "ops@internal.example",
-		"Common names that are not among the certificate&#39;s names", "Backup &lt;Service&gt;", `href="/?q=Backup&#43;%3CService%3E"`,
+		"Common names that are not among the certificate&#39;s names", "Backup &lt;Service&gt;", `href="/?admin=1&amp;q=Backup&#43;%3CService%3E"`,
 		"1 of the DNS names is a literal wildcard",
 	)
 	for _, absent := range []string{"old.internal.example", "gone.internal.example", "<Service>", "URIs", `class="stale"`} {
@@ -75,7 +78,7 @@ func TestNamesPage(t *testing.T) {
 	// each name's link searches all of them.
 	all := b.get("/names?view=all")
 	wantBody(t, all, "every certificate the CA has issued, ended or not: 4 certificates.", "old.internal.example",
-		`href="/?q=gone.internal.example&amp;view=all"`, `<a href="/names?view=all" aria-current="true">`)
+		`href="/?admin=1&amp;q=gone.internal.example&amp;view=all"`, `<a href="/names?view=all" aria-current="true">`)
 	// Any other view is the default.
 	wantBody(t, b.get("/names?view=revoked"), "in date and not revoked: 2 certificates.")
 }
@@ -149,4 +152,56 @@ func TestNamesPageWhenTheInventoryIsStaleOrUnread(t *testing.T) {
 	}
 	s.server.opts.Inventory = empty
 	wantBody(t, b.get("/names"), "0 certificates.", "No names: there are no such certificates.")
+}
+
+// A name's link shows the certificates the summary counted for it: the
+// CA's own admin certificates too, which the list otherwise leaves out.
+func TestNameLinksReachEveryCertificateCounted(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	inter := newIssuer(t, "Example Intermediate CA")
+	admin := inter.issue(t, &x509.Certificate{
+		SerialNumber: big.NewInt(301), Subject: pkix.Name{CommonName: "step"}, DNSNames: []string{"step"},
+		NotBefore: t0.Add(-time.Minute), NotAfter: t0.Add(4 * time.Minute),
+	}, &inter.key.PublicKey)
+	admin.Data = []byte(`{"provisioner":{"id":"a1","name":"Admin JWK","type":"JWK"}}`)
+	s.addRows(admin)
+	b := signedIn(t, s)
+
+	page := b.get("/names")
+	link := regexp.MustCompile(`href="([^"]+)">step</a>`).FindStringSubmatch(page.Body.String())
+	if link == nil {
+		t.Fatal("the admin certificate's name is not in the summary")
+	}
+	list := b.get(html.UnescapeString(link[1]))
+	wantStatus(t, list, http.StatusOK)
+	wantBody(t, list, `href="/certificates/301"`, "Admin JWK")
+	if strings.Contains(list.Body.String(), "No certificates match") {
+		t.Error("the name's link leads to an empty list")
+	}
+}
+
+// A very long name is counted whole and shown shortened; its link
+// searches for as much of it as a search takes.
+func TestNamesPageShortensWhatItShowsOnly(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	inter := newIssuer(t, "Example Intermediate CA")
+	long := "spiffe://internal.example/" + strings.Repeat("a", 300)
+	one, _ := url.Parse(long + "/one")
+	two, _ := url.Parse(long + "/two")
+	s.addRows(inter.issue(t, &x509.Certificate{
+		SerialNumber: big.NewInt(302), Subject: pkix.Name{CommonName: "long.internal.example"}, URIs: []*url.URL{one, two},
+		NotBefore: t0.Add(-time.Hour), NotAfter: t0.Add(24 * time.Hour),
+	}, &inter.key.PublicKey))
+	b := signedIn(t, s)
+	page := b.get("/names")
+	// Two names, though they are the same for their first 256 characters.
+	wantBody(t, page, "URIs", `<span class="sub">2 names</span>`, long[:256]+"…</a>")
+	if strings.Contains(page.Body.String(), long) {
+		t.Error("the page shows a very long name whole")
+	}
+	link := regexp.MustCompile(`href="([^"]+)">spiffe`).FindStringSubmatch(page.Body.String())
+	if link == nil {
+		t.Fatal("no link for the long name")
+	}
+	wantBody(t, b.get(html.UnescapeString(link[1])), `href="/certificates/302"`)
 }

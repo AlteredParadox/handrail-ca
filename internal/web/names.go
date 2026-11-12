@@ -65,6 +65,8 @@ type namesGroup struct {
 }
 
 type namesUse struct {
+	// Value is the name, shortened if it is very long; the certificates
+	// it links to show it whole.
 	Value        string
 	Certificates int
 	// URL is the list, searched for this name.
@@ -121,13 +123,30 @@ func (s *server) namesPage(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				// The name's certificates: the list, searched for it,
-				// over the same certificates this page counts.
-				q := listQuery{Search: n.Value, View: view}
-				group.Names = append(group.Names, namesUse{Value: n.Value, Certificates: n.Certificates, URL: q.href(s.base)})
+				// over the same certificates this page counts, the
+				// CA's own admin certificates among them. A search is
+				// only so long; the start of a longer name finds it.
+				search := n.Value
+				if r := []rune(search); len(r) > maxSearch {
+					search = string(r[:maxSearch])
+				}
+				q := listQuery{Search: search, View: view, IncludeAdmin: true}
+				group.Names = append(group.Names, namesUse{Value: shownName(n.Value), Certificates: n.Certificates, URL: q.href(s.base)})
 			}
 			kind.Groups = append(kind.Groups, group)
 		}
 		data.Kinds = append(data.Kinds, kind)
 	}
 	s.render(w, r, http.StatusOK, "names.html", "Names in use", data)
+}
+
+// maxShownName is how much of one name the summary shows.
+const maxShownName = 256
+
+// shownName shortens a very long name for the page.
+func shownName(name string) string {
+	if r := []rune(name); len(r) > maxShownName {
+		return string(r[:maxShownName]) + "…"
+	}
+	return name
 }
