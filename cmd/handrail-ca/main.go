@@ -391,6 +391,10 @@ func sweepSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
 			if _, err := st.DeleteExpiredSessions(ctx, now, now.Add(-web.SessionIdle)); err != nil && ctx.Err() == nil {
 				log.Warn("sweeping ended sessions", "err", err)
 			}
+			// And the browsers nobody has signed in from for a long time.
+			if _, err := st.DeleteUnusedDevices(ctx, now.Add(-store.DeviceLifetime)); err != nil && ctx.Err() == nil {
+				log.Warn("sweeping devices that are no longer used", "err", err)
+			}
 		}
 	}
 }

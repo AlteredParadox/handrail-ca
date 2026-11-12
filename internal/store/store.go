@@ -105,6 +105,19 @@ CREATE TABLE cert_labels (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX cert_labels_label ON cert_labels (label);
 `,
+	// 3: the browsers that have signed in to an account.
+	`
+-- Only the SHA-256 of a device's token is kept, as with sessions. A device
+-- is not a credential: it only decides which sign-in allowance an attempt
+-- is counted against.
+CREATE TABLE devices (
+	token_hash   BLOB    PRIMARY KEY,
+	user_id      INTEGER NOT NULL REFERENCES users (id) ON DELETE CASCADE,
+	created_at   INTEGER NOT NULL,
+	last_used_at INTEGER NOT NULL
+) STRICT, WITHOUT ROWID;
+CREATE INDEX devices_user ON devices (user_id);
+`,
 }
 
 // Store is an open store. It is safe for concurrent use.

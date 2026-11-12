@@ -81,11 +81,15 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 	tooMany := func() {
 		s.renderAccount(w, r, http.StatusTooManyRequests, false, "Too many wrong passwords for this account. Wait a few minutes and try again.")
 	}
-	if s.limiter.blocked(s.opts.Now(), username, addr) > 0 {
+	// Counted as a sign-in is: against this browser alone if it is one of
+	// the account's known devices, so that strangers failing on the name
+	// cannot keep its owner from changing the password.
+	who := attempt{name: username, addr: addr, device: s.knownDevice(r, username).key()}
+	if s.limiter.blockedFor(s.opts.Now(), who) > 0 {
 		tooMany()
 		return
 	}
-	checked, err := s.checkPassword(r.Context(), username, current, addr)
+	checked, err := s.checkPassword(r.Context(), username, current, who)
 	if err != nil {
 		s.log.Error("checking a password", "err", err)
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not check the password. The log has the details.")
@@ -118,7 +122,7 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not change the password. The log has the details.")
 		return
 	}
-	s.limiter.succeed(username, addr)
+	s.limiter.succeedFor(checked.counted)
 	s.record(r, store.Event{Actor: username, Action: store.ActionUserPasswd, Outcome: store.OutcomeOK, Detail: "changed by the user; all sessions ended"})
 
 	// The change ended this browser's session with the others. It gets a
@@ -135,6 +139,11 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.setCookie(w, sessionCookie, encoded, sessionLifetime)
+	// The change also forgot the account's known devices. This browser,
+	// which has just given the old password and set the new one, is known
+	// again, under a new token.
+	checked.hash = newHash
+	s.rememberDevice(w, r, device{}, checked)
 	http.Redirect(w, r, s.base+"/account?changed=1", http.StatusSeeOther)
 }
 
