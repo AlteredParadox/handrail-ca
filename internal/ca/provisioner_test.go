@@ -383,12 +383,6 @@ func TestRevokeFailures(t *testing.T) {
 		if err == nil || errors.As(err, &se) {
 			t.Errorf("err = %v, want a failure that is not an answer", err)
 		}
-		// Nothing listens there any more: the request went nowhere, and
-		// the error says so.
-		var notSent *NotSentError
-		if !errors.As(err, &notSent) {
-			t.Errorf("err = %#v, want a NotSentError", err)
-		}
 	})
 }
 
@@ -421,6 +415,24 @@ func TestRevokeSaysWhenNothingWasSent(t *testing.T) {
 		<-received
 		if err == nil || notSent(err) {
 			t.Errorf("err = %#v, want a failure that does not claim the request was never sent", err)
+		}
+	})
+	t.Run("nothing listens at the CA's address", func(t *testing.T) {
+		f := newFakeCA(t)
+		f.lists(newTestProvisioner(t, "P-256", "").entry())
+		c := f.acting(t, testPassword, nil)
+		if err := c.Unlock(ctx); err != nil {
+			t.Fatal(err)
+		}
+		// No connection is left open from opening the key, so the request
+		// needs a new one, and cannot get it. (With one left open the
+		// request might be written to it before the client learns the
+		// server has gone, and nothing could be said for certain: the
+		// subtest "no answer" of TestRevokeFailures goes either way.)
+		c.pinned.CloseIdleConnections()
+		f.srv.Close()
+		if err := c.Revoke(ctx, Revocation{Serial: "5"}); !notSent(err) {
+			t.Errorf("err = %#v, want a NotSentError", err)
 		}
 	})
 	t.Run("the CA answered", func(t *testing.T) {
