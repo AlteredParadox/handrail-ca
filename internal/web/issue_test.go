@@ -139,7 +139,7 @@ func TestIssue(t *testing.T) {
 	s.clock.advance(time.Minute)
 	form.Set("validity", "2160h0m0s")
 	rec := b.do(http.MethodPost, "/issue", form)
-	wantRedirect(t, rec, "/certificates/5001?issued=now")
+	wantRedirect(t, rec, "/certificates/5001?issued=1")
 	asked := s.ca.signings()
 	if len(asked) != 1 || asked[0].validity != 2160*time.Hour || asked[0].request.CommonName != "git.internal.example" || asked[0].request.PEM != csr {
 		t.Fatalf("the CA was asked for %+v", asked)
@@ -147,7 +147,7 @@ func TestIssue(t *testing.T) {
 
 	// Its page, read back from the CA's database, with the certificate to
 	// download; and it is in the list without waiting for a timed read.
-	cert := b.get("/certificates/5001?issued=now")
+	cert := b.get("/certificates/5001?issued=1")
 	wantStatus(t, cert, http.StatusOK)
 	wantBody(t, cert, "<h1>git.internal.example</h1>", "Issued. This is the certificate the CA signed for the request.", "/certificates/5001/pem", "-----BEGIN CERTIFICATE-----")
 	wantBody(t, b.get("/?q=git.internal.example"), `href="/certificates/5001"`)
@@ -172,14 +172,14 @@ func TestIssue(t *testing.T) {
 
 	// The same form sent again gives the same certificate, not a second.
 	rec = b.do(http.MethodPost, "/issue", form)
-	wantRedirect(t, rec, "/certificates/5001?issued=before")
-	wantBody(t, b.get("/certificates/5001?issued=before"), "This request had already been signed a moment ago", "It was not signed a second time.")
+	wantRedirect(t, rec, "/certificates/5001?issued=again")
+	wantBody(t, b.get("/certificates/5001?issued=again"), "This request had already been signed a moment ago", "It was not signed a second time.")
 	if len(s.ca.signings()) != 1 || len(s.issueEvents()) != 2 {
 		t.Error("a request sent twice was signed twice")
 	}
 	// Later, it is a new request to sign like any other.
 	s.clock.advance(justIssued)
-	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5002?issued=now")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5002?issued=1")
 }
 
 // What the page says the certificate will carry, for each shape of
@@ -277,7 +277,7 @@ func TestIssueWithATemplateOnTheProvisioner(t *testing.T) {
 		s.caStores(issued.Certificate)
 		return issued, nil
 	}
-	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=now")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
 
 	// A template whose text the CA does not publish is still said to be one.
 	s2 := newSite(t, "http://127.0.0.1:8080")
@@ -305,8 +305,8 @@ func TestIssueSaysWhenTheCertificateDiffers(t *testing.T) {
 		return issued, nil
 	}
 	_, form := b.readCSR(gitCSR(t))
-	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=differs")
-	page := b.get("/certificates/5001?issued=differs")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
+	page := b.get("/certificates/5001?issued=1")
 	wantBody(t, page, "Issued, but the certificate does not carry exactly what was asked for.",
 		"the certificate&#39;s DNS names are [git.internal.example], not the [git.internal.example, git] asked for",
 		"the certificate&#39;s subject is &#34;CN=something else&#34;, not the common name &#34;git.internal.example&#34; asked for")
@@ -363,8 +363,8 @@ func TestIssueRefusals(t *testing.T) {
 		code int
 		want string
 	}{
-		"signing without having read":       {with(func(v url.Values) { v.Del("checked") }), 422, "the request is not the one that was read and shown"},
-		"another request than the one read": {with(func(v url.Values) { v.Set("csr", gitCSR(t)) }), 422, "the request is not the one that was read and shown"},
+		"signing without having read":       {with(func(v url.Values) { v.Del("checked") }), 422, "the request is not one this page has read and shown"},
+		"another request than the one read": {with(func(v url.Values) { v.Set("csr", gitCSR(t)) }), 422, "the request is not one this page has read and shown"},
 		"a validity that was not offered":   {with(func(v url.Values) { v.Set("validity", "8760h0m0s") }), 422, "Not signed: choose a validity from the list."},
 		"a validity that is no length":      {with(func(v url.Values) { v.Set("validity", "forever") }), 422, "choose a validity from the list"},
 		"another length, not given":         {with(func(v url.Values) { v.Set("validity", "custom") }), 422, "give the validity as a whole number of hours or days"},
@@ -419,7 +419,7 @@ func TestIssueRefusals(t *testing.T) {
 		v.Set("custom_n", "36")
 		v.Set("custom_unit", "hours")
 	})
-	wantRedirect(t, b.do(http.MethodPost, "/issue", ok), "/certificates/5001?issued=now")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", ok), "/certificates/5001?issued=1")
 	if asked := s.ca.signings(); len(asked) != 1 || asked[0].validity != 36*time.Hour {
 		t.Errorf("the CA was asked for %+v", asked)
 	}
@@ -537,7 +537,7 @@ func TestIssueOutcomes(t *testing.T) {
 				s.caStores(s.caSigns(r, 0).Certificate)
 				return nil, lost
 			},
-			redirect: "/certificates/5002?issued=found",
+			redirect: "/certificates/5002?issued=1",
 			outcome:  store.OutcomeOK,
 			serial:   "5002",
 			detail:   "the CA's answer was not a certificate (" + lost.Error() + "), but its database holds one for the request's key and names, issued since",
@@ -706,10 +706,10 @@ func TestIssueAfterALostAnswer(t *testing.T) {
 	// Refused: nothing is remembered as signed, so the same request can
 	// be sent again once whatever was wrong is put right.
 	wantStatus(t, b.do(http.MethodPost, "/issue", form), http.StatusBadGateway)
-	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=found")
-	wantBody(t, b.get("/certificates/5001?issued=found"), "The CA's answer to the request did not arrive, but its database holds this certificate for the request's key")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
+	wantBody(t, b.get("/certificates/5001?issued=1"), "The CA's answer to the request did not arrive, but its database holds this certificate for the request's key")
 	// And now it is remembered: a third send signs nothing.
-	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=before")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=again")
 	if calls != 2 {
 		t.Errorf("the CA was asked %d times", calls)
 	}
@@ -790,7 +790,7 @@ func TestIssueWhenTheLimitsAreNotKnown(t *testing.T) {
 		t.Error("the page states limits it could not read")
 	}
 	form.Set("validity", "8760h0m0s")
-	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=now")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
 }
 
 func TestValidityOptions(t *testing.T) {
@@ -826,18 +826,131 @@ func TestValidityOptions(t *testing.T) {
 	}
 }
 
-// An address anyone can write does not make an old certificate's page
-// speak of an issuance.
-func TestIssuedNoticesOnlyOnANewCertificate(t *testing.T) {
+// What a certificate's page says about the request that led to it comes
+// from what handrail-ca saw happen, not from the address: anyone can write
+// an address, and a page that told an operator a good certificate was
+// faulty would have them revoke it.
+func TestIssuedNoticesComeFromWhatHappenedNotFromTheAddress(t *testing.T) {
 	s := newSite(t, "http://127.0.0.1:8080")
 	b := s.browser()
 	wantRedirect(t, b.signIn("alice", alicePassword), "/")
-	for _, said := range []string{"now", "differs", "found", "before", "anything"} {
-		body := b.get("/certificates/101?issued=" + said).Body.String()
-		for _, absent := range []string{"Issued.", "Issued, but", "already been signed"} {
-			if strings.Contains(body, absent) {
-				t.Errorf("?issued=%s on a day-old certificate: the page says %q", said, absent)
+	notices := []string{"Issued. This is", "Issued, but", "did not arrive", "already been signed", "never handed over", "Revoke it below"}
+	says := func(path string) (said []string) {
+		body := b.get(path).Body.String()
+		for _, n := range notices {
+			if strings.Contains(body, n) {
+				said = append(said, n)
 			}
 		}
+		return said
 	}
+	// Nothing through handrail-ca led to this certificate: whatever the
+	// address says, the page says nothing.
+	for _, made := range []string{"1", "now", "differs", "found", "again", "before", "keyless"} {
+		if said := says("/certificates/101?issued=" + made); len(said) != 0 {
+			t.Errorf("?issued=%s on a certificate nobody asked for here: the page says %q", made, said)
+		}
+	}
+	// One that a request was just given, as asked for: the page says that
+	// and only that, whatever the address would have it say.
+	_, form := b.readCSR(gitCSR(t))
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
+	for _, made := range []string{"1", "now", "differs", "found", "keyless", "anything"} {
+		if said := says("/certificates/5001?issued=" + made); len(said) != 1 || said[0] != "Issued. This is" {
+			t.Errorf("?issued=%s on a certificate issued as asked: the page says %q", made, said)
+		}
+	}
+	// "again" is the one thing the address chooses, and it is true: the
+	// request was signed a moment ago.
+	if said := says("/certificates/5001?issued=again"); len(said) != 1 || said[0] != "already been signed" {
+		t.Errorf("?issued=again: the page says %q", said)
+	}
+	// Without the asking, nothing; and after a while, nothing.
+	if said := says("/certificates/5001"); len(said) != 0 {
+		t.Errorf("the plain page says %q", said)
+	}
+	s.clock.advance(justIssued)
+	if said := says("/certificates/5001?issued=1"); len(said) != 0 {
+		t.Errorf("ten minutes on, the page says %q", said)
+	}
+}
+
+// A request signed while the CA's database could not be read has no page
+// to go to. The form sent again (the first answer may never have reached
+// the browser) gets the same certificate again, and the CA is not asked a
+// second time. Once the inventory has it, the form leads to its page.
+func TestIssueAgainWhileTheCertificateHasNoPage(t *testing.T) {
+	for name, dbDown := range map[string]bool{"the database cannot be read": true, "the database does not show it": false} {
+		t.Run(name, func(t *testing.T) {
+			s := newSite(t, "http://127.0.0.1:8080")
+			b := s.browser()
+			wantRedirect(t, b.signIn("alice", alicePassword), "/")
+			_, form := b.readCSR(gitCSR(t))
+			var issued *ca.Issued
+			s.ca.sign = func(_ context.Context, r *ca.Request, d time.Duration) (*ca.Issued, error) {
+				issued = s.caSigns(r, d)
+				if dbDown {
+					s.caStores(issued.Certificate)
+					s.rows.fail(errors.New("connection refused"))
+				}
+				return issued, nil
+			}
+			first := b.do(http.MethodPost, "/issue", form)
+			wantStatus(t, first, http.StatusOK)
+			wantBody(t, first, "The CA issued the certificate", "Copy it from this page.")
+			// The certificate as that page has it.
+			certificate := regexp.MustCompile(`(?s)<h3>Certificate</h3>\s*<pre class="pem">.*?</pre>`).FindString(first.Body.String())
+			if !strings.Contains(certificate, "BEGIN CERTIFICATE") {
+				t.Fatal("no certificate on the first page")
+			}
+
+			again := b.do(http.MethodPost, "/issue", form)
+			wantStatus(t, again, http.StatusOK)
+			wantBody(t, again, "This request was signed a moment ago, and this is the certificate it was given. It was not signed a second time.",
+				"The certificate list does not have it yet", certificate, `<dd class="mono small">5001</dd>`)
+			if n := len(s.ca.signings()); n != 1 {
+				t.Fatalf("the CA was asked to sign %d times", n)
+			}
+			if events := s.issueEvents(); len(events) != 2 {
+				t.Errorf("history has %d rows for one issuance", len(events))
+			}
+
+			// The database is read again and has it: now the form leads to
+			// the certificate's page.
+			if !dbDown {
+				s.caStores(issued.Certificate)
+			}
+			s.rows.fail(nil)
+			if err := s.inv.Refresh(context.Background()); err != nil {
+				t.Fatal(err)
+			}
+			wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=again")
+			if n := len(s.ca.signings()); n != 1 {
+				t.Errorf("the CA was asked to sign %d times", n)
+			}
+		})
+	}
+}
+
+// A signing form from before handrail-ca was restarted confirms nothing:
+// the memory of what was just signed went with the old process, so the
+// request is shown again and not signed unasked.
+func TestIssueFormFromBeforeARestart(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	_, form := b.readCSR(gitCSR(t))
+	// As a restart leaves things: sessions are in the store and carry on,
+	// the process's own secret and memory are new.
+	s.server.formKey = []byte("the key of another process, 32 b")
+	s.server.issues = recentIssues{}
+	rec := b.do(http.MethodPost, "/issue", form)
+	wantStatus(t, rec, http.StatusUnprocessableEntity)
+	wantBody(t, rec, "the request is not one this page has read and shown", "or handrail-ca was restarted in between", "2. Check what will be signed")
+	if len(s.ca.signings()) != 0 {
+		t.Fatal("a form from before a restart was signed")
+	}
+	// Shown again, it can be confirmed again.
+	form.Set("checked", checkedField.FindStringSubmatch(rec.Body.String())[1])
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
 }

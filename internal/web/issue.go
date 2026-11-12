@@ -19,6 +19,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
@@ -143,6 +144,9 @@ type issueFailure struct {
 type unlistedView struct {
 	Subject, Serial, Expires string
 	PEM, Chain               string
+	// Again is set when this is the certificate of a request signed a
+	// moment ago, handed over a second time and not signed a second time.
+	Again bool
 	// Database is why the CA's database could not be read, empty if it
 	// was read and did not show the certificate.
 	Database string
@@ -150,57 +154,89 @@ type unlistedView struct {
 
 // recentIssues keeps one form sent twice from becoming two certificates:
 // a request being signed is not signed again at the same time, and one
-// that was signed a moment ago leads to the certificate it got.
+// that was signed a moment ago leads to the certificate it got. It is
+// also what a certificate's page goes by when it says something about the
+// request that led to it: what handrail-ca itself saw happen, not what an
+// address claims.
 type recentIssues struct {
 	mu       sync.Mutex
 	inFlight map[string]bool
 	done     map[string]issuedAt
 }
 
+// issuedAt is what is remembered of a request that was given a
+// certificate.
 type issuedAt struct {
 	serial string
+	// how is what happened, in the words the certificate's page keys its
+	// notice on: "now", "differs", "found".
+	how string
+	// issued is the certificate and its chain as the CA sent them, kept
+	// for as long as the entry so that they can be handed over again
+	// while the inventory has no page for the certificate. Nil when the
+	// certificate was found in the inventory and never came in an answer.
+	issued *ca.Issued
 	at     time.Time
 }
 
 // maxRememberedIssues bounds the requests remembered as just signed.
 const maxRememberedIssues = 1000
 
-// begin claims a request for signing. It returns the serial of the
-// certificate the request was given a moment ago, if it was; busy means
-// another signing of the same request is under way.
-func (ri *recentIssues) begin(fingerprint string, now time.Time) (serial string, busy bool) {
-	ri.mu.Lock()
-	defer ri.mu.Unlock()
+// forget drops what is older than justIssued. The caller holds the lock.
+func (ri *recentIssues) forget(now time.Time) {
 	for k, d := range ri.done {
 		if now.Sub(d.at) >= justIssued {
 			delete(ri.done, k)
 		}
 	}
+}
+
+// begin claims a request for signing. It returns what the request was
+// given a moment ago, if it was (the entry then has a serial); busy means
+// another signing of the same request is under way.
+func (ri *recentIssues) begin(fingerprint string, now time.Time) (already issuedAt, busy bool) {
+	ri.mu.Lock()
+	defer ri.mu.Unlock()
+	ri.forget(now)
 	if d, ok := ri.done[fingerprint]; ok {
-		return d.serial, false
+		return d, false
 	}
 	if ri.inFlight[fingerprint] {
-		return "", true
+		return issuedAt{}, true
 	}
 	if ri.inFlight == nil {
 		ri.inFlight = map[string]bool{}
 	}
 	ri.inFlight[fingerprint] = true
-	return "", false
+	return issuedAt{}, false
 }
 
-// end releases a request; with a serial, it is remembered as signed.
-func (ri *recentIssues) end(fingerprint, serial string, now time.Time) {
+// end releases a request; an entry with a serial is remembered.
+func (ri *recentIssues) end(fingerprint string, entry issuedAt) {
 	ri.mu.Lock()
 	defer ri.mu.Unlock()
 	delete(ri.inFlight, fingerprint)
-	if serial == "" || len(ri.done) >= maxRememberedIssues {
+	if entry.serial == "" || len(ri.done) >= maxRememberedIssues {
 		return
 	}
 	if ri.done == nil {
 		ri.done = map[string]issuedAt{}
 	}
-	ri.done[fingerprint] = issuedAt{serial: serial, at: now}
+	ri.done[fingerprint] = entry
+}
+
+// about returns how the certificate with this serial came to be, if a
+// request through handrail-ca was given it within the last justIssued.
+func (ri *recentIssues) about(serial string, now time.Time) (how string, ok bool) {
+	ri.mu.Lock()
+	defer ri.mu.Unlock()
+	ri.forget(now)
+	for _, d := range ri.done {
+		if d.serial == serial {
+			return d.how, true
+		}
+	}
+	return "", false
 }
 
 // mayIssue refuses whoever may not issue, and says why.
@@ -361,6 +397,19 @@ func newRequestView(req *ca.Request, hasTemplate bool) *requestView {
 	return v
 }
 
+// shown is what the signing form carries to say which request was read
+// and shown: the request's fingerprint, keyed with a secret this process
+// made when it started. A form can therefore only confirm a request that
+// this running handrail-ca showed. One from before a restart confirms
+// nothing, and the request is shown again: the memory of what was signed
+// a moment ago does not outlive a restart, and without this the same form
+// would be signed a second time unasked.
+func (s *server) shown(req *ca.Request) string {
+	mac := hmac.New(sha256.New, s.formKey)
+	mac.Write([]byte("issue " + requestFingerprint(req)))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func requestFingerprint(req *ca.Request) string {
 	sum := sha256.Sum256(req.CSR.Raw)
 	return hex.EncodeToString(sum[:])
@@ -404,13 +453,13 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	data.Request, data.Checked = newRequestView(req, provisioner.HasTemplate()), requestFingerprint(req)
+	data.Request, data.Checked = newRequestView(req, provisioner.HasTemplate()), s.shown(req)
 	if r.PostForm.Get("step") != "sign" {
 		s.renderIssue(w, r, http.StatusOK, data)
 		return
 	}
 	if r.PostForm.Get("checked") != data.Checked {
-		refuse(http.StatusUnprocessableEntity, "the request is not the one that was read and shown: it was changed since. Check what it says now, below, and sign again")
+		refuse(http.StatusUnprocessableEntity, "the request is not one this page has read and shown: it was changed since, or handrail-ca was restarted in between. Check what it says now, below, and sign again")
 		return
 	}
 	length, err := chosenValidity(r, provisioner.Claims)
@@ -420,17 +469,18 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 	}
 
 	now := s.opts.Now()
-	already, busy := s.issues.begin(data.Checked, now)
+	fingerprint := requestFingerprint(req)
+	already, busy := s.issues.begin(fingerprint, now)
 	switch {
 	case busy:
 		refuse(http.StatusConflict, "this request is being signed right now, by a form sent a moment ago. Wait for that one")
 		return
-	case already != "":
-		http.Redirect(w, r, s.certificateURL(already)+"?issued=before", http.StatusSeeOther)
+	case already.serial != "":
+		s.issuedAlready(w, r, data, already)
 		return
 	}
-	serial := ""
-	defer func() { s.issues.end(data.Checked, serial, s.opts.Now()) }()
+	done := issuedAt{at: now}
+	defer func() { s.issues.end(fingerprint, done) }()
 
 	u := currentUser(r)
 	asked := "names: " + strings.Join(requestNamesOf(req), ", ") + "; validity: " + validityWords(length)
@@ -450,7 +500,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 	after := s.opts.Inventory.Snapshot()
 
 	if sendErr == nil {
-		serial = issued.Certificate.SerialNumber.String()
+		serial := issued.Certificate.SerialNumber.String()
 		differs := differences(req, issued.Certificate, provisioner.HasTemplate())
 		event.Serial, event.Subject = serial, issued.Certificate.Subject.CommonName
 		event.Outcome, event.Detail = store.OutcomeOK, asked+"; issued, valid until "+issued.Certificate.NotAfter.UTC().Format(stamp)
@@ -458,6 +508,12 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 			event.Detail += "; " + d
 		}
 		s.record(r, event)
+		// Remembered with the certificate itself, so that it can be handed
+		// over again if this answer does not reach the browser.
+		done.serial, done.how, done.issued = serial, "now", issued
+		if len(differs) > 0 {
+			done.how = "differs"
+		}
 		if after.Certificate(serial) == nil {
 			// Issued, and not in the inventory to be looked at: handed over
 			// here, since this answer is the only place it is.
@@ -465,24 +521,40 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 			s.renderIssue(w, r, http.StatusOK, data)
 			return
 		}
-		said := "now"
-		if len(differs) > 0 {
-			said = "differs"
-		}
-		http.Redirect(w, r, s.certificateURL(serial)+"?issued="+said, http.StatusSeeOther)
+		http.Redirect(w, r, s.certificateURL(serial)+"?issued=1", http.StatusSeeOther)
 		return
 	}
 
 	outcome := s.issueOutcome(ctx, sendErr, readErr, before, after, req, sentAt)
-	serial = outcome.serial
 	event.Serial, event.Outcome, event.Detail = outcome.serial, outcome.outcome, asked+"; "+outcome.detail
 	s.record(r, event)
 	if outcome.serial != "" {
-		http.Redirect(w, r, s.certificateURL(outcome.serial)+"?issued=found", http.StatusSeeOther)
+		done.serial, done.how = outcome.serial, "found"
+		http.Redirect(w, r, s.certificateURL(outcome.serial)+"?issued=1", http.StatusSeeOther)
 		return
 	}
 	data.Failure = outcome.failure
 	s.renderIssue(w, r, http.StatusBadGateway, data)
+}
+
+// issuedAlready answers a form for a request that was signed a moment
+// ago. It is not signed again. If the certificate has a page, the visitor
+// is sent there. If it has none yet, because the CA's database has not
+// shown it, the certificate that was kept from the CA's answer is handed
+// over again: a first answer that never reached the browser must not have
+// been the only chance to have it.
+func (s *server) issuedAlready(w http.ResponseWriter, r *http.Request, data issueData, already issuedAt) {
+	if s.opts.Inventory.Snapshot().Certificate(already.serial) != nil {
+		http.Redirect(w, r, s.certificateURL(already.serial)+"?issued=again", http.StatusSeeOther)
+		return
+	}
+	if already.issued == nil {
+		s.errorPage(w, r, http.StatusConflict, "This request was signed a moment ago, and the certificate it was given (serial "+already.serial+") is not in the certificate list as handrail-ca has it now. It was not signed again. Look for it in the list once the CA's database is being read.")
+		return
+	}
+	data.Request, data.Unlisted = nil, newUnlistedView(already.issued, nil, s.opts.Now())
+	data.Unlisted.Again = true
+	s.renderIssue(w, r, http.StatusOK, data)
 }
 
 func contains(list []string, s string) bool {

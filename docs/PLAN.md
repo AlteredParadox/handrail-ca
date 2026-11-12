@@ -469,7 +469,19 @@ why.
   same form, and two forms at once give one certificate. A certificate
   the CA issued that the inventory does not have yet (its database could
   not be read) is handed over on the page itself, since that answer is
-  the only place it is.
+  the only place it is; it is kept in memory for those ten minutes, so
+  that the same form sent again, after an answer that never reached the
+  browser, gets the certificate again and not a page that does not
+  exist. That memory is the process's own. So the signing form's
+  fingerprint is keyed with a secret made when the process starts: a
+  form from before a restart confirms nothing, and the request is shown
+  again instead of being signed a second time unasked.
+
+  What a certificate's page says about the request that led to it
+  ("issued", "differs from what was asked", "found after a lost answer")
+  comes from that same memory of what handrail-ca saw happen, never from
+  the address. An address anyone can write must not be able to make a
+  page tell an operator something untrue about a certificate.
 - *Revoke:* offered only on certificates in the inventory, behind a
   confirmation that names the certificate, with a reason code. The page says
   what passive revocation means and whether the CA publishes a CRL. After a
