@@ -81,11 +81,17 @@ The answer is one page with the key in unencrypted PKCS #8 PEM, the
 certificate and its chain, sent with `Cache-Control: no-store`. The key is
 in that answer and nowhere else. Each showing of the form carries a mark
 that is taken once: the form sent again, as a reload of the answer does,
-is refused and makes no second key. If no certificate comes back the key
-is discarded and the page says so; if the CA's database then turns out to
-hold a certificate for it, that is recorded as a failure (a certificate
-nobody has the key for) and the operator is sent to its page to revoke
-it. `-no-key-generation` switches the path off: its routes then refuse,
+is refused and makes no second key. The mark is a random number with a
+code over it, keyed with the secret the process makes at start, and only
+a mark this running process gave out is taken. Which marks were taken is
+remembered in memory only, so the key is what keeps the promise across a
+restart: every mark from before it is refused. If no certificate comes
+back the key is discarded and the page says so; if the CA's database then
+turns out to hold a certificate for it, that is recorded as a failure (a
+certificate nobody has the key for) and the operator is sent to its page
+to revoke it. That page says so from handrail-ca's own record of what
+happened, as it does for every notice about a request: no address can
+make a certificate's page say that nobody has its key. `-no-key-generation` switches the path off: its routes then refuse,
 and the Issue page does not offer it. Not done: encrypting the key with a
 password of the operator's, or offering it as a file to download.
 

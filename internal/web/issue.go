@@ -169,7 +169,8 @@ type recentIssues struct {
 type issuedAt struct {
 	serial string
 	// how is what happened, in the words the certificate's page keys its
-	// notice on: "now", "differs", "found".
+	// notice on: "now", "differs", "found", and "keyless" for one issued
+	// for a key handrail-ca made and then had to discard.
 	how string
 	// issued is the certificate and its chain as the CA sent them, kept
 	// for as long as the entry so that they can be handed over again
@@ -223,6 +224,20 @@ func (ri *recentIssues) end(fingerprint string, entry issuedAt) {
 		ri.done = map[string]issuedAt{}
 	}
 	ri.done[fingerprint] = entry
+}
+
+// remember records what became of a certificate that no signing form is
+// waiting on, for its page to say.
+func (ri *recentIssues) remember(entry issuedAt) {
+	ri.mu.Lock()
+	defer ri.mu.Unlock()
+	if entry.serial == "" || len(ri.done) >= maxRememberedIssues {
+		return
+	}
+	if ri.done == nil {
+		ri.done = map[string]issuedAt{}
+	}
+	ri.done["serial "+entry.serial] = entry
 }
 
 // about returns how the certificate with this serial came to be, if a

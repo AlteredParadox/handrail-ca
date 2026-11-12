@@ -38,7 +38,7 @@ import (
 	"handrail-ca/internal/store"
 )
 
-var onceField = regexp.MustCompile(`name="once" value="([0-9a-f]{32})"`)
+var onceField = regexp.MustCompile(`name="once" value="([0-9a-f]{96})"`)
 
 // generateFormOf loads the form and returns it filled in.
 func (b *browser) generateForm(commonName, names, key string) url.Values {
@@ -145,7 +145,7 @@ func TestGenerate(t *testing.T) {
 	// key, no second certificate, and no key shown.
 	again := b.do(http.MethodPost, "/issue/generate", form)
 	wantStatus(t, again, http.StatusConflict)
-	wantBody(t, again, "This form was already sent once.", "handrail-ca does not keep it")
+	wantBody(t, again, "This form cannot be taken: it was already sent once", "handrail-ca does not keep it")
 	if strings.Contains(again.Body.String(), "PRIVATE KEY") || len(s.ca.signings()) != 1 {
 		t.Error("a form sent twice made a second key or certificate")
 	}
@@ -231,10 +231,7 @@ func TestGenerateRefusals(t *testing.T) {
 	rec := b.do(http.MethodPost, "/issue/generate", form)
 	wantBody(t, rec, `value="git.internal.example"`, "git\n10.20.0.14</textarea>")
 
-	// A form without the mark, or with one that is no mark, makes nothing.
 	form = b.generateForm("git.internal.example", "", "p256")
-	form.Set("once", "again")
-	wantStatus(t, b.do(http.MethodPost, "/issue/generate", form), http.StatusConflict)
 
 	// Viewers, and everyone who is not signed in.
 	viewer := s.browser()
@@ -264,6 +261,67 @@ func manyNames(n int) string {
 	return b.String()
 }
 
+// Only a mark this running handrail-ca gave out is taken. One made up, and
+// one from before a restart, make nothing: the memory of which marks were
+// taken went with the old process, and a reload of the page that showed a
+// key must not make a second key and certificate.
+func TestGenerateFormMarks(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+
+	for name, mark := range map[string]string{
+		"made up":        strings.Repeat("ab", 48),
+		"too short":      strings.Repeat("ab", 16),
+		"not hex at all": strings.Repeat("zz", 48),
+		"none":           "",
+	} {
+		form := b.generateForm("git.internal.example", "", "p256")
+		form.Set("once", mark)
+		rec := b.do(http.MethodPost, "/issue/generate", form)
+		if rec.Code != http.StatusConflict || strings.Contains(rec.Body.String(), "PRIVATE KEY") {
+			t.Errorf("a mark %s: %d", name, rec.Code)
+		}
+	}
+
+	// A form taken, and its page reloaded after a restart: sessions are in
+	// the store and carry on, the process's secret and memory are new.
+	form := b.generateForm("git.internal.example", "", "p256")
+	wantStatus(t, b.do(http.MethodPost, "/issue/generate", form), http.StatusOK)
+	s.server.formKey = []byte("the key of another process, 32 b")
+	s.server.onces = usedForms{}
+	rec := b.do(http.MethodPost, "/issue/generate", form)
+	wantStatus(t, rec, http.StatusConflict)
+	wantBody(t, rec, "This form cannot be taken", "from before handrail-ca was last restarted")
+	// And so is one that was never sent before the restart.
+	if n := len(s.ca.signings()); n != 1 {
+		t.Errorf("the CA was asked to sign %d times, want the once", n)
+	}
+	// A form from the new process is taken.
+	wantStatus(t, b.do(http.MethodPost, "/issue/generate", b.generateForm("git.internal.example", "", "p256")), http.StatusOK)
+}
+
+// What a certificate's page says about a discarded key comes from what
+// happened, not from the address.
+func TestKeylessNoticeIsNotForTheAsking(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	// A certificate issued in the ordinary way, with its key handed over.
+	rec := b.do(http.MethodPost, "/issue/generate", b.generateForm("git.internal.example", "", "p256"))
+	wantStatus(t, rec, http.StatusOK)
+	for _, made := range []string{"keyless", "1", "again"} {
+		body := b.get("/certificates/5001?issued=" + made).Body.String()
+		if strings.Contains(body, "never handed over") || strings.Contains(body, "Revoke it below") {
+			t.Errorf("?issued=%s makes a good certificate's page say nobody has its key", made)
+		}
+	}
+	// And one nothing here led to.
+	if body := b.get("/certificates/101?issued=keyless").Body.String(); strings.Contains(body, "never handed over") {
+		t.Error("?issued=keyless makes any certificate's page say nobody has its key")
+	}
+}
+
 // Switched off, the path is not offered and not open; on a read-only
 // handrail-ca neither way of issuing is.
 func TestGenerateSwitchedOff(t *testing.T) {
@@ -279,11 +337,11 @@ func TestGenerateSwitchedOff(t *testing.T) {
 	rec := b.get("/issue/generate")
 	wantStatus(t, rec, http.StatusForbidden)
 	wantBody(t, rec, "Generating keys is switched off on this handrail-ca.")
-	form := url.Values{"form_token": {tokenIn(t, page)}, "once": {strings.Repeat("a", 32)}, "common_name": {"git.internal.example"}, "key": {"p256"}}
+	form := url.Values{"form_token": {tokenIn(t, page)}, "once": {strings.Repeat("a", 96)}, "common_name": {"git.internal.example"}, "key": {"p256"}}
 	wantStatus(t, b.do(http.MethodPost, "/issue/generate", form), http.StatusForbidden)
 	// Issuing for a CSR is as before.
 	_, csrForm := b.readCSR(gitCSR(t))
-	wantRedirect(t, b.do(http.MethodPost, "/issue", csrForm), "/certificates/5001?issued=now")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", csrForm), "/certificates/5001?issued=1")
 	if len(s.ca.signings()) != 1 {
 		t.Error("a key was generated although that is switched off")
 	}
@@ -357,8 +415,8 @@ func TestGenerateOutcomes(t *testing.T) {
 			return nil, lost
 		}
 		rec := b.do(http.MethodPost, "/issue/generate", b.generateForm("git.internal.example", "", "p256"))
-		wantRedirect(t, rec, "/certificates/5001?issued=keyless")
-		page := b.get("/certificates/5001?issued=keyless")
+		wantRedirect(t, rec, "/certificates/5001?issued=1")
+		page := b.get("/certificates/5001?issued=1")
 		wantBody(t, page, "issued for a key that handrail-ca had made and never handed over", "Nobody has it, and the certificate is of no use. Revoke it below",
 			`href="/certificates/5001/revoke"`)
 		events := s.issueEvents()

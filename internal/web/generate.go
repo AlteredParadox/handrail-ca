@@ -23,8 +23,10 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/elliptic"
+	"crypto/hmac"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/x509"
 	"encoding/hex"
 	"encoding/pem"
@@ -114,12 +116,37 @@ func (u *usedForms) take(once string, now time.Time) bool {
 	return true
 }
 
-func newOnce() (string, error) {
-	b := make([]byte, 16)
+// A form's mark is a random number and a code over it, keyed with the
+// secret this process made when it started. Only a mark this running
+// handrail-ca gave out is taken, and each only once. The memory of which
+// were taken is the process's own and goes with it, and that is why the
+// key does too: after a restart every mark from before is refused, where
+// one remembered nowhere would be taken a second time and make a second
+// key and certificate.
+const onceRandom = 16
+
+func (s *server) newOnce() (string, error) {
+	b := make([]byte, onceRandom)
 	if _, err := rand.Read(b); err != nil {
 		return "", err
 	}
-	return hex.EncodeToString(b), nil
+	return hex.EncodeToString(b) + hex.EncodeToString(s.onceCode(b)), nil
+}
+
+func (s *server) onceCode(random []byte) []byte {
+	mac := hmac.New(sha256.New, s.formKey)
+	mac.Write([]byte("once "))
+	mac.Write(random)
+	return mac.Sum(nil)
+}
+
+// ourOnce reports whether a mark is one this process gave out.
+func (s *server) ourOnce(once string) bool {
+	raw, err := hex.DecodeString(once)
+	if err != nil || len(raw) != onceRandom+sha256.Size {
+		return false
+	}
+	return hmac.Equal(raw[onceRandom:], s.onceCode(raw[:onceRandom]))
 }
 
 // mayGenerate refuses whoever may not issue, and everyone when the path is
@@ -137,7 +164,7 @@ func (s *server) mayGenerate(w http.ResponseWriter, r *http.Request) bool {
 
 func (s *server) newGenerateData(r *http.Request, w http.ResponseWriter) (issueData, ca.Provisioner, bool) {
 	data, provisioner := s.newIssueData(r, "", r.PostForm.Get("validity"))
-	once, err := newOnce()
+	once, err := s.newOnce()
 	if err != nil {
 		s.log.Error("no randomness for a form", "err", err)
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not prepare the form.")
@@ -234,8 +261,8 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 	// Everything typed has been checked. From here a key is made, so the
 	// form is taken: sent again, it makes nothing.
 	once := r.PostForm.Get("once")
-	if len(once) != 32 || !s.onces.take(once, s.opts.Now()) {
-		s.errorPage(w, r, http.StatusConflict, "This form was already sent once. If it made a key, that key was shown then and is gone: handrail-ca does not keep it. Start again from the Issue page for a new one.")
+	if !s.ourOnce(once) || !s.onces.take(once, s.opts.Now()) {
+		s.errorPage(w, r, http.StatusConflict, "This form cannot be taken: it was already sent once, or it is from before handrail-ca was last restarted. If it made a key, that key was shown then and is gone: handrail-ca does not keep it. Start again from the Issue page for a new one.")
 		return
 	}
 
@@ -276,7 +303,10 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 			event.Outcome = store.OutcomeFailed
 			event.Detail += "; the key was not handed over and is gone, so the certificate is of no use to anyone"
 			s.record(r, event)
-			http.Redirect(w, r, s.certificateURL(outcome.serial)+"?issued=keyless", http.StatusSeeOther)
+			// Remembered as that, so that its page can say so from what
+			// happened here and not from an address.
+			s.issues.remember(issuedAt{serial: outcome.serial, how: "keyless", at: s.opts.Now()})
+			http.Redirect(w, r, s.certificateURL(outcome.serial)+"?issued=1", http.StatusSeeOther)
 			return
 		}
 		s.record(r, event)
