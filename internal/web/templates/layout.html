@@ -33,7 +33,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <span>handrail-ca</span>
 </a>
 <nav aria-label="Main">
-<a href="{{.Base}}/"{{if eq .Page "list.html"}} aria-current="page"{{end}}>Certificates</a>
+<a href="{{.Base}}/"{{if or (eq .Page "list.html") (eq .Page "detail.html")}} aria-current="page"{{end}}>Certificates</a>
+<a href="{{.Base}}/names"{{if eq .Page "names.html"}} aria-current="page"{{end}}>Names in use</a>
 <a href="{{.Base}}/status"{{if eq .Page "status.html"}} aria-current="page"{{end}}>CA status</a>
 </nav>
 <div class="who">
