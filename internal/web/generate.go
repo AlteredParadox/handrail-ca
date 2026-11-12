@@ -159,7 +159,7 @@ func (s *server) generateForm(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	s.render(w, r, http.StatusOK, "issue.html", "Issue a certificate", data)
+	s.renderIssue(w, r, http.StatusOK, data)
 }
 
 // typedNames reads the names box: one name to a line, or separated by
@@ -197,7 +197,7 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 	}
 	refuse := func(code int, problem string) {
 		data.Problem = problem
-		s.render(w, r, code, "issue.html", "Issue a certificate", data)
+		s.renderIssue(w, r, code, data)
 	}
 	commonName := strings.TrimSpace(r.PostForm.Get("common_name"))
 	for _, c := range commonName {
@@ -262,12 +262,13 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), issueTimeout)
 	defer cancel()
 	before := s.opts.Inventory.Snapshot()
+	sentAt := s.opts.Now()
 	issued, sendErr := s.opts.CA.Sign(ctx, req, length)
 	readErr := s.opts.Inventory.Refresh(ctx)
 	after := s.opts.Inventory.Snapshot()
 
 	if sendErr != nil {
-		outcome := s.issueOutcome(ctx, sendErr, readErr, before, after, req)
+		outcome := s.issueOutcome(ctx, sendErr, readErr, before, after, req, sentAt)
 		event.Serial, event.Outcome, event.Detail = outcome.serial, outcome.outcome, asked+"; "+outcome.detail
 		if outcome.serial != "" {
 			// A certificate exists for a key that is about to be gone:
@@ -281,7 +282,7 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		s.record(r, event)
 		data.Failure = outcome.failure
 		data.Failure.KeyDiscarded = true
-		s.render(w, r, http.StatusBadGateway, "issue.html", "Issue a certificate", data)
+		s.renderIssue(w, r, http.StatusBadGateway, data)
 		return
 	}
 
@@ -320,5 +321,5 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		view.URL = s.certificateURL(serial)
 	}
 	data.Generate, data.Generated = nil, view
-	s.render(w, r, http.StatusOK, "issue.html", "Issue a certificate", data)
+	s.renderIssue(w, r, http.StatusOK, data)
 }
