@@ -39,6 +39,9 @@ const (
 	OutcomeAttempt = "attempted"
 	OutcomeOK      = "ok"
 	OutcomeFailed  = "failed"
+	// OutcomeUnknown is written when an action was sent to the CA and what
+	// became of it could not be learned.
+	OutcomeUnknown = "unknown"
 )
 
 // ActorCommandLine is the actor recorded for the `handrail-ca user`

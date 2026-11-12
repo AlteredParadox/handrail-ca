@@ -1,0 +1,108 @@
+<!--
+handrail-ca — a lightweight web UI for step-ca.
+Copyright (C) 2026 AlteredParadox
+
+This program is free software: you can redistribute it and/or modify it
+under the terms of the GNU Affero General Public License as published by
+the Free Software Foundation, either version 3 of the License, or (at your
+option) any later version.
+
+This program is distributed in the hope that it will be useful, but WITHOUT
+ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or
+FITNESS FOR A PARTICULAR PURPOSE. See the GNU Affero General Public License
+for more details.
+
+You should have received a copy of the GNU Affero General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
+-->
+
+{{define "content"}}
+{{$base := .Base}}{{$token := .FormToken}}
+{{with .Data}}
+<div class="narrow">
+<nav class="crumbs" aria-label="Breadcrumb"><a href="{{$base}}/">Certificates</a> <span aria-hidden="true">/</span> <a href="{{$base}}/certificates/{{.Serial}}">{{.Title}}</a> <span aria-hidden="true">/</span> <span>Revoke</span></nav>
+
+{{if .Unrecorded}}
+<h1>The CA confirmed the revocation</h1>
+<section class="card">
+<p>The CA answered that the certificate is revoked. {{if .Unrecorded.Database}}Its database could not be read afterwards to see the record: {{.Unrecorded.Database}}{{else}}Its database did not show the record when it was read just afterwards.{{end}}</p>
+<p class="muted">The <a href="{{$base}}/certificates/{{.Serial}}">certificate's page</a> will show the revocation once the record has been read. Nothing needs to be sent again.</p>
+</section>
+{{else}}
+
+<h1>Revoke this certificate?</h1>
+
+{{with .Failure}}
+<section class="card failure" role="alert">
+{{if .Unknown}}
+<h2>It is not known whether the certificate was revoked</h2>
+<p>The request was sent, and the CA did not confirm it: {{.CA}}</p>
+<p>The CA's database could not be read to see whether the revocation was recorded all the same: {{.Database}}</p>
+<p>Before sending it again, look at the <a href="{{$base}}/status">CA status</a> page. Sending it again is safe: the CA refuses to revoke a certificate twice, and this page will then say that it was already revoked.</p>
+{{else}}
+<h2>The certificate was not revoked</h2>
+<p>The CA did not confirm the request: {{.CA}}</p>
+<p>Its database was read afterwards and holds no revocation for this certificate. Nothing was changed.</p>
+{{end}}
+{{with .Clock}}<p><strong>{{.}}</strong> The CA only accepts a request stamped within a minute of its own time, so nothing handrail-ca asks will be accepted until the clocks agree.</p>{{end}}
+</section>
+{{end}}
+
+{{if .Stale}}
+<output class="stale">The certificate list is as it was {{.LastRead}}: the last attempt to read the CA's database failed. If this certificate has been revoked since then, the CA will say so when asked. {{.Stale}}</output>
+{{end}}
+
+<section class="card" aria-label="Certificate">
+<dl>
+<dt>Subject</dt><dd class="strong">{{if .Subject}}{{.Subject}}{{else}}<span class="muted">Empty</span>{{end}}</dd>
+{{with .Names}}<dt>Names</dt><dd class="mono small">{{.}}</dd>{{end}}
+<dt>Serial</dt><dd class="mono small">{{.SerialHex}}</dd>
+<dt>Expires</dt><dd>{{.Expires}}</dd>
+<dt>Provisioner</dt><dd>{{if .Provisioner}}{{.Provisioner}} <span class="sub">{{.ProvisionerType}}</span>{{else}}<span class="muted">Not recorded by the CA</span>{{end}}</dd>
+</dl>
+</section>
+
+<section class="card">
+<h2>What revoking does on this CA</h2>
+<ul class="plain">
+<li>The CA records the certificate as revoked and refuses to renew it.</li>
+<li>It cannot be undone. A replacement has to be issued as a new certificate.</li>
+</ul>
+{{if .Expired}}
+<p class="callout info">This certificate has already expired, so nothing that checks dates accepts it any more. Revoking it only adds the record.</p>
+{{else if not .CRLKnown}}
+<p class="callout warn"><strong>Whether this CA publishes a revocation list could not be determined.</strong> If it does not, systems that already trust this certificate have no way to learn it was revoked and will keep accepting it until it expires on {{.ExpiresDay}}. If the key is compromised, also remove or replace the certificate where it is installed.</p>
+{{else if .CRLPublished}}
+<p class="callout info"><strong>This CA publishes a revocation list.</strong> Systems that check it will reject the certificate once they fetch the next list. Systems that do not check it will keep accepting the certificate until it expires on {{.ExpiresDay}}.</p>
+{{else}}
+<p class="callout warn"><strong>This CA does not publish a revocation list.</strong> Systems that already trust this certificate have no way to learn it was revoked and will keep accepting it until it expires on {{.ExpiresDay}}. If the key is compromised, also remove or replace the certificate where it is installed.</p>
+{{end}}
+</section>
+
+<form method="post" action="{{$base}}/certificates/{{.Serial}}/revoke" class="card revoke">
+<input type="hidden" name="form_token" value="{{$token}}">
+{{with .Problem}}<p class="problem" role="alert">Nothing was sent: {{.}}.</p>{{end}}
+<div class="field short">
+<label for="reason">Reason</label>
+<select id="reason" name="reason">
+{{range .Reasons}}<option value="{{.Code}}"{{if .Selected}} selected{{end}}>{{.Label}}</option>
+{{end}}
+</select>
+</div>
+<div class="field">
+<label for="note">Note for the CA's record and the history (optional)</label>
+<input id="note" name="note" type="text" value="{{.Note}}" maxlength="{{.MaxNote}}" autocomplete="off">
+</div>
+<div class="field">
+<label for="confirm">Type {{.ConfirmWhat}} to confirm: <span class="mono ink">{{.ConfirmWord}}</span></label>
+<input id="confirm" name="confirm" type="text" class="mono" autocomplete="off" autocapitalize="off" spellcheck="false" required>
+</div>
+<div class="actions">
+<button type="submit" class="danger">Revoke certificate</button>
+<a class="cancel" href="{{$base}}/certificates/{{.Serial}}">Cancel</a>
+</div>
+</form>
+{{end}}
+</div>
+{{end}}
+{{end}}

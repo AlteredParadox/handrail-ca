@@ -318,6 +318,36 @@ P-256 key `step` makes by default). A provisioner whose encrypted key is
 not held by the CA cannot be used: reading the key from a local file
 instead is not built.
 
+As built, a revocation runs in this order. The attempt is written to the
+history. The request is sent to the CA once, on a deadline of its own that
+the browser going away does not cut short. Then, whatever the answer, the
+CA's database is read again, and the outcome written to the history is
+worked out from both:
+
+| The CA answered | Its database afterwards | Recorded as | The operator sees |
+|---|---|---|---|
+| Confirmed | Holds the revocation | ok | The certificate's page, with the record |
+| Confirmed | Does not show it, or cannot be read | ok | That the CA confirmed it and the record was not seen |
+| An error, or nothing | Holds this request's revocation | ok | The certificate's page, with the record |
+| An error, or nothing | Holds another revocation | failed | The certificate's page, saying it was revoked already |
+| An error, or nothing | Holds none | failed | That it was not revoked, with the CA's words, and the form again |
+| An error, or nothing | Cannot be read | unknown | That it is not known, with both reasons, and the form again |
+
+A record counts as this request's when it carries the same reason and
+note, was made with a provisioner's token, and is dated no earlier than
+two minutes before the request (the CA stamps it with its own clock).
+"Holds none" is what was read just after: a request that timed out here
+and was still in flight at the CA could land later, and the next read of
+the database would show it. Nothing is ever sent a second time by
+handrail-ca itself; sending again is the operator's decision, and is
+harmless, since step-ca refuses to revoke a certificate twice.
+
+The revoke page works from the picture of the certificate list handrail-ca
+already holds, and does not read the CA's database to come up, so a
+database that is down does not stand between an operator and a
+revocation. Only a certificate in that picture can be revoked from here:
+step-ca would accept any serial number.
+
 A token is dated by handrail-ca's clock and checked by the CA's, with a
 minute's leeway. When the CA refuses a request and the `Date` of its
 answer is more than fifty seconds from handrail-ca's clock, the error
@@ -632,8 +662,15 @@ server that answers `/healthz`.
   `-provisioner` and `-provisioner-password-file`, or `-read-only`, one of
   which has to be said; and a card on the status page for whether
   handrail-ca can act on the CA.
-- The revoke flow, history (store and log) with its page, outcome
-  verification.
+- Done: the revoke flow. A certificate's page offers it to operators; the
+  revoke page names the certificate, says what revoking means on this CA
+  (whether a revocation list is published, or that this could not be
+  learned), takes one of six RFC 5280 reasons and a note of up to 200
+  characters, and wants the certificate's subject typed (the end of the
+  serial number, for a subject nobody could type). Details under "Acting on
+  the CA" in section 4. Checked on the development CA through the pages
+  (`make dev-test`).
+- The history's own page.
 - A device cookie, as its own change: a browser that has signed in as a
   user before keeps a sign-in allowance of its own for that name, so that
   someone hammering a known user name cannot keep its owner out of the UI

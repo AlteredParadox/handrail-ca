@@ -36,7 +36,7 @@ var templateFS embed.FS
 // that page's content.
 type pages map[string]*template.Template
 
-var pageNames = []string{"signin.html", "list.html", "detail.html", "names.html", "status.html", "account.html", "error.html"}
+var pageNames = []string{"signin.html", "list.html", "detail.html", "revoke.html", "names.html", "status.html", "account.html", "error.html"}
 
 func loadPages() (pages, error) {
 	set := pages{}
