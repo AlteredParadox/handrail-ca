@@ -307,13 +307,13 @@ func TestIntegrationIssueThroughThePages(t *testing.T) {
 	form.Set("validity", "168h0m0s")
 	rec := b.do(http.MethodPost, "/issue", form)
 	m := issuedPage.FindStringSubmatch(rec.Header().Get("Location"))
-	if rec.Code != http.StatusSeeOther || m == nil || m[2] != "now" {
+	if rec.Code != http.StatusSeeOther || m == nil || m[2] != "1" {
 		t.Fatalf("signing: %d to %q; body: %.400s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
 	}
 	serial := m[1]
 
 	// The certificate's page, from the CA's database.
-	cert := b.get("/certificates/" + serial + "?issued=now")
+	cert := b.get("/certificates/" + serial + "?issued=1")
 	wantStatus(t, cert, http.StatusOK)
 	wantBody(t, cert, "<h1>"+name+"</h1>", "Issued. This is the certificate the CA signed for the request.", "10.20.6.1", ">Not revoked<",
 		"7 days", `<span class="strong">alice</span> Issue <span class="badge ok">Done</span>`)
@@ -352,7 +352,7 @@ func TestIntegrationIssueThroughThePages(t *testing.T) {
 	}
 
 	// The same form again: no second certificate.
-	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/"+serial+"?issued=before")
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/"+serial+"?issued=again")
 
 	// A name the CA's policy does not allow is refused in the CA's words,
 	// and nothing is issued.
@@ -394,7 +394,7 @@ func TestIntegrationIssueUnderATemplate(t *testing.T) {
 	}
 	rec := b.do(http.MethodPost, "/issue", form)
 	m := issuedPage.FindStringSubmatch(rec.Header().Get("Location"))
-	if rec.Code != http.StatusSeeOther || m == nil || m[2] != "now" {
+	if rec.Code != http.StatusSeeOther || m == nil || m[2] != "1" {
 		t.Fatalf("signing: %d to %q; body: %.400s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
 	}
 	cert := b.get("/certificates/" + m[1])

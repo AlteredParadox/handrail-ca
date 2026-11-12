@@ -98,7 +98,8 @@ type detailData struct {
 	// does not carry what was asked for, "found" when the CA's answer was
 	// lost and the certificate was found in its database, "before" when
 	// the same request had been signed a moment earlier. Only set for a
-	// certificate that is minutes old.
+	// certificate that a request through this handrail-ca was given in
+	// the last few minutes, and from its own record of that.
 	JustIssued string
 
 	// History is what was done to the certificate through handrail-ca.
@@ -264,12 +265,16 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	if said := r.URL.Query().Get("revoked"); data.Revocation != nil && (said == "now" || said == "before") {
 		data.JustRevoked = said
 	}
-	// Nothing is said about an issuance of a certificate that is not new:
-	// an address anyone can write must not make an old one look fresh.
-	if said := r.URL.Query().Get("issued"); now.Sub(cert.NotBefore) < justIssued+5*time.Minute && now.After(cert.NotBefore.Add(-5*time.Minute)) {
-		switch said {
-		case "now", "differs", "found", "before":
-			data.JustIssued = said
+	// What is said about the request that led here comes from what
+	// handrail-ca itself saw happen a moment ago, never from the address:
+	// anyone can write an address. The address only asks for it to be
+	// said, and tells a first arrival from a form sent again.
+	if asked := r.URL.Query(); asked.Has("issued") {
+		if how, ok := s.issues.about(summary.Serial, now); ok {
+			data.JustIssued = how
+			if asked.Get("issued") == "again" {
+				data.JustIssued = "before"
+			}
 		}
 	}
 	s.render(w, r, code, "detail.html", data.Title, data)

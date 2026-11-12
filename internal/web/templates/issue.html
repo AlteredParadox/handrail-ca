@@ -34,7 +34,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <dt>Serial</dt><dd class="mono small">{{.Unlisted.Serial}}</dd>
 <dt>Expires</dt><dd>{{.Unlisted.Expires}}</dd>
 </dl>
-<p class="callout warn"><strong>Copy it from this page.</strong> {{if .Unlisted.Database}}The CA's database could not be read afterwards ({{.Unlisted.Database}}){{else}}The CA's database did not show it when it was read just afterwards{{end}}, so handrail-ca has no page for it yet. It will be in the certificate list once the database has been read.</p>
+{{if .Unlisted.Again}}<p class="callout info">This request was signed a moment ago, and this is the certificate it was given. It was not signed a second time.</p>{{end}}
+<p class="callout warn"><strong>Copy it from this page.</strong> {{if .Unlisted.Again}}The certificate list does not have it yet{{else if .Unlisted.Database}}The CA's database could not be read afterwards ({{.Unlisted.Database}}){{else}}The CA's database did not show it when it was read just afterwards{{end}}, so handrail-ca has no page for it yet. It will be in the certificate list once the database has been read.</p>
 <h3>Certificate</h3>
 <pre class="pem">{{.Unlisted.PEM}}</pre>
 <h3>Certificate and chain</h3>

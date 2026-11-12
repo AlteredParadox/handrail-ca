@@ -21,6 +21,7 @@ package web
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/x509"
 	"embed"
 	"encoding/json"
@@ -162,6 +163,10 @@ type server struct {
 
 	// issues keeps a signing form sent twice from giving two certificates.
 	issues recentIssues
+	// formKey is made when the process starts and kept only in it. Forms
+	// that must not be taken twice are keyed with it, so that one from
+	// before a restart is not taken at all.
+	formKey []byte
 }
 
 // New returns the handler for the whole site.
@@ -206,7 +211,12 @@ func build(opts Options) (*server, http.Handler, error) {
 	} else {
 		host = strings.TrimSuffix(host, ":80")
 	}
+	formKey := make([]byte, 32)
+	if _, err := rand.Read(formKey); err != nil {
+		return nil, nil, err
+	}
 	s := &server{
+		formKey:   formKey,
 		opts:      opts,
 		base:      strings.TrimRight(u.Path, "/"),
 		host:      host,
