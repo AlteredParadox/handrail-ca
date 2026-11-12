@@ -40,6 +40,18 @@ jobs:
       - name: make vet
         run: make vet
 
+      # Node for `make jscheck`: the version is pinned here and the ESLint
+      # tree by package-lock.json, so the lint runs the same code everywhere.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+      # The page script: node --check, its test against a stand-in page,
+      # and ESLint no-undef. A reference to a name that does not exist is
+      # an error only when a button is pressed, which no Go test does.
+      - name: make jscheck
+        run: make jscheck
+
       # Every first-party source carries the AGPL notice. Cheap and offline,
       # so unlike notices-check this one is safe to gate every PR on —
       # Dependabot never touches source headers.

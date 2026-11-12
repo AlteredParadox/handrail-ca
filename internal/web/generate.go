@@ -32,7 +32,6 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"errors"
-	"html/template"
 	"net/http"
 	"sort"
 	"strings"
@@ -147,26 +146,35 @@ type generatedView struct {
 	// MadePassword is the password handrail-ca made for the key, when it
 	// was asked to: shown on this page, once, and kept nowhere.
 	MadePassword string
-	// Files are the same things as files to save. Each is a link that
-	// carries its file within this page: nothing is fetched to save it,
-	// so the key is still in this one answer and nowhere else.
-	Files []fileLink
+	// Files are the same things as files to save. Each is carried
+	// within this page and saved from it by the page's script: nothing is
+	// fetched to save it, so the key is still in this one answer and
+	// nowhere else. PFXText is the PFX file in base64, in lines, for a
+	// browser that does not run the script.
+	Files   []fileLink
+	PFXText string
 	// URL is the certificate's page, when the inventory has it.
 	URL string
 	// Differs says where the certificate does not carry what was asked.
 	Differs []string
 }
 
-// fileLink is a file carried inside the page, to be saved from it.
+// fileLink is a file carried inside the page, to be saved from it: its
+// name, its media type and its contents in base64.
+//
+// The contents are never an address. A file that is its own address (a
+// data: link) is saved without asking the server for anything, which is
+// what is wanted, but a browser keeps the address of each download in its
+// history: Chromium was found to keep the whole of a private key that way
+// (2026-11-12). The page's script (static/save.js) saves the file from
+// the page under a blob: address instead, which names nothing.
 type fileLink struct {
-	Label, Name string
-	URL         template.URL
+	Label, Name, Type, Body string
 }
 
-// carried makes a link that saves a file. The file is in the link itself
-// (a data URL), so saving it asks the server for nothing.
+// carried makes a file for the page to carry.
 func carried(label, name, mediaType string, body []byte) fileLink {
-	return fileLink{Label: label, Name: name, URL: template.URL("data:" + mediaType + ";base64," + base64.StdEncoding.EncodeToString(body))}
+	return fileLink{Label: label, Name: name, Type: mediaType, Body: base64.StdEncoding.EncodeToString(body)}
 }
 
 func pemFile(label, name, text string) fileLink {
@@ -451,7 +459,10 @@ func (want generateAsk) words() string {
 	case want.password != "":
 		words = ", encrypted with a password"
 	}
-	if want.madePassword {
+	switch {
+	case want.madePassword && want.pfx != nil:
+		words += ", opened with a password that handrail-ca made"
+	case want.madePassword:
 		words += " that handrail-ca made"
 	}
 	return words
@@ -505,7 +516,20 @@ func (s *server) handOver(view *generatedView, want generateAsk, key crypto.Sign
 		return
 	}
 	view.PFX, view.OlderPFX, view.KeyPEM = true, want.older, ""
+	view.PFXText = inLines(base64.StdEncoding.EncodeToString(pfx), 64)
 	view.Files = append([]fileLink{carried("Download PFX file", fileName(named, ".pfx"), "application/x-pkcs12", pfx)}, certificates...)
+}
+
+// inLines breaks text into lines of the given width.
+func inLines(text string, width int) string {
+	var b strings.Builder
+	for len(text) > width {
+		b.WriteString(text[:width])
+		b.WriteByte('\n')
+		text = text[width:]
+	}
+	b.WriteString(text)
+	return b.String()
 }
 
 // generate makes a key and a request for what was typed, has the CA sign

@@ -127,15 +127,31 @@ which protection a file has. A typed password is held to the same
 the CA is asked, so a certificate never exists for a key that cannot be
 written out; if the PFX file cannot be made once the certificate exists,
 the key is handed over as encrypted PEM with the same password. The key,
-the certificate and the chain are also offered as files to save: each is
-a link that carries its file inside the page (a `data:` address with a
-`download` name), so saving asks the server for nothing and there is
-still no address the key can be fetched from. No JavaScript is involved.
-Saving all of them was driven in Chromium, Firefox and WebKit and every
-saved file checked with `openssl`.
+the certificate and the chain are also offered as files to save. They are
+carried inside the page, as base64 in attributes of the buttons, and saved
+from it by the one page script (`static/save.js`), which makes each file
+in the browser's memory and saves it under a `blob:` address: saving asks
+the server for nothing, and there is still no address the key can be
+fetched from. The first version (merged 2026-11-12, never released) made
+each file its own address, a `data:` link, which needed no script. That
+was a mistake: a browser keeps the address of every download in its
+history, and Chromium was found to have written a whole unencrypted
+private key into its `History` database that way. With the script, the
+same search of a Chromium profile finds only the random `blob:` names,
+and finds the key, a typed password and a made password nowhere; an
+ordinary download's address, as a control, is found. Firefox could not be
+judged either way: the test harness takes its downloads before its own
+history sees them. A test now refuses any `data:` address in a page or in
+the script. Without JavaScript the buttons stay hidden and the page says
+so: the PEM text is copied as before, and a PFX file is on the page as
+base64 text with the command that turns it back. Saving all of the files
+was driven in Chromium, Firefox and WebKit, with scripts on and off, and
+every saved file checked with `openssl`.
 
 **D4. Front end: server-rendered pages.** `html/template` with a small amount
-of JavaScript for filtering, copying and confirmation. Auto-escaping by
+of JavaScript for filtering, copying and confirmation (as built: one
+script, which saves the files of a generated key; D3 says why it is
+needed). Auto-escaping by
 default, a Content-Security-Policy with no inline script, and pages that work
 without JavaScript. A first-pass mockup of the six screens (list, detail,
 issue, revoke, CA status, sign-in) exists as a design canvas outside this
@@ -877,7 +893,12 @@ server that answers `/healthz`.
     password hash is then the larger part; that is arithmetic, not a
     measurement. Not measured: anything above 100,000 rows, a small CA's
     process, a database on another machine, or a long run.
-- ESLint `jscheck` joins `make` and CI with the first JavaScript file.
+- Done (2026-11-12, with the first script, `static/save.js`): `make
+  jscheck` in `make` and CI. It runs `node --check`, the script's own
+  test against a stand-in page (`node --test`), and ESLint, which is the
+  one npm dependency (owner's decision): pinned with its tree by
+  `package-lock.json`, installed with `npm ci` and scripts off, kept
+  current by Dependabot, and in no way part of the binary or its build.
 
 **M3. Revoke.**
 - Done: the provisioner's key, one-time tokens and the revocation request
