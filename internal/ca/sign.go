@@ -101,13 +101,15 @@ var ErrPrivateKey = errors.New("this is a private key, not a certificate signing
 // is one handrail-ca will ask the CA to sign. The errors are for the
 // person who pasted it.
 func ReadRequest(pemText string) (*Request, error) {
-	if len(pemText) > maxCSR {
-		return nil, fmt.Errorf("the request is larger than %d bytes", maxCSR)
-	}
-	// Before anything else, and whether or not it is well formed: a
-	// private key is recognised by its label alone.
+	// Before anything else, whatever its size and whether or not it is
+	// well formed: a private key is recognised by its label alone, so
+	// that no other refusal can stand in front of this one and have the
+	// caller treat the paste as something it may show back.
 	if strings.Contains(pemText, "PRIVATE KEY-----") {
 		return nil, ErrPrivateKey
+	}
+	if len(pemText) > maxCSR {
+		return nil, fmt.Errorf("the request is larger than %d bytes", maxCSR)
 	}
 	// A paste often brings blank lines and indentation with it.
 	block, rest := pem.Decode([]byte(strings.TrimSpace(pemText)))

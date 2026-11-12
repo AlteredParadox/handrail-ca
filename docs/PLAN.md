@@ -459,7 +459,12 @@ why.
   request's key and chain to the pinned root. Outcomes follow the
   revocation's rules. With no certificate back and nothing to say the CA
   made none, the inventory is read again and the certificates new to it
-  are searched for one with the request's key; found, it is the outcome.
+  are searched for the one this request was given: the request's key, a
+  start within five minutes of the request, and the names asked for.
+  Found, it is the outcome. A certificate that is only new to the
+  inventory, or has the key and other names, is not taken for it: an
+  inventory catching up shows old certificates, and a key may have been
+  used before.
   A request signed in the last ten minutes is not signed again by the
   same form, and two forms at once give one certificate. A certificate
   the CA issued that the inventory does not have yet (its database could

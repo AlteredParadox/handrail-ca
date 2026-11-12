@@ -184,6 +184,13 @@ func (c *Client) eachProvisioner(ctx context.Context, visit func(json.RawMessage
 	return fmt.Errorf("/provisioners: more than %d pages", maxProvisionerPages)
 }
 
+// listedTemplate is a provisioner's X.509 template options as the CA
+// lists them.
+type listedTemplate struct {
+	Template     string `json:"template"`
+	TemplateFile string `json:"templateFile"`
+}
+
 func parseProvisioner(raw json.RawMessage) (Provisioner, error) {
 	var in struct {
 		Type string `json:"type"`
@@ -197,10 +204,7 @@ func parseProvisioner(raw json.RawMessage) (Provisioner, error) {
 			Default string `json:"defaultTLSCertDuration"`
 		} `json:"claims"`
 		Options *struct {
-			X509 *struct {
-				Template     string `json:"template"`
-				TemplateFile string `json:"templateFile"`
-			} `json:"x509"`
+			X509 *listedTemplate `json:"x509"`
 		} `json:"options"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
