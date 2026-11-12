@@ -183,7 +183,8 @@ type listRow struct {
 	// Serial is the hexadecimal serial shortened for the column; SerialFull
 	// the whole of it.
 	Serial, SerialFull string
-	// URL is the certificate's own page.
+	// URL is the certificate's own page. Empty for a row whose key in the
+	// CA's database cannot be put in an address.
 	URL     string
 	Problem string
 }
@@ -317,7 +318,9 @@ func (s *server) fillPage(data *listData, q listQuery, rows []inventory.Row, now
 	}
 	for _, row := range rows[start:end] {
 		out := newListRow(row, now)
-		out.URL = s.base + "/certificates/" + url.PathEscape(row.Serial)
+		if path, ok := certificatePath(row.Key); ok {
+			out.URL = s.base + path
+		}
 		data.Rows = append(data.Rows, out)
 	}
 }
@@ -370,6 +373,22 @@ func newListRow(row inventory.Row, now time.Time) listRow {
 		out.When = "in " + span(row.NotAfter.Sub(now))
 	}
 	return out
+}
+
+// maxKeyInAddress is the longest key of the CA's database that a page's
+// address is built from. A serial number is at most 49 digits.
+const maxKeyInAddress = 256
+
+// certificatePath is the address of a row's own page, under the base
+// path: by its key in the CA's database, which for a certificate is its
+// serial number. A row that is not a certificate can have any key at all.
+// Nearly any key can be escaped into an address; one that is empty, far
+// too long, or a path instruction in itself has no page.
+func certificatePath(key string) (string, bool) {
+	if key == "" || key == "." || key == ".." || len(key) > maxKeyInAddress {
+		return "", false
+	}
+	return "/certificates/" + url.PathEscape(key), true
 }
 
 // shortSerial shortens a serial number for a table column: its first and
