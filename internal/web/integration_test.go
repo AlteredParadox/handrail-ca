@@ -31,7 +31,7 @@ import (
 // Runs against the development CA (deploy/dev), a real step-ca, and is
 // skipped without it; `make dev-test` sets the variables. The site is the
 // usual test site with the real CA client in place of the fake one.
-func TestIntegrationStatusPage(t *testing.T) {
+func TestIntegrationPages(t *testing.T) {
 	caURL, fingerprint := os.Getenv("HANDRAIL_DEV_CA_URL"), os.Getenv("HANDRAIL_DEV_CA_FINGERPRINT")
 	if caURL == "" || fingerprint == "" {
 		t.Skip("no development CA: run `make dev-up` and `make dev-test`")
@@ -74,6 +74,22 @@ func TestIntegrationStatusPage(t *testing.T) {
 		"Admin JWK", "5 minutes", "handrail", "90 days", "acme",
 		"Certificate inventory", "Up to date", "PostgreSQL database &#34;stepca&#34; at 127.0.0.1:15432, as &#34;handrail&#34;, read-only",
 	)
+	// The list, read from the same database: the seed's certificates, the
+	// revoked one marked so, and the CA's admin certificates left out
+	// until asked for.
+	list := b.get("/?view=all")
+	wantStatus(t, list, http.StatusOK)
+	wantBody(t, list,
+		"web1.handrail.test", "web2.handrail.test", "10.20.0.14", "acme1.handrail.test", "gone.handrail.test",
+		`<span class="badge bad">Revoked</span>`, "acme <span class=\"sub\">ACME</span>",
+		"the CA issued to its own admins",
+	)
+	if strings.Contains(list.Body.String(), "Admin JWK <span") {
+		t.Error("the CA's admin certificates are in the list without being asked for")
+	}
+	wantBody(t, b.get("/?view=all&admin=1"), "Admin JWK <span")
+	wantBody(t, b.get("/?q=10.20.0.20&view=all"), "git.handrail.test")
+
 	// Counts, whatever they are by now: at least the seed's one revocation.
 	if !regexp.MustCompile(`\d+ in all: .*[1-9]\d* revoked`).MatchString(page.Body.String()) {
 		t.Error("no certificate counts on the page")

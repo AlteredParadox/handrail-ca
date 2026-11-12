@@ -627,7 +627,7 @@ func TestSignInAndOut(t *testing.T) {
 		t.Errorf("the session is not in the store under its token's hash: %v", err)
 	}
 
-	wantRedirect(t, b.get("/"), "/status")
+	wantBody(t, b.get("/"), "<h1>Certificates</h1>")
 	page := b.get("/status")
 	wantStatus(t, page, http.StatusOK)
 	wantBody(t, page, ">alice</a> (operator)", "Sign out", "ca.internal.example")
@@ -1186,7 +1186,9 @@ func TestServedUnderABasePath(t *testing.T) {
 			t.Errorf("a __Host- cookie cannot be limited to a path: %s", c.Name)
 		}
 	}
-	wantRedirect(t, b.get("/handrail/"), "/handrail/status")
+	home := b.get("/handrail/")
+	wantStatus(t, home, http.StatusOK)
+	wantBody(t, home, `action="/handrail/refresh"`, `href="/handrail/?view=all"`, `<form class="card filters" method="get" action="/handrail/">`, `href="/handrail/" aria-current="page"`)
 	page := b.get("/handrail/status")
 	wantStatus(t, page, http.StatusOK)
 	wantBody(t, page, `action="/handrail/sign-out"`, `href="/handrail/status"`)
@@ -1895,5 +1897,314 @@ func TestUnlistedProxyIsReportedOnce(t *testing.T) {
 	lb.signIn("alice", "wrong")
 	if strings.Contains(quiet.log.String()+listed.log.String(), "not in -trusted-proxy") {
 		t.Error("a warning was logged where the peer is as expected")
+	}
+}
+
+// withProvisioner returns a row as issued by another provisioner.
+func withProvisioner(row inventory.RawCertificate, name, kind string) inventory.RawCertificate {
+	row.Data = []byte(fmt.Sprintf(`{"provisioner":{"id":"id-%s","name":%q,"type":%q}}`, name, name, kind))
+	return row
+}
+
+// signedInAs returns a browser signed in as alice.
+func signedIn(t *testing.T, s *site) *browser {
+	t.Helper()
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), strings.TrimRight(s.public.Path, "/")+"/")
+	return b
+}
+
+// reread has the site's inventory read its rows again.
+func (s *site) reread() {
+	s.t.Helper()
+	if err := s.inv.Refresh(context.Background()); err != nil {
+		s.t.Fatal(err)
+	}
+}
+
+func TestListPage(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := signedIn(t, s)
+
+	// The default: what is in date and not revoked.
+	page := b.get("/")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page,
+		"<h1>Certificates</h1>", `href="/" aria-current="page"`, "Read from the CA's database 0 seconds ago.",
+		"web1.internal.example", `<span class="badge ok">Valid</span>`, "2027-02-09 12:00", "in 3 months",
+		"handrail <span class=\"sub\">JWK</span>",
+		// The serial 101, in hexadecimal.
+		`title="65">65</td>`,
+		`aria-current="true">Active <span>1</span>`, `>Expired <span>1</span>`, `>Revoked <span>1</span>`, `>Unreadable <span>1</span>`, `>All <span>4</span>`,
+		`<option value="handrail">handrail (JWK)</option>`,
+		"1 to 1 of 1",
+		`<th scope="col" aria-sort="ascending"><a href="/?dir=desc">Expires</a>`,
+	)
+	for _, absent := range []string{"old.internal.example", "gone.internal.example", "could not be read", "No certificates match", "not shown", "Previous", "Next"} {
+		if strings.Contains(page.Body.String(), absent) {
+			t.Errorf("the default list contains %q", absent)
+		}
+	}
+	if page.Header().Get("Cache-Control") != "no-store" {
+		t.Error("the list may be cached")
+	}
+
+	// Everything, each with what is known about it.
+	all := b.get("/?view=all")
+	wantBody(t, all,
+		"web1.internal.example", "old.internal.example", "gone.internal.example",
+		`<span class="badge unknown">Expired</span>`, "24 hours ago",
+		`<span class="badge bad">Revoked</span>`, "revoked 2026-11-11",
+		`<span class="badge bad">Unreadable</span>`, "This row of the CA's database could not be read as a certificate: the stored value is not a certificate",
+		"1 to 4 of 4", `aria-current="true">All <span>4</span>`,
+	)
+	wantBody(t, b.get("/?view=revoked"), "gone.internal.example", "1 to 1 of 1")
+	if strings.Contains(b.get("/?view=revoked").Body.String(), "web1.internal.example") {
+		t.Error("the revoked view shows a certificate that is not revoked")
+	}
+	// A view nobody offers is the default one.
+	wantBody(t, b.get("/?view=everything"), `aria-current="true">Active <span>1</span>`)
+}
+
+func TestListRowNames(t *testing.T) {
+	cert := func(subject string, names ...string) inventory.Row {
+		c := &inventory.Certificate{Serial: "1", SerialHex: "1", Subject: subject, NotAfter: t0.Add(time.Hour)}
+		for _, n := range names {
+			c.Names = append(c.Names, inventory.Name{Kind: inventory.DNS, Value: n})
+		}
+		return inventory.Row{Certificate: c, Status: inventory.StatusValid}
+	}
+	for want, row := range map[string]inventory.Row{
+		// One name, the same as the subject: said once.
+		"":                      cert("a.example", "a.example"),
+		"b.example":             cert("a.example", "b.example"),
+		"a.example, b.example":  cert("a.example", "a.example", "b.example"),
+		"a, b, c and 2 more":    cert("a", "a", "b", "c", "d", "e"),
+		"a.example and 40 more": {Certificate: &inventory.Certificate{Serial: "1", Subject: "a.example", Names: []inventory.Name{{Kind: inventory.DNS, Value: "a.example"}}, MoreNames: 40, NotAfter: t0.Add(time.Hour)}},
+	} {
+		if got := newListRow(row, t0).Names; got != want {
+			t.Errorf("names of %v = %q, want %q", row.Names, got, want)
+		}
+	}
+	// Each status says when in its own terms.
+	c := &inventory.Certificate{Serial: "1", SerialHex: "1", Subject: "a", NotBefore: t0.Add(time.Hour), NotAfter: t0.Add(48 * time.Hour)}
+	if got := newListRow(inventory.Row{Certificate: c, Status: inventory.StatusNotYetValid}, t0).When; got != "valid from 2026-11-11 13:00" {
+		t.Errorf("not yet valid: %q", got)
+	}
+	if got := newListRow(inventory.Row{Certificate: c, Status: inventory.StatusRevoked}, t0).When; got != "revoked" {
+		t.Errorf("revoked, with no record of when: %q", got)
+	}
+	if got := newListRow(inventory.Row{Certificate: c, Status: inventory.StatusUnknown}, t0); got.When != "in 2 days" || got.StatusLabel != "Unknown" {
+		t.Errorf("unknown: %+v", got)
+	}
+}
+
+func TestListSearchAndFilters(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	day := 24 * time.Hour
+	s.rows.mu.Lock()
+	s.rows.certs = append(s.rows.certs,
+		withProvisioner(leafRow(t, 201, "mail.internal.example", t0.Add(-day), t0.Add(30*day)), "acme", "ACME"),
+		withProvisioner(leafRow(t, 202, "step", t0.Add(-time.Minute), t0.Add(4*time.Minute)), inventory.AdminProvisioner, "JWK"),
+		withProvisioner(leafRow(t, 203, "step", t0.Add(-time.Minute), t0.Add(4*time.Minute)), inventory.AdminProvisioner, "JWK"),
+	)
+	s.rows.mu.Unlock()
+	s.reread()
+	b := signedIn(t, s)
+
+	// Search, in the subject, in the names and by serial; kept in the form.
+	page := b.get("/?q=MAIL")
+	wantBody(t, page, "mail.internal.example", `value="MAIL"`, "1 to 1 of 1", `<a class="clear" href="/">Clear</a>`)
+	if strings.Contains(page.Body.String(), "web1.internal.example") {
+		t.Error("the search did not narrow the list")
+	}
+	wantBody(t, b.get("/?q=c9&view=all"), "mail.internal.example") // 201 is 0xc9
+	// The counts on the views follow the search.
+	wantBody(t, b.get("/?q=gone"), "No certificates match.", `>Revoked <span>1</span>`, `href="/?q=gone&amp;view=revoked"`)
+
+	// What is typed comes back as text, never as markup.
+	evil := b.get("/?q=" + url.QueryEscape(`"><script>alert(1)</script>`))
+	wantStatus(t, evil, http.StatusOK)
+	if strings.Contains(evil.Body.String(), "<script>alert") {
+		t.Error("the search text was written into the page unescaped")
+	}
+	wantBody(t, evil, "No certificates match.", "&lt;script&gt;")
+	// A very long search is cut, not refused.
+	wantStatus(t, b.get("/?q="+strings.Repeat("x", 5000)), http.StatusOK)
+
+	// By provisioner; one that issued nothing stays selected in the form.
+	page = b.get("/?provisioner=acme")
+	wantBody(t, page, "mail.internal.example", `<option value="acme" selected>acme (ACME)</option>`, "1 to 1 of 1")
+	page = b.get("/?provisioner=nobody")
+	wantBody(t, page, "No certificates match.", `<option value="nobody" selected>nobody</option>`)
+
+	// The CA's own admin certificates: left out, and said so.
+	page = b.get("/")
+	wantBody(t, page, "2 certificates the CA issued to its own admins are not shown.", `href="/?admin=1"`, "1 to 2 of 2")
+	withAdmin := b.get("/?admin=1")
+	wantBody(t, withAdmin, "1 to 4 of 4", `name="admin" type="checkbox" value="1" checked`, "Admin JWK")
+	if strings.Contains(withAdmin.Body.String(), "are not shown") {
+		t.Error("the note about hidden admin certificates is shown with them included")
+	}
+	// Choosing the admin provisioner shows its certificates without the box.
+	wantBody(t, b.get("/?provisioner="+url.QueryEscape(inventory.AdminProvisioner)), "1 to 2 of 2")
+}
+
+func TestListOrderAndPages(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	day := 24 * time.Hour
+	s.rows.mu.Lock()
+	for i := range 120 {
+		s.rows.certs = append(s.rows.certs, leafRow(t, int64(1000+i), fmt.Sprintf("host%03d.internal.example", i), t0.Add(-day), t0.Add(time.Duration(200+i)*day)))
+	}
+	s.rows.mu.Unlock()
+	s.reread()
+	b := signedIn(t, s)
+
+	// 121 active certificates, fifty to a page, soonest to expire first.
+	first := b.get("/")
+	wantBody(t, first, "1 to 50 of 121", `href="/?page=2" rel="next"`, "web1.internal.example", "host000.internal.example", "host048.internal.example")
+	for _, absent := range []string{"host049.internal.example", `rel="prev"`} {
+		if strings.Contains(first.Body.String(), absent) {
+			t.Errorf("page one contains %q", absent)
+		}
+	}
+	second := b.get("/?page=2")
+	wantBody(t, second, "51 to 100 of 121", "host049.internal.example", `href="/" rel="prev"`, `href="/?page=3" rel="next"`)
+	last := b.get("/?page=3")
+	wantBody(t, last, "101 to 121 of 121", "host119.internal.example", `href="/?page=2" rel="prev"`)
+	if strings.Contains(last.Body.String(), `rel="next"`) {
+		t.Error("the last page offers a next one")
+	}
+	// Past the end, or nonsense: the last page, or the first.
+	wantBody(t, b.get("/?page=999"), "101 to 121 of 121")
+	for _, page := range []string{"0", "-3", "two", "99999999999999999999"} {
+		wantBody(t, b.get("/?page="+page), "1 to 50 of 121")
+	}
+
+	// Turned round, and by other columns; the heading says which.
+	wantBody(t, b.get("/?dir=desc"), "host119.internal.example", `aria-sort="descending"><a href="/">Expires</a>`)
+	bySubject := b.get("/?sort=subject")
+	wantBody(t, bySubject, `aria-sort="ascending"><a href="/?dir=desc&amp;sort=subject">Subject and names</a>`, `<th scope="col"><a href="/">Expires</a>`, "Sort by date issued")
+	wantBody(t, b.get("/?sort=issued"), "Sorted by date issued")
+	// The filter form and the page links keep the order.
+	wantBody(t, b.get("/?sort=subject&dir=desc&page=2"), `<input type="hidden" name="sort" value="subject">`, `<input type="hidden" name="dir" value="desc">`,
+		`href="/?dir=desc&amp;page=3&amp;sort=subject" rel="next"`)
+	// A filter or an order starts again from the first page.
+	if strings.Contains(b.get("/?page=2").Body.String(), `view=all&amp;page`) || !strings.Contains(b.get("/?page=2").Body.String(), `href="/?view=all"`) {
+		t.Error("choosing a view from page two does not start from page one")
+	}
+}
+
+func TestListWhenTheInventoryIsStaleOrUnread(t *testing.T) {
+	ctx := context.Background()
+
+	// Never read.
+	s := newSite(t, "http://127.0.0.1:8080")
+	never := inventory.New(&fakeRows{err: errors.New("connection refused")})
+	never.SetClock(s.clock.Now)
+	_ = never.Refresh(ctx)
+	s.server.opts.Inventory = never
+	b := signedIn(t, s)
+	page := b.get("/")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page, "The certificate list has not been read yet", "It could not be read from the CA's database: listing certificates: connection refused", `href="/status"`)
+	for _, absent := range []string{"<table", "No certificates match", "Read from the CA", `class="card filters"`} {
+		if strings.Contains(page.Body.String(), absent) {
+			t.Errorf("an unread list shows %q", absent)
+		}
+	}
+	// Not tried at all yet: the server has only just started.
+	s.server.opts.Inventory = inventory.New(&fakeRows{})
+	wantBody(t, b.get("/"), "handrail-ca has only just started")
+
+	// Read, then the database goes away: the list as it was, and a notice
+	// that says what that means.
+	s = newSite(t, "http://127.0.0.1:8080")
+	b = signedIn(t, s)
+	s.clock.advance(10 * time.Minute)
+	s.rows.fail(errors.New("connection reset by peer"))
+	_ = s.inv.Refresh(ctx)
+	page = b.get("/")
+	wantBody(t, page, "web1.internal.example", `class="stale"`, "This list is as it was 10 minutes ago", "Certificates issued or revoked since then are not shown.", "connection reset by peer")
+}
+
+func TestReadAgainNow(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := signedIn(t, s)
+	page := b.get("/?q=internal&view=all&sort=subject")
+	token := tokenIn(t, page)
+	wantBody(t, page, `<form method="post" action="/refresh">`, `<input type="hidden" name="view" value="all">`)
+
+	// The CA issues another certificate; the page's button reads it in
+	// and comes back to the same list.
+	s.rows.mu.Lock()
+	s.rows.certs = append(s.rows.certs, leafRow(t, 301, "new.internal.example", t0, t0.Add(24*time.Hour)))
+	s.rows.mu.Unlock()
+	form := url.Values{"form_token": {token}, "q": {"internal"}, "view": {"all"}, "sort": {"subject"}, "dir": {""}}
+	rec := b.do(http.MethodPost, "/refresh", form)
+	wantRedirect(t, rec, "/?q=internal&sort=subject&view=all")
+	wantBody(t, b.get(rec.Header().Get("Location")), "new.internal.example")
+
+	// From a later page it comes back to that page: the form carries the
+	// page shown.
+	s.rows.mu.Lock()
+	for i := range listPageSize + 5 {
+		s.rows.certs = append(s.rows.certs, leafRow(t, int64(1000+i), fmt.Sprintf("many%03d.internal.example", i), t0, t0.Add(48*time.Hour)))
+	}
+	s.rows.mu.Unlock()
+	if err := s.inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	second := b.get("/?view=all&page=2")
+	wantBody(t, second, `<input type="hidden" name="page" value="2">`)
+	rec = b.do(http.MethodPost, "/refresh", url.Values{"form_token": {token}, "view": {"all"}, "page": {"2"}})
+	wantRedirect(t, rec, "/?page=2&view=all")
+	// A page past the end shows the last one, and that is the one carried.
+	wantBody(t, b.get("/?view=all&page=9"), `<input type="hidden" name="page" value="2">`)
+	if strings.Contains(b.get("/?view=all").Body.String(), `name="page"`) {
+		t.Error("the first page's refresh form carries a page number")
+	}
+
+	// It needs the session's form token and origin like every other form.
+	wantStatus(t, b.do(http.MethodPost, "/refresh", url.Values{}), http.StatusForbidden)
+	b.origin = "https://evil.example"
+	wantStatus(t, b.do(http.MethodPost, "/refresh", form), http.StatusForbidden)
+	b.origin = ""
+	wantRedirect(t, s.browser().do(http.MethodPost, "/refresh", form), "/sign-in")
+
+	// Where it goes back to is rebuilt from the list's own parameters,
+	// never taken as an address.
+	rec = b.do(http.MethodPost, "/refresh", url.Values{"form_token": {token}, "q": {"//evil.example/"}, "view": {"https://evil.example"}, "return": {"https://evil.example"}})
+	wantRedirect(t, rec, "/?q=%2F%2Fevil.example%2F")
+
+	// A read that fails is not an error page: back to the list, which
+	// says how old it is.
+	s.rows.fail(errors.New("connection refused"))
+	rec = b.do(http.MethodPost, "/refresh", url.Values{"form_token": {token}})
+	wantRedirect(t, rec, "/")
+	wantBody(t, b.get("/"), `class="stale"`, "connection refused")
+	if !strings.Contains(s.log.String(), "could not be read on request") {
+		t.Error("the failed read is not in the log")
+	}
+}
+
+func TestListQueryRoundTrip(t *testing.T) {
+	for _, raw := range []string{"", "q=web", "view=all", "admin=1&provisioner=acme&q=a+b&sort=issued&dir=desc&view=expired&page=4"} {
+		v, _ := url.ParseQuery(raw)
+		q := parseListQuery(v)
+		again := parseListQuery(q.values())
+		if q != again {
+			t.Errorf("%q does not survive a round trip: %+v, then %+v", raw, q, again)
+		}
+	}
+	if got := (listQuery{}).href("/base"); got != "/base/" {
+		t.Errorf("the plain list's address = %q", got)
+	}
+	if got := shortSerial("0123456789abcdef"); got != "0123…cdef" {
+		t.Errorf("shortSerial = %q", got)
+	}
+	if got := shortSerial("65"); got != "65" {
+		t.Errorf("a short serial was shortened: %q", got)
 	}
 }

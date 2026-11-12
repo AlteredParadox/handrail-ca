@@ -685,3 +685,111 @@ func waitFor(t *testing.T, ok func() bool) {
 	}
 	t.Fatal("timed out waiting")
 }
+
+// gatedSource holds each listing of serials until the test lets it go on,
+// or until its caller gives up.
+type gatedSource struct {
+	*fakeSource
+	entered, release chan struct{}
+}
+
+func (g *gatedSource) Serials(ctx context.Context) ([]string, error) {
+	g.entered <- struct{}{}
+	select {
+	case <-g.release:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	return g.fakeSource.Serials(ctx)
+}
+
+// A refresh asked for while another is reading waits its turn only as long
+// as its caller does, and one that is given up leaves the state alone: it
+// has learned nothing about the database.
+func TestRefreshThatIsGivenUpChangesNothing(t *testing.T) {
+	f, src := loadFixture(t)
+	gate := &gatedSource{fakeSource: src, entered: make(chan struct{}, 8), release: make(chan struct{})}
+	inv := New(gate)
+	now := f.Captured
+	inv.SetClock(func() time.Time { return now })
+	within := func(what string, done <-chan error) error {
+		t.Helper()
+		select {
+		case err := <-done:
+			return err
+		case <-time.After(5 * time.Second):
+			t.Fatalf("%s did not return", what)
+			return nil
+		}
+	}
+	start := func(ctx context.Context) <-chan error {
+		done := make(chan error, 1)
+		go func() { done <- inv.Refresh(ctx) }()
+		return done
+	}
+
+	// The background read is under way and slow.
+	background := start(context.Background())
+	<-gate.entered
+
+	// Someone asks for a read and leaves; someone else's time runs out.
+	// Both return at once, though the first read still holds its turn.
+	left, leave := context.WithCancel(context.Background())
+	waiting := start(left)
+	leave()
+	if err := within("a refresh whose caller left", waiting); !errors.Is(err, context.Canceled) {
+		t.Errorf("a refresh whose caller left returned %v", err)
+	}
+	short, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := within("a refresh out of time", start(short)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a refresh that ran out of time waiting returned %v", err)
+	}
+	// One already given up when it asks does not read either.
+	if err := inv.Refresh(left); !errors.Is(err, context.Canceled) {
+		t.Errorf("a refresh with a finished context returned %v", err)
+	}
+	if st := inv.Snapshot().State; st.Problem != "" || !st.AttemptedAt.IsZero() {
+		t.Errorf("refreshes that never had their turn changed the state: %+v", st)
+	}
+
+	// The background read finishes, and its result stands.
+	gate.release <- struct{}{}
+	if err := within("the background refresh", background); err != nil {
+		t.Fatal(err)
+	}
+	good := inv.Snapshot().State
+	if good.Problem != "" || !good.LoadedAt.Equal(now) || len(inv.Snapshot().Certificates) != 16 {
+		t.Fatalf("after the background read: %+v", good)
+	}
+	select {
+	case <-gate.entered:
+		t.Fatal("a refresh that was given up read the database afterwards")
+	default:
+	}
+
+	// Given up while reading: still nothing learned, nothing changed.
+	now = now.Add(time.Minute)
+	reading, stop := context.WithCancel(context.Background())
+	done := start(reading)
+	<-gate.entered
+	stop()
+	if err := within("a refresh cancelled while reading", done); !errors.Is(err, context.Canceled) {
+		t.Errorf("a refresh cancelled while reading returned %v", err)
+	}
+	if st := inv.Snapshot().State; st != good {
+		t.Errorf("a cancelled read changed the state: %+v, was %+v", st, good)
+	}
+
+	// Out of time while reading is a fact about the database: the picture
+	// is kept, and the state says the last attempt failed.
+	slow, cancelSlow := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelSlow()
+	if err := within("a refresh out of time while reading", start(slow)); !errors.Is(err, context.DeadlineExceeded) {
+		t.Errorf("a read that ran out of time returned %v", err)
+	}
+	st := inv.Snapshot().State
+	if !strings.Contains(st.Problem, "deadline exceeded") || !st.LoadedAt.Equal(good.LoadedAt) || !st.AttemptedAt.Equal(now) || len(inv.Snapshot().Certificates) != 16 {
+		t.Errorf("after a read that ran out of time: %+v", st)
+	}
+}

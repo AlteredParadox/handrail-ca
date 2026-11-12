@@ -29,6 +29,7 @@ import (
 	"context"
 	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -101,6 +102,9 @@ type Provisioner struct {
 type Certificate struct {
 	// Serial is the decimal serial number, the row's key.
 	Serial string
+	// SerialHex is the same number in lower-case hexadecimal, the form
+	// most tools print. Empty for a row that could not be read.
+	SerialHex string
 	// Subject is the common name, or the whole subject when there is none.
 	Subject string
 	// Names are the subject alternative names, at most maxNames of them;
@@ -114,6 +118,14 @@ type Certificate struct {
 	// Problem is set when the row could not be read as a certificate. The
 	// other fields except Serial are then empty.
 	Problem string
+
+	// haystack is everything the certificate can be found by, in lower
+	// case, one item to a line: the serial in decimal and hexadecimal, the
+	// subject, and every subject alternative name, including the ones
+	// beyond maxNames that Names leaves out. A certificate that carries a
+	// name must be found by it, however many others it carries. It is as
+	// bounded as the certificate itself, which the Source caps.
+	haystack string
 }
 
 // Revocation is what the CA recorded when a certificate was revoked.
@@ -255,8 +267,10 @@ type Inventory struct {
 	window time.Duration
 	now    func() time.Time
 
-	// refreshing serialises refreshes; mu guards the fields below it.
-	refreshing sync.Mutex
+	// refreshing serialises refreshes: whoever has put a value into it is
+	// the one reading. A channel and not a mutex, so that waiting for a
+	// turn can be given up. mu guards the fields below it.
+	refreshing chan struct{}
 	mu         sync.RWMutex
 	certs      map[string]*Certificate
 	current    *Snapshot
@@ -264,7 +278,7 @@ type Inventory struct {
 
 // New returns an empty inventory over src. Nothing is read until Refresh.
 func New(src Source) *Inventory {
-	inv := &Inventory{src: src, window: DefaultExpiringWindow, now: time.Now, certs: map[string]*Certificate{}}
+	inv := &Inventory{src: src, window: DefaultExpiringWindow, now: time.Now, certs: map[string]*Certificate{}, refreshing: make(chan struct{}, 1)}
 	inv.current = &Snapshot{State: State{Source: src.Describe()}, revoked: map[string]*Revocation{}, window: inv.window}
 	return inv
 }
@@ -303,12 +317,30 @@ func (inv *Inventory) Run(ctx context.Context, interval time.Duration, report fu
 // not seen before (a certificate never changes once issued, so nothing is
 // read twice), and the whole revocation table. If any part fails the
 // inventory keeps what it had, and says so in its State.
+//
+// One refresh runs at a time; another waits its turn, for as long as its
+// context lasts. A refresh that is given up, while waiting or while
+// reading, says nothing about the database, so it leaves the State as it
+// was: it must not replace the result of a read that worked with "the
+// caller stopped waiting". Running out of time while reading is different:
+// the database did not answer in the time allowed, and the State says so.
 func (inv *Inventory) Refresh(ctx context.Context) error {
-	inv.refreshing.Lock()
-	defer inv.refreshing.Unlock()
+	select {
+	case inv.refreshing <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-inv.refreshing }()
+	// Both may have been ready at once; the context is the one that counts.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 
 	attempted := inv.now()
 	certs, revoked, orphans, err := inv.read(ctx)
+	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
+		return err
+	}
 
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
@@ -417,6 +449,8 @@ func sorted(certs map[string]*Certificate) []*Certificate {
 // what it should be becomes a Certificate with a Problem.
 func summarise(row RawCertificate) *Certificate {
 	c := &Certificate{Serial: clipSerial(row.Serial), Provisioner: provisionerOf(row.Data)}
+	// An unreadable row can still be found by its key.
+	c.haystack = strings.ToLower(c.Serial)
 	problem := func(format string, args ...any) *Certificate {
 		c.Problem = clip(fmt.Sprintf(format, args...))
 		return c
@@ -435,13 +469,41 @@ func summarise(row RawCertificate) *Certificate {
 		return problem("the row's key is not the serial number of the certificate stored under it")
 	}
 
+	c.SerialHex = cert.SerialNumber.Text(16)
 	c.Subject = clip(cert.Subject.CommonName)
 	if c.Subject == "" {
 		c.Subject = clip(cert.Subject.String())
 	}
 	c.NotBefore, c.NotAfter = cert.NotBefore.UTC(), cert.NotAfter.UTC()
 	c.Names, c.MoreNames = namesOf(cert)
+	c.haystack = haystackOf(c, cert)
 	return c
+}
+
+// haystackOf builds what a certificate is searched in: see
+// Certificate.haystack.
+func haystackOf(c *Certificate, cert *x509.Certificate) string {
+	var b strings.Builder
+	line := func(s string) {
+		b.WriteString(strings.ToLower(strings.ToValidUTF8(s, string(utf8.RuneError))))
+		b.WriteByte('\n')
+	}
+	line(c.Serial)
+	line(c.SerialHex)
+	line(c.Subject)
+	for _, name := range cert.DNSNames {
+		line(name)
+	}
+	for _, ip := range cert.IPAddresses {
+		line(ip.String())
+	}
+	for _, email := range cert.EmailAddresses {
+		line(email)
+	}
+	for _, uri := range cert.URIs {
+		line(uri.String())
+	}
+	return b.String()
 }
 
 // provisionerOf reads who issued a certificate out of the record the CA

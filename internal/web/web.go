@@ -77,10 +77,12 @@ type Store interface {
 	AppendHistory(ctx context.Context, e store.Event) error
 }
 
-// Snapshotter is what the pages need from the certificate inventory
-// (*inventory.Inventory): its picture as last read.
-type Snapshotter interface {
+// Inventory is what the pages need from the certificate inventory
+// (*inventory.Inventory): its picture as last read, and a way to have it
+// read again now.
+type Inventory interface {
 	Snapshot() *inventory.Snapshot
+	Refresh(ctx context.Context) error
 }
 
 // InventoryRefresh is how often the inventory is read again.
@@ -98,7 +100,7 @@ type Options struct {
 	Store Store
 	CA    CA
 	// Inventory is the picture of what the CA has issued.
-	Inventory Snapshotter
+	Inventory Inventory
 	// PublicURL is the address browsers use: scheme://host[:port][/path].
 	// Its host is the only Host header answered, its origin the only one
 	// forms are accepted from, its scheme decides whether cookies are
@@ -219,11 +221,8 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("GET /status", s.signedIn(s.statusPage))
 	mux.HandleFunc("GET /account", s.signedIn(s.accountPage))
 	mux.HandleFunc("POST /account/password", s.signedIn(s.changePassword))
-	mux.HandleFunc("GET /{$}", s.signedIn(func(w http.ResponseWriter, r *http.Request) {
-		// The certificate list will live here; until it exists, the one
-		// page there is.
-		http.Redirect(w, r, s.base+"/status", http.StatusSeeOther)
-	}))
+	mux.HandleFunc("GET /{$}", s.signedIn(s.listPage))
+	mux.HandleFunc("POST /refresh", s.signedIn(s.refreshInventory))
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusNotFound, "There is no such page.")
 	})
