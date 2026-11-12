@@ -108,8 +108,9 @@ downloaded with or without its chain. If what came back does not carry
 the names that were asked for, the page says so. As with revoking, the
 request goes to the CA once, the CA's database is read again afterwards,
 and "no certificate was issued" is said only when the CA refused or
-nothing was sent; otherwise handrail-ca looks for a new certificate with
-the request's key before saying it does not know. The same form sent
+nothing was sent; otherwise handrail-ca looks in the CA's database for a
+certificate with the request's key and names, issued just then, before
+saying it does not know. The same form sent
 twice gives one certificate.
 
 ### Revoking
