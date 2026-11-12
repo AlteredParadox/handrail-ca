@@ -570,7 +570,7 @@ func TestIssueOutcomes(t *testing.T) {
 				return nil, lost
 			},
 			status:  http.StatusBadGateway,
-			page:    []string{"It is not known yet whether a certificate was issued", "could not all be read to look for one with this request's key. So one may be there."},
+			page:    []string{"It is not known yet whether a certificate was issued", "that does not settle it: the certificates new to the CA&#39;s database could not all be read to look for it."},
 			absent:  []string{"No certificate was issued", "held no new certificate"},
 			outcome: store.OutcomeUnknown,
 			detail:  "not confirmed: " + lost.Error() + "; the certificates new to the CA's database could not all be read to look for it",
@@ -585,9 +585,10 @@ func TestIssueOutcomes(t *testing.T) {
 				return nil, lost
 			},
 			status:  http.StatusBadGateway,
-			page:    []string{"It is not known yet whether a certificate was issued"},
+			page:    []string{"It is not known yet whether a certificate was issued", "with other names than were asked for (serial 5001), and may be this request&#39;s"},
+			absent:  []string{"held no new certificate"},
 			outcome: store.OutcomeUnknown,
-			detail:  "not confirmed: " + lost.Error() + "; the CA's database held no new certificate for the request's key when read just afterwards, which does not settle it",
+			detail:  "not confirmed: " + lost.Error() + "; a certificate for this request's key was issued at that moment with other names than were asked for (serial 5001), and may be this request's",
 		},
 		{
 			name: "issued, and the database cannot be read",
@@ -961,10 +962,12 @@ func TestIssueAgainAfterAnUnknownOutcome(t *testing.T) {
 
 	t.Run("too soon to know", func(t *testing.T) {
 		s, b, form, _ := start(t)
-		s.clock.advance(20 * time.Second)
+		// Past the token's own minute, inside the CA's minute of leeway
+		// for it: a delayed request could still be accepted.
+		s.clock.advance(95 * time.Second)
 		rec := b.do(http.MethodPost, "/issue", form)
 		wantStatus(t, rec, http.StatusConflict)
-		wantBody(t, rec, "it was made less than a minute ago and the CA may still be at it", "It was not sent again")
+		wantBody(t, rec, "it was made less than 3 minutes ago, and the CA may still act on it", "It was not sent again")
 		if n := len(s.ca.signings()); n != 1 {
 			t.Errorf("the CA was asked to sign %d times", n)
 		}
@@ -993,6 +996,24 @@ func TestIssueAgainAfterAnUnknownOutcome(t *testing.T) {
 		}
 	})
 
+	// A certificate for the request's key, issued at that moment, with
+	// other names: a provisioner's template can change names, so it may
+	// well be the earlier attempt's. Not claimed, and not signed again.
+	t.Run("a certificate for the key with other names turned up", func(t *testing.T) {
+		s, b, form, _ := start(t)
+		changed := *mustReadCSR(t, form.Get("csr"))
+		changed.DNSNames = []string{"renamed-by-a-template.internal.example"}
+		s.caStores(s.caSigns(&changed, 0).Certificate)
+		// Long past the time the CA could still be at it.
+		s.clock.advance(issueSettles + time.Minute)
+		rec := b.do(http.MethodPost, "/issue", form)
+		wantStatus(t, rec, http.StatusConflict)
+		wantBody(t, rec, "with other names than were asked for (serial 5002), and may be this request&#39;s", "It was not sent again")
+		if n := len(s.ca.signings()); n != 1 {
+			t.Errorf("the CA was asked to sign %d times", n)
+		}
+	})
+
 	// More new certificates than are searched: the same.
 	t.Run("more new certificates than are looked through", func(t *testing.T) {
 		s, b, form, _ := start(t)
@@ -1014,7 +1035,7 @@ func TestIssueAgainAfterAnUnknownOutcome(t *testing.T) {
 		s, b, form, _ := start(t)
 		// Long enough for the CA to have finished, the database read, and
 		// no certificate for this request in it: now it may be sent again.
-		s.clock.advance(2 * time.Minute)
+		s.clock.advance(issueSettles)
 		s.ca.sign = func(_ context.Context, r *ca.Request, d time.Duration) (*ca.Issued, error) {
 			issued := s.caSigns(r, d)
 			s.caStores(issued.Certificate)
