@@ -72,6 +72,37 @@ default and keeps the private key with the requester. "Generate a key for
 me" creates the key in memory, returns it once in the response, and never
 stores or logs it. A flag turns the path off.
 
+As built: `/issue/generate` takes a common name, names, a kind of key
+(ECDSA P-256 or P-384, Ed25519, RSA 3072) and a validity. The key is made
+only after everything typed has been checked. The request is built from it
+and read back through the same function as a pasted one, so the same
+checks and the same working-out of what the certificate will carry apply.
+The answer is one page with the key in unencrypted PKCS #8 PEM, the
+certificate and its chain, sent with `Cache-Control: no-store`. The key is
+in that answer and nowhere else. Each showing of the form carries a mark
+that is taken once: the form sent again, as a reload of the answer does,
+is refused and makes no second key. The mark is a random number with a
+code over it, keyed with the secret the process makes at start, and only
+a mark this running process gave out is taken. Which marks were taken is
+remembered in memory only, so the key is what keeps the promise across a
+restart: every mark from before it is refused. If no certificate comes
+back the key is discarded and the page says so; if the CA's database then
+turns out to hold a certificate for it, that is recorded as a failure (a
+certificate nobody has the key for) and the operator is sent to its page
+to revoke it. That page says so from handrail-ca's own record of what
+happened, as it does for every notice about a request: no address can
+make a certificate's page say that nobody has its key. An attempt whose
+outcome was not learned is remembered for ten minutes, by who asked and
+for what names, with the request it sent (the public key and the names;
+the private key is gone). The same operator asking for the same
+certificate again is held to the rules of the CSR path first: the
+database is read, and if it holds the earlier attempt's certificate the
+operator is taken to it and nothing new is made; if that cannot be told
+yet, nothing is made; only when nothing was issued, as far as can be
+known, does a new key get made. `-no-key-generation` switches the path off: its routes then refuse,
+and the Issue page does not offer it. Not done: encrypting the key with a
+password of the operator's, or offering it as a file to download.
+
 **D4. Front end: server-rendered pages.** `html/template` with a small amount
 of JavaScript for filtering, copying and confirmation. Auto-escaping by
 default, a Content-Security-Policy with no inline script, and pages that work
@@ -857,7 +888,14 @@ encrypted key; and handrail-ca serving TLS itself.
   template that keeps the whole subject, the development CA has a second
   provisioner with it, and the Issue page reads which the provisioner
   has.
-- Generated-key path (per D3).
+- Done: the generated-key path (D3 has it as built), with an integration
+  test that generates a key and certificate on the development CA through
+  the pages and checks the key is the certificate's.
+
+Milestone 4 is complete with this. Not built in it: a password on a
+generated key, the key or certificate as a download from the page that
+shows them, and renewing or re-issuing an existing certificate from its
+page.
 
 **M5. First release, v0.1.0.**
 - Deployment documentation: creating the provisioner with its name policy

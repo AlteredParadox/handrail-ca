@@ -98,6 +98,13 @@ type issueData struct {
 	// Unlisted is set when the CA issued a certificate that the inventory
 	// does not have yet: the page then hands it over itself.
 	Unlisted *unlistedView
+
+	// CanGenerate says the other way of issuing is on: handrail-ca making
+	// the key. Generate is its form, when that is the page shown, and
+	// Generated its one answer.
+	CanGenerate bool
+	Generate    *generateView
+	Generated   *generatedView
 }
 
 type requestView struct {
@@ -139,6 +146,8 @@ type issueFailure struct {
 	Unsure              string
 	NotSent, Unknown    bool
 	CA, Clock, Database string
+	// KeyDiscarded is set when handrail-ca had made the key: it is gone.
+	KeyDiscarded bool
 	// OddCommonName is the request's common name, set when the CA
 	// answered with an error that gives no reason and the common name is
 	// one a name policy cannot read as a name: the one cause of that
@@ -174,7 +183,8 @@ type recentIssues struct {
 type issuedAt struct {
 	serial string
 	// how is what happened, in the words the certificate's page keys its
-	// notice on: "now", "differs", "found".
+	// notice on: "now", "differs", "found", and "keyless" for one issued
+	// for a key handrail-ca made and then had to discard.
 	how string
 	// issued is the certificate and its chain as the CA sent them, kept
 	// for as long as the entry so that they can be handed over again
@@ -191,6 +201,10 @@ type issuedAt struct {
 	uncertain bool
 	before    *inventory.Snapshot
 	sentAt    time.Time
+	// req is the request of an uncertain attempt, kept when it cannot be
+	// had again from a form: one handrail-ca made itself, for a key it
+	// has since discarded. It holds the public key and the names.
+	req *ca.Request
 }
 
 // maxRememberedIssues bounds the requests remembered as just signed.
@@ -249,6 +263,20 @@ func (ri *recentIssues) end(fingerprint string, entry issuedAt) {
 	ri.done[fingerprint] = entry
 }
 
+// remember records what became of a certificate that no signing form is
+// waiting on, for its page to say.
+func (ri *recentIssues) remember(entry issuedAt) {
+	ri.mu.Lock()
+	defer ri.mu.Unlock()
+	if entry.serial == "" || len(ri.done) >= maxRememberedIssues {
+		return
+	}
+	if ri.done == nil {
+		ri.done = map[string]issuedAt{}
+	}
+	ri.done["serial "+entry.serial] = entry
+}
+
 // about returns how the certificate with this serial came to be, if a
 // request through handrail-ca was given it within the last justIssued.
 func (ri *recentIssues) about(serial string, now time.Time) (how string, ok bool) {
@@ -299,7 +327,8 @@ func (s *server) newIssueData(r *http.Request, csr string, chosen string) (issue
 		Provisioner: s.opts.CA.ProvisionerState().Name, CSR: csr,
 		CustomN: r.PostForm.Get("custom_n"), CustomUnit: r.PostForm.Get("custom_unit"),
 		Template: p.Template, TemplateFile: p.TemplateFile,
-		Limits: limitsView{Problem: problem},
+		Limits:      limitsView{Problem: problem},
+		CanGenerate: !s.opts.NoKeyGeneration,
 	}
 	if d := p.Claims.MinTLSCertDuration; d > 0 {
 		data.Limits.Shortest = validity(d)

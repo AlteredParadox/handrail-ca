@@ -19,8 +19,10 @@ package ca
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha256"
 	"crypto/x509"
@@ -38,6 +40,9 @@ import (
 // signPath is the endpoint, and with the CA's address the audience of a
 // signing token.
 const signPath = "/1.0/sign"
+
+// pemRequest is the PEM label of a certificate signing request.
+const pemRequest = "CERTIFICATE REQUEST"
 
 const (
 	// maxCSR bounds a certificate request in PEM. An RSA-4096 request with
@@ -116,7 +121,7 @@ func ReadRequest(pemText string) (*Request, error) {
 		return nil, errors.New("this is not a certificate signing request in PEM: it should begin with -----BEGIN CERTIFICATE REQUEST-----")
 	case block.Type == "CERTIFICATE":
 		return nil, errors.New("this is a certificate, not a certificate signing request")
-	case block.Type != "CERTIFICATE REQUEST" && block.Type != "NEW CERTIFICATE REQUEST":
+	case block.Type != pemRequest && block.Type != "NEW CERTIFICATE REQUEST":
 		return nil, fmt.Errorf("this is a PEM block of type %q, not a certificate signing request", clip(block.Type))
 	case strings.TrimSpace(string(rest)) != "":
 		return nil, errors.New("there is something after the request: paste one certificate signing request and nothing else")
@@ -132,7 +137,7 @@ func ReadRequest(pemText string) (*Request, error) {
 		return nil, err
 	}
 
-	r := &Request{CSR: csr, PEM: string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: csr.Raw}))}
+	r := &Request{CSR: csr, PEM: string(pem.EncodeToMemory(&pem.Block{Type: pemRequest, Bytes: csr.Raw}))}
 	names := requestNames(csr)
 	if len(names) > maxRequestNames {
 		return nil, fmt.Errorf("the request has %d names, more than the %d handrail-ca asks for in one certificate", len(names), maxRequestNames)
@@ -167,6 +172,37 @@ func ReadRequest(pemText string) (*Request, error) {
 		r.SubjectNotCopied = clip(whole)
 	}
 	return r, nil
+}
+
+// NewRequest makes a certificate signing request for a key, with a common
+// name and names typed by a person, and reads it back as ReadRequest
+// would: what comes out is checked like any pasted request, and says what
+// the certificate will carry. Each name is put in the request as the kind
+// the CA will take it for (see splitNames), so the two agree. The common
+// name may be empty if there are names.
+func NewRequest(key crypto.Signer, commonName string, names []string) (*Request, error) {
+	if len(names) > maxRequestNames {
+		return nil, fmt.Errorf("%d names, more than the %d handrail-ca asks for in one certificate", len(names), maxRequestNames)
+	}
+	tmpl := &x509.CertificateRequest{}
+	tmpl.Subject.CommonName = commonName
+	dns, ips, emails, uris := splitNames(names)
+	tmpl.DNSNames, tmpl.EmailAddresses = dns, emails
+	for _, ip := range ips {
+		tmpl.IPAddresses = append(tmpl.IPAddresses, net.ParseIP(ip))
+	}
+	for _, u := range uris {
+		parsed, err := url.Parse(u)
+		if err != nil {
+			return nil, fmt.Errorf("the name %q is not a URI", clip(u))
+		}
+		tmpl.URIs = append(tmpl.URIs, parsed)
+	}
+	der, err := x509.CreateCertificateRequest(rand.Reader, tmpl, key)
+	if err != nil {
+		return nil, fmt.Errorf("the request could not be made: %v", err)
+	}
+	return ReadRequest(string(pem.EncodeToMemory(&pem.Block{Type: pemRequest, Bytes: der})))
 }
 
 // nameOnly is how a subject holding only this common name prints.

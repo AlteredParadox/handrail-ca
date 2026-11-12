@@ -19,6 +19,7 @@ package web
 import (
 	"bytes"
 	"context"
+	"crypto/ed25519"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -399,4 +400,75 @@ func TestIntegrationIssueUnderATemplate(t *testing.T) {
 	}
 	cert := b.get("/certificates/" + m[1])
 	wantBody(t, cert, "CN="+name+",O=Example Org,C=DE", "handrail-template <span")
+}
+
+// The other way of issuing, against the development CA: handrail-ca makes
+// the key, and the page that answers carries the key, the certificate the
+// real CA signed for it, and a chain that verifies to the root.
+func TestIntegrationGenerateThroughThePages(t *testing.T) {
+	s, client, inv := devSite(t, "handrail")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	name := fmt.Sprintf("gen-%d.handrail.test", time.Now().UnixNano()%1_000_000_000)
+
+	form := b.generateForm(name, name+"\n10.20.7.1", "ed25519")
+	form.Set("validity", "24h0m0s")
+	rec := b.do(http.MethodPost, "/issue/generate", form)
+	wantStatus(t, rec, http.StatusOK)
+	wantBody(t, rec, "Save the private key now.", "<dt>Subject</dt><dd>CN="+name+"</dd>", "<dt>Key</dt><dd>Ed25519, not encrypted</dd>")
+	blocks := pemBlocks(t, rec.Body.String())
+	if len(blocks) != 4 || blocks[0].Type != "PRIVATE KEY" {
+		t.Fatalf("%d PEM blocks on the page", len(blocks))
+	}
+	key, err := x509.ParsePKCS8PrivateKey(blocks[0].Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(blocks[1].Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	inter, err := x509.ParseCertificate(blocks[3].Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private, ok := key.(ed25519.PrivateKey)
+	if !ok || !private.Public().(ed25519.PublicKey).Equal(cert.PublicKey) {
+		t.Error("the key on the page is not the certificate's")
+	}
+	root, err := client.Root(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots, inters := x509.NewCertPool(), x509.NewCertPool()
+	roots.AddCert(root)
+	inters.AddCert(inter)
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: roots, Intermediates: inters, DNSName: name, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		t.Errorf("the certificate does not verify for its name: %v", err)
+	}
+	if len(cert.IPAddresses) != 1 || cert.IPAddresses[0].String() != "10.20.7.1" {
+		t.Errorf("addresses: %v", cert.IPAddresses)
+	}
+	serial := cert.SerialNumber.String()
+	if inv.Snapshot().Certificate(serial) == nil {
+		t.Error("the certificate is not in the inventory")
+	}
+	wantBody(t, rec, `href="/certificates/`+serial+`"`)
+	// The certificate's page does not have the key, and nor does the log.
+	if strings.Contains(b.get("/certificates/"+serial).Body.String(), "PRIVATE KEY") {
+		t.Error("the certificate's page carries a private key")
+	}
+	if strings.Contains(s.log.String(), string(pem.EncodeToMemory(blocks[0])[40:80])) {
+		t.Error("the private key is in the log")
+	}
+	// Sent again, it makes nothing.
+	wantStatus(t, b.do(http.MethodPost, "/issue/generate", form), http.StatusConflict)
+
+	// A name the CA's policy refuses: no certificate, and no key shown.
+	refused := b.do(http.MethodPost, "/issue/generate", b.generateForm("outside.example.org", "", "p256"))
+	wantStatus(t, refused, http.StatusBadGateway)
+	wantBody(t, refused, "No certificate was issued", "not allowed", "The key handrail-ca made for this request has been discarded.")
+	if strings.Contains(refused.Body.String(), "PRIVATE KEY") {
+		t.Error("a key is on the page of a request that was refused")
+	}
 }

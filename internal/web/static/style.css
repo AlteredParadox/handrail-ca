@@ -715,6 +715,22 @@ a.cancel {
 }
 
 /* Issuing */
+.modes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+a.button.on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: #ffffff;
+}
+
+pre.key {
+  border: 1px solid var(--warn);
+}
+
 .split {
   align-items: flex-start;
   display: flex;

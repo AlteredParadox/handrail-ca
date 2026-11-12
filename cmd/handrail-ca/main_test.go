@@ -101,7 +101,7 @@ func serverArgs(t *testing.T, listen string, more ...string) []string {
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_FINGERPRINT", "HANDRAIL_DB_URL_FILE", "HANDRAIL_PUBLIC_URL", "HANDRAIL_TRUSTED_PROXIES",
-		"HANDRAIL_PROVISIONER", "HANDRAIL_PROVISIONER_PASSWORD_FILE", "HANDRAIL_READ_ONLY"} {
+		"HANDRAIL_PROVISIONER", "HANDRAIL_PROVISIONER_PASSWORD_FILE", "HANDRAIL_READ_ONLY", "HANDRAIL_NO_KEY_GENERATION"} {
 		t.Setenv(name, "")
 	}
 }
@@ -585,5 +585,23 @@ func TestReadPasswordFile(t *testing.T) {
 	got, err := readPasswordFile(path)
 	if err != nil || got != "  leading space, and a tab\tinside" {
 		t.Errorf("readPasswordFile = %q, %v", got, err)
+	}
+}
+
+// Generating keys is on unless it is switched off, by flag or environment.
+func TestNoKeyGenerationSetting(t *testing.T) {
+	base := func(t *testing.T) []string {
+		return []string{"-data", t.TempDir(), "-ca-url", "https://ca.invalid", "-ca-fingerprint", testFingerprint, "-db-url-file", dbURLFile(t), "-read-only"}
+	}
+	clearEnv(t)
+	if cfg, code := parseConfig(base(t), io.Discard); code != 0 || cfg.noKeyGeneration {
+		t.Errorf("by default: code %d, off %v", code, cfg.noKeyGeneration)
+	}
+	if cfg, code := parseConfig(append(base(t), "-no-key-generation"), io.Discard); code != 0 || !cfg.noKeyGeneration {
+		t.Errorf("by flag: code %d, off %v", code, cfg.noKeyGeneration)
+	}
+	t.Setenv("HANDRAIL_NO_KEY_GENERATION", "1")
+	if cfg, code := parseConfig(base(t), io.Discard); code != 0 || !cfg.noKeyGeneration {
+		t.Errorf("by environment: code %d, off %v", code, cfg.noKeyGeneration)
 	}
 }

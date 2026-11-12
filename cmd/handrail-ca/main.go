@@ -157,6 +157,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		CA:                 client,
 		PublicURL:          publicURL,
 		TrustedProxies:     cfg.trustedProxies,
+		NoKeyGeneration:    cfg.noKeyGeneration,
 		Inventory:          inv,
 		Log:                log,
 	})
@@ -238,6 +239,8 @@ type config struct {
 	provisionerPasswordFile string
 	// readOnly means no provisioner at all: view only.
 	readOnly bool
+	// noKeyGeneration switches off issuing with a key handrail-ca makes.
+	noKeyGeneration bool
 }
 
 func parseConfig(args []string, stderr io.Writer) (config, int) {
@@ -253,6 +256,7 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 	fs.StringVar(&cfg.provisioner, "provisioner", os.Getenv("HANDRAIL_PROVISIONER"), "name of the JWK provisioner on the CA that handrail-ca revokes through (or set HANDRAIL_PROVISIONER)")
 	fs.StringVar(&cfg.provisionerPasswordFile, "provisioner-password-file", os.Getenv("HANDRAIL_PROVISIONER_PASSWORD_FILE"), "file holding that provisioner's password (or set HANDRAIL_PROVISIONER_PASSWORD_FILE)")
 	fs.BoolVar(&cfg.readOnly, "read-only", envBool("HANDRAIL_READ_ONLY"), "view only: no provisioner is used and nothing can be issued or revoked (or set HANDRAIL_READ_ONLY=1)")
+	fs.BoolVar(&cfg.noKeyGeneration, "no-key-generation", envBool("HANDRAIL_NO_KEY_GENERATION"), "do not offer to generate private keys: certificates are issued for pasted certificate signing requests only (or set HANDRAIL_NO_KEY_GENERATION=1)")
 	proxies := fs.String("trusted-proxy", os.Getenv("HANDRAIL_TRUSTED_PROXIES"), "addresses or CIDR ranges of the reverse proxies in front, comma-separated; only they are believed about who a visitor is (or set HANDRAIL_TRUSTED_PROXIES)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, 2
