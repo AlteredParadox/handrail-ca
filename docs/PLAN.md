@@ -110,9 +110,12 @@ cap and the name policy have since been checked against a running CA of that
 version: `make dev-verify` runs those checks on the development CA
 (`deploy/dev`), and it is the thing to run before raising the step-ca
 version. The read endpoints are also exercised by handrail-ca's own client
-in `make dev-test`. **Still from source only:** the token claims and the exact request
-bodies for sign and revoke, which the step CLI builds in those checks; they
-are exercised by handrail-ca's own integration tests in milestones 3 and 4.
+in `make dev-test`. So are the token claims and the request body for a
+revocation, as handrail-ca's own client builds them: `make dev-test`
+revokes a certificate on the development CA with them. **Still from source
+only:** the token claims and the request body for signing, which the step
+CLI builds in those checks; handrail-ca's integration tests exercise them
+in milestone 4.
 
 Listing:
 
@@ -170,6 +173,19 @@ Revoke (`api/revoke.go`, `authority/tls.go`):
   the decimal serial.
 - Any JWK provisioner can revoke any serial, and the CA does not check that
   the serial was ever issued.
+- The `serial` field is parsed with the base taken from its prefix (`0x`
+  for hexadecimal, a leading `0` for octal) and then compared, in decimal,
+  with the token's subject as a string. handrail-ca sends plain decimal
+  with no leading zero in both places.
+- The answer to a revocation is 200 with `{"status":"ok"}`. A certificate
+  that is already revoked is a 400 saying so (seen on the development
+  CA). A token that is not accepted is a 401, whose text does not say
+  why.
+- An error does not mean nothing was stored. The CA records the revocation
+  first and, with a revocation list set to regenerate on each revocation,
+  rebuilds the list afterwards: if that fails, the answer is a 500 and the
+  certificate is revoked (`authority/tls.go`, `Revoke`; read, not seen).
+  The token is used up when the request is authorized, before either.
 - Revoking writes `revoked_x509_certs`, which blocks renewal and rekey of
   that certificate. Relying parties learn of it only through the CRL, and
   only if `crl.enabled` is set in ca.json (`GET /1.0/crl`, 404 when off).
@@ -285,6 +301,28 @@ CA's side ([ca-setup.md](ca-setup.md) has the commands):
 Neither limits revocation: any JWK provisioner can revoke any serial. The
 decrypted key lives only in memory. Tokens are minted per request with a
 random `jti` and a one-minute lifetime, and are never logged.
+
+As built: the key is the one the CA publishes for the provisioner named in
+`-provisioner`, taken from the CA's provisioner list (the same answer as
+`/provisioners/{kid}/encrypted-key`) and opened with the password in
+`-provisioner-password-file`. The name must mean exactly one JWK
+provisioner, and what the password opens must be the private half of the
+public key the CA lists for it; anything else is an error that says which.
+A password that fails on a key is not tried on that key again (each try is
+600,000 rounds of a hash), but is tried when the key on the CA changes. The
+password is kept in memory until the key has been opened, since the CA may
+be down at start, and dropped then. The key is opened at start and retried
+every thirty seconds until it opens; the status page shows the state.
+Tokens are signed with the algorithm that suits the key (ES256 for the
+P-256 key `step` makes by default). A provisioner whose encrypted key is
+not held by the CA cannot be used: reading the key from a local file
+instead is not built.
+
+A token is dated by handrail-ca's clock and checked by the CA's, with a
+minute's leeway. When the CA refuses a request and the `Date` of its
+answer is more than fifty seconds from handrail-ca's clock, the error
+carries the difference, because a refused token says nothing else about
+why.
 
 - *Issue:* the CSR is parsed and shown back (subject, SANs, key type) for
   confirmation before anything is signed; the token is built from exactly
@@ -418,6 +456,7 @@ In use:
 
 | Module | For | License |
 |---|---|---|
+| `github.com/go-jose/go-jose/v4` | open the provisioner's key, sign one-time tokens | Apache-2.0 |
 | `github.com/jackc/pgx/v5` | read the CA's PostgreSQL database | MIT |
 | `golang.org/x/crypto` | argon2id | BSD-3-Clause |
 | `golang.org/x/term` | asking for a password at the terminal without showing it | BSD-3-Clause |
@@ -439,11 +478,15 @@ it come `github.com/jackc/puddle/v2`, `pgpassfile` and `pgservicefile`
 password file, which handrail-ca does not use but does not disable. It
 took the stripped binary from 14.7 MB to 19.0 MB.
 
-Planned, to be confirmed when it is added:
-
-| Module | For | License |
-|---|---|---|
-| `github.com/go-jose/go-jose/v4` | open the provisioner key (PBES2 JWE), sign tokens | Apache-2.0 |
+`github.com/go-jose/go-jose/v4` (Apache-2.0) opens the provisioner's key (a
+PBES2 JWE) and signs the one-time tokens. It brings no other module; its
+`json` package is a copy of Go's `encoding/json` under Go's BSD license,
+and the notices carry both. It took the stripped binary from 19.2 MB to
+19.6 MB. The alternative was writing the key unwrapping, the JWK parsing
+and the token signatures here, for a credential that can mint
+certificates: a maintained library that many projects use for exactly this
+was preferred, and step-ca reads the tokens with the same family of
+library.
 
 Certificate and CSR handling is `crypto/x509` from the standard library.
 
@@ -584,9 +627,13 @@ server that answers `/healthz`.
 - ESLint `jscheck` joins `make` and CI with the first JavaScript file.
 
 **M3. Revoke.**
-- Provisioner key loading, token minting, the write side of the CA client.
+- Done: the provisioner's key, one-time tokens and the revocation request
+  in the CA client (`internal/ca`), checked against the development CA;
+  `-provisioner` and `-provisioner-password-file`, or `-read-only`, one of
+  which has to be said; and a card on the status page for whether
+  handrail-ca can act on the CA.
 - The revoke flow, history (store and log) with its page, outcome
-  verification, read-only mode.
+  verification.
 - A device cookie, as its own change: a browser that has signed in as a
   user before keeps a sign-in allowance of its own for that name, so that
   someone hammering a known user name cannot keep its owner out of the UI

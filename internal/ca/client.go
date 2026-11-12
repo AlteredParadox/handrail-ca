@@ -23,6 +23,7 @@
 package ca
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"crypto/tls"
@@ -60,6 +61,11 @@ type Config struct {
 	Timeout time.Duration
 	// UserAgent is sent with every request, if set.
 	UserAgent string
+	// Provisioner is what handrail-ca acts on the CA through. Without one
+	// the client only reads.
+	Provisioner *ProvisionerConfig
+	// Now is the clock tokens are dated with; nil means time.Now.
+	Now func() time.Time
 }
 
 // Client talks to one step-ca. It is safe for concurrent use. Creating it
@@ -70,6 +76,9 @@ type Client struct {
 	fingerprint [sha256.Size]byte
 	timeout     time.Duration
 	userAgent   string
+	now         func() time.Time
+	// provisioner is nil in read-only mode.
+	provisioner *provisioner
 
 	mu     sync.Mutex
 	root   *x509.Certificate
@@ -98,10 +107,17 @@ func New(cfg Config) (*Client, error) {
 	if err != nil || len(sum) != sha256.Size {
 		return nil, errors.New("CA root fingerprint: want 64 hexadecimal characters (step certificate fingerprint root_ca.crt)")
 	}
-	c := &Client{base: base, timeout: cfg.Timeout, userAgent: cfg.UserAgent}
+	prov, err := newProvisioner(cfg.Provisioner)
+	if err != nil {
+		return nil, err
+	}
+	c := &Client{base: base, timeout: cfg.Timeout, userAgent: cfg.UserAgent, now: cfg.Now, provisioner: prov}
 	copy(c.fingerprint[:], sum)
 	if c.timeout <= 0 {
 		c.timeout = defaultTimeout
+	}
+	if c.now == nil {
+		c.now = time.Now
 	}
 	return c, nil
 }
@@ -137,6 +153,10 @@ type StatusError struct {
 	// Message is the CA's own explanation, when it gave one. It comes from
 	// the network: shortened, and to be escaped like any other input.
 	Message string
+	// ClockDifference is how far the CA's clock is from this machine's,
+	// going by the Date of its answer, when that is more than the CA
+	// tolerates in a token; zero otherwise. Positive means the CA is ahead.
+	ClockDifference time.Duration
 }
 
 func (e *StatusError) Error() string {
@@ -144,6 +164,26 @@ func (e *StatusError) Error() string {
 		return fmt.Sprintf("the CA answered %d", e.Status)
 	}
 	return fmt.Sprintf("the CA answered %d: %s", e.Status, e.Message)
+}
+
+// tokenLeeway is the clock difference step-ca accepts in a token.
+const tokenLeeway = time.Minute
+
+// clockDifference reads the Date of an answer. A token is dated by this
+// machine and checked by the CA's clock, so a difference beyond the CA's
+// leeway is the first thing to rule out when a token is refused. The Date
+// header has whole seconds, and the answer took some time to arrive: only
+// a difference that could matter is reported.
+func (c *Client) clockDifference(resp *http.Response) time.Duration {
+	theirs, err := http.ParseTime(resp.Header.Get("Date"))
+	if err != nil {
+		return 0
+	}
+	diff := theirs.Sub(c.now())
+	if diff.Abs() < tokenLeeway-10*time.Second {
+		return 0
+	}
+	return diff.Round(time.Second)
 }
 
 // client returns the HTTP client that trusts the pinned root and nothing
@@ -189,6 +229,22 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, limit i
 	return body, err
 }
 
+// postJSON sends one JSON body to the CA over the pinned connection and
+// returns the answer. It is sent once: nothing here retries, since a
+// request that changes the CA must have its outcome checked first.
+func (c *Client) postJSON(ctx context.Context, path string, body any, limit int64) ([]byte, error) {
+	hc, err := c.client(ctx)
+	if err != nil {
+		return nil, err
+	}
+	sent, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	_, answer, err := c.send(ctx, hc, http.MethodPost, path, nil, sent, limit)
+	return answer, err
+}
+
 func (c *Client) getJSON(ctx context.Context, path string, query url.Values, into any) error {
 	body, err := c.get(ctx, path, query, maxJSON)
 	if err != nil {
@@ -203,14 +259,27 @@ func (c *Client) getJSON(ctx context.Context, path string, query url.Values, int
 // do makes one GET and reads at most limit bytes of the answer; a longer
 // answer is an error, not a truncated success.
 func (c *Client) do(ctx context.Context, hc *http.Client, path string, query url.Values, limit int64) (*http.Response, []byte, error) {
+	return c.send(ctx, hc, http.MethodGet, path, query, nil, limit)
+}
+
+// send makes one request, with a JSON body if there is one, and reads the
+// answer as do describes.
+func (c *Client) send(ctx context.Context, hc *http.Client, method, path string, query url.Values, body []byte, limit int64) (*http.Response, []byte, error) {
 	u := *c.base
 	u.Path = path
 	u.RawQuery = query.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
+	var sent io.Reader
+	if body != nil {
+		sent = bytes.NewReader(body)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), sent)
 	if err != nil {
 		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	if c.userAgent != "" {
 		req.Header.Set("User-Agent", c.userAgent)
 	}
@@ -223,16 +292,16 @@ func (c *Client) do(ctx context.Context, hc *http.Client, path string, query url
 	if resp.StatusCode < 200 || resp.StatusCode > 299 {
 		// The error text is optional: read a little of it and move on.
 		excerpt, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<10))
-		return nil, nil, &StatusError{Status: resp.StatusCode, Message: errorMessage(excerpt)}
+		return nil, nil, &StatusError{Status: resp.StatusCode, Message: errorMessage(excerpt), ClockDifference: c.clockDifference(resp)}
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	answer, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
 	if err != nil {
 		return nil, nil, fmt.Errorf("%s: reading the answer: %w", path, err)
 	}
-	if int64(len(body)) > limit {
+	if int64(len(answer)) > limit {
 		return nil, nil, fmt.Errorf("%s: the answer is larger than %d bytes", path, limit)
 	}
-	return resp, body, nil
+	return resp, answer, nil
 }
 
 // errorMessage is the "message" of a step-ca error body, shortened; empty

@@ -79,6 +79,31 @@ type fakeCA struct {
 
 	healthErr, versionErr, rootErr, rootsErr, intersErr, provsErr, crlErr error
 	calls                                                                 atomic.Int64
+
+	// readOnly is a client with no provisioner; unlockErr is why the
+	// provisioner's key cannot be opened, nil when it is open.
+	readOnly  bool
+	unlockErr error
+}
+
+const fakeKeyID = "kid-of-the-handrail-key"
+
+func (f *fakeCA) ProvisionerState() ca.ProvisionerState {
+	if f.readOnly {
+		return ca.ProvisionerState{}
+	}
+	st := ca.ProvisionerState{Configured: true, Name: "handrail"}
+	if f.unlockErr == nil {
+		st.Ready, st.KeyID = true, fakeKeyID
+	}
+	return st
+}
+
+func (f *fakeCA) Unlock(context.Context) error {
+	if f.readOnly {
+		return ca.ErrNoProvisioner
+	}
+	return f.unlockErr
 }
 
 func (f *fakeCA) URL() string             { return "https://ca.internal.example:9000" }
@@ -1233,8 +1258,10 @@ func TestStatusPage(t *testing.T) {
 		"0 seconds ago, at 12:00:00 UTC",
 		"4 in all: 1 valid, 1 expired, 1 revoked, 1 unreadable",
 		"Read again every 30 seconds",
+		// What handrail-ca can do on the CA.
+		"Acting on the CA", ">Ready<", fakeKeyID, "held in memory only",
 	)
-	for _, absent := range []string{"Not reachable", "Not known", "could not", "does not list"} {
+	for _, absent := range []string{"Not reachable", "Not known", "could not", "does not list", "Not ready", "Read-only", "has not been opened"} {
 		if strings.Contains(page.Body.String(), absent) {
 			t.Errorf("a healthy CA's page says %q", absent)
 		}
@@ -1294,6 +1321,36 @@ func TestStatusPageBeforeTheRootIsFetched(t *testing.T) {
 	for _, absent := range []string{"Example Root CA", "2035-11-11", "was fetched from the CA and matched"} {
 		if strings.Contains(page.Body.String(), absent) {
 			t.Errorf("the page shows %q for a root that was never fetched", absent)
+		}
+	}
+}
+
+// The card for acting on the CA says read-only when that is how
+// handrail-ca was started, and why the key is not open when it is not;
+// neither is shown as ready.
+func TestStatusPageActingStates(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	s.ca.readOnly = true
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	page := b.get("/status")
+	wantBody(t, page, "Acting on the CA", ">Read-only<", "was started read-only", "nothing can be issued or revoked from here")
+	for _, absent := range []string{">Ready<", "Not ready", fakeKeyID, "Key ID", "has not been opened"} {
+		if strings.Contains(page.Body.String(), absent) {
+			t.Errorf("a read-only handrail-ca's page says %q", absent)
+		}
+	}
+
+	s = newSite(t, "http://127.0.0.1:8080")
+	s.ca.unlockErr = errors.New(`provisioner "<handrail>": the configured password does not open its key`)
+	b = s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	page = b.get("/status")
+	wantBody(t, page, "Acting on the CA", ">Not ready<", ">handrail <",
+		"The provisioner's key has not been opened, so nothing can be revoked from here: provisioner &#34;&lt;handrail&gt;&#34;: the configured password does not open its key")
+	for _, absent := range []string{">Ready<", "Read-only", fakeKeyID, "Key ID", "held in memory only"} {
+		if strings.Contains(page.Body.String(), absent) {
+			t.Errorf("the page of a handrail-ca whose key is not open says %q", absent)
 		}
 	}
 }

@@ -2,8 +2,9 @@
 
 What has to exist on the CA's side before handrail-ca can show, issue and
 revoke certificates. handrail-ca is being built (see [PLAN.md](PLAN.md));
-today it uses the CA's address and root fingerprint from section 5, and the
-rest as each milestone arrives.
+today it uses everything in section 5: the CA's address and root
+fingerprint, the database account, and the provisioner, whose key it opens
+and can revoke with. Issuing arrives with a later milestone.
 
 **How far this has been checked.** Sections 1 to 3 are run on every fresh
 development CA (`make dev-up`) and their effects are checked by
@@ -305,8 +306,16 @@ When handrail-ca is installed it will need:
 |---|---|
 | The CA's URL (`-ca-url`) | A name listed in `dnsNames` in `ca.json`; tokens for any other name are refused |
 | The root certificate's SHA-256 fingerprint (`-ca-fingerprint`) | `step certificate fingerprint $(step path)/certs/root_ca.crt` on the CA's host. handrail-ca fetches the root from the CA and accepts it only if it has this fingerprint, so read it off the CA's own host, not off a network answer |
-| The provisioner's name | `handrail`, from section 1 |
-| The provisioner's password | The file from section 1 |
+| The provisioner's name (`-provisioner`) | `handrail`, from section 1 |
+| The provisioner's password (`-provisioner-password-file`) | The file from section 1. handrail-ca fetches the provisioner's encrypted key from the CA and opens it with this; it needs no key file. Anything after the password in the file (a final newline) is ignored, as the step CLI does |
 | The database address, name, role and password (`-db-url-file`) | Section 3, as one connection string in a file: `postgres://handrail:PASSWORD@HOST:5432/stepca?sslmode=verify-full`. Readable by handrail-ca's user only |
 
 Secrets are passed as file paths, never on the command line.
+
+To run handrail-ca for viewing only, skip section 1 and start it with
+`-read-only` in place of the two provisioner settings.
+
+handrail-ca dates each token it sends the CA with its own clock, and the CA
+accepts a token only within a minute of its own. If the two machines'
+clocks differ by more, the CA refuses everything handrail-ca asks it to do;
+keep both on NTP.

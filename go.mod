@@ -3,6 +3,7 @@ module handrail-ca
 go 1.27.4
 
 require (
+	github.com/go-jose/go-jose/v4 v4.1.9
 	github.com/jackc/pgx/v5 v5.13.0
 	golang.org/x/crypto v0.59.0
 	golang.org/x/term v0.48.0

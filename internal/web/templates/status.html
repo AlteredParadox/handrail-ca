@@ -56,6 +56,30 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </section>
 {{end}}
 
+{{with .Acting}}
+<section class="card">
+<div class="card-head">
+<h2>Acting on the CA</h2>
+{{if .ReadOnly}}<span class="badge unknown">Read-only</span>
+{{else if .Ready}}<span class="badge ok">Ready</span>
+{{else}}<span class="badge bad">Not ready</span>{{end}}
+</div>
+{{if .ReadOnly}}
+<p>handrail-ca was started read-only. It holds no provisioner key, so nothing can be issued or revoked from here.</p>
+{{else}}
+<dl>
+<dt>Provisioner</dt><dd>{{.Provisioner}} <span class="sub">JWK</span></dd>
+{{if .Ready}}<dt>Key ID</dt><dd class="mono small">{{.KeyID}}</dd>{{end}}
+</dl>
+{{if .Ready}}
+<p class="muted">The provisioner's key was fetched from the CA, opened with the configured password, and is held in memory only. Each request to the CA is authorized by a token signed with it, good for one use and one minute.</p>
+{{else}}
+<p class="problem">The provisioner's key has not been opened, so nothing can be revoked from here: {{.Problem}}</p>
+{{end}}
+{{end}}
+</section>
+{{end}}
+
 <section class="card">
 <div class="card-head">
 <h2>Root certificate</h2>

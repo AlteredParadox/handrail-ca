@@ -144,3 +144,120 @@ func TestIntegrationRefusesAnotherName(t *testing.T) {
 		t.Error("a root was pinned for a server under the wrong name")
 	}
 }
+
+// devProvisioner is the development CA's handrail provisioner (seed.sh):
+// its password, read from the file `make dev-test` names.
+func devProvisioner(t *testing.T) *ProvisionerConfig {
+	t.Helper()
+	path := os.Getenv("HANDRAIL_DEV_PROVISIONER_PASSWORD_FILE")
+	if path == "" {
+		t.Skip("no provisioner password: run `make dev-test`")
+	}
+	pw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &ProvisionerConfig{Name: "handrail", Password: strings.TrimSpace(string(pw))}
+}
+
+// The write side against a real step-ca: the key the CA publishes opens
+// with the provisioner's password, and a token signed with it, with the
+// claims and the request body this client builds, revokes a certificate.
+// This is the check that those shapes, first read from step-ca's source,
+// are what a running CA accepts.
+func TestIntegrationRevoke(t *testing.T) {
+	url, fingerprint := devCA(t)
+	acting := devProvisioner(t)
+	serial := os.Getenv("HANDRAIL_DEV_REVOKE_SERIAL")
+	if serial == "" {
+		t.Skip("no certificate to revoke: run `make dev-test`")
+	}
+	c, err := New(Config{URL: url, Fingerprint: fingerprint, Provisioner: acting})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := devContext(t)
+
+	if err := c.Unlock(ctx); err != nil {
+		t.Fatalf("Unlock: %v", err)
+	}
+	provisioners, err := c.Provisioners(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := c.ProvisionerState()
+	for _, p := range provisioners {
+		if p.Name == "handrail" && (!st.Ready || st.KeyID != p.KeyID) {
+			t.Errorf("state = %+v, want the key the CA lists (%s) open", st, p.KeyID)
+		}
+	}
+
+	if err := c.Revoke(ctx, Revocation{Serial: serial, ReasonCode: 4, Reason: "handrail-ca integration test"}); err != nil {
+		t.Fatalf("Revoke: %v", err)
+	}
+	// The CA holds the revocation: asked again, it says so. The inventory's
+	// integration tests read the record itself from the database.
+	err = c.Revoke(ctx, Revocation{Serial: serial, ReasonCode: 4})
+	var refused *StatusError
+	if !errors.As(err, &refused) || refused.Status != 400 || !strings.Contains(refused.Message, "is already revoked") {
+		t.Errorf("a second revocation: %v, want the CA's refusal of a certificate already revoked", err)
+	}
+	if refused != nil && refused.ClockDifference != 0 {
+		t.Errorf("clock difference of %s reported between this machine and a CA on it", refused.ClockDifference)
+	}
+}
+
+func TestIntegrationProvisionerKeyRefusals(t *testing.T) {
+	url, fingerprint := devCA(t)
+	acting := devProvisioner(t)
+	ctx := devContext(t)
+	for name, tt := range map[string]struct {
+		cfg  ProvisionerConfig
+		want string
+	}{
+		"a wrong password":              {ProvisionerConfig{Name: "handrail", Password: acting.Password + "x"}, "does not open its key"},
+		"a provisioner of another type": {ProvisionerConfig{Name: "acme", Password: acting.Password}, "is of type ACME"},
+		"no such provisioner":           {ProvisionerConfig{Name: "nobody", Password: acting.Password}, `no provisioner named "nobody"`},
+		// The CA's own admin provisioner is a JWK provisioner with an
+		// encrypted key too; handrail's password is not its password.
+		"another provisioner's key": {ProvisionerConfig{Name: "Admin JWK", Password: acting.Password}, "does not open its key"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c, err := New(Config{URL: url, Fingerprint: fingerprint, Provisioner: &tt.cfg})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := c.Unlock(ctx); err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("Unlock: %v, want an error containing %q", err, tt.want)
+			}
+			if err := c.Revoke(ctx, Revocation{Serial: "1"}); err == nil {
+				t.Error("a revocation was sent without a key")
+			}
+		})
+	}
+}
+
+// A machine whose clock is ten minutes behind the CA's dates its tokens in
+// the past, and the CA refuses them without saying why. The error carries
+// the difference between the clocks, which is the reason.
+func TestIntegrationAClockThatIsOffIsReported(t *testing.T) {
+	url, fingerprint := devCA(t)
+	c, err := New(Config{
+		URL: url, Fingerprint: fingerprint, Provisioner: devProvisioner(t),
+		Now: func() time.Time { return time.Now().Add(-10 * time.Minute) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A serial that was never issued: the token is refused before the CA
+	// looks at it, and nothing is stored.
+	err = c.Revoke(devContext(t), Revocation{Serial: "1"})
+	var refused *StatusError
+	if !errors.As(err, &refused) || refused.Status != 401 {
+		t.Fatalf("err = %v, want the CA's 401", err)
+	}
+	t.Logf("the CA's refusal of an expired token: %v", refused)
+	if d := refused.ClockDifference; d < 9*time.Minute || d > 11*time.Minute {
+		t.Errorf("clock difference = %s, want about ten minutes", d)
+	}
+}

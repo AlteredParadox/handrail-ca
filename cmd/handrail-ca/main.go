@@ -33,6 +33,7 @@ import (
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
 
 	legal "handrail-ca"
 	"handrail-ca/internal/ca"
@@ -84,7 +85,19 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	defer st.Close()
 
-	client, err := ca.New(ca.Config{URL: cfg.caURL, Fingerprint: cfg.caFingerprint, UserAgent: "handrail-ca/" + version})
+	// The provisioner handrail-ca acts through, unless it is read-only. Its
+	// password comes from a file, like every secret; the key it opens is
+	// fetched from the CA later and held in memory only.
+	var acting *ca.ProvisionerConfig
+	if !cfg.readOnly {
+		pw, err := readPasswordFile(cfg.provisionerPasswordFile)
+		if err != nil {
+			log.Error("reading the provisioner password file", "err", err)
+			return 1
+		}
+		acting = &ca.ProvisionerConfig{Name: cfg.provisioner, Password: pw}
+	}
+	client, err := ca.New(ca.Config{URL: cfg.caURL, Fingerprint: cfg.caFingerprint, UserAgent: "handrail-ca/" + version, Provisioner: acting})
 	if err != nil {
 		log.Error("CA configuration", "err", err)
 		return 1
@@ -159,14 +172,54 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 	go sweepSessions(ctx, st, log)
 	go inv.Run(ctx, web.InventoryRefresh, inventoryLog(log))
+	if cfg.readOnly {
+		log.Info("read-only: no provisioner is configured, so certificates cannot be issued or revoked from here")
+	} else {
+		go openProvisionerKey(ctx, client, provisionerRetry, log)
+	}
 
 	log.Info("handrail-ca listening", "addr", ln.Addr().String(), "url", publicURL.String(), "ca", client.URL(), "version", version)
 	return serve(ctx, ln, handler, log)
 }
 
+// provisionerRetry is how long to wait before trying again to open the
+// provisioner's key.
+const provisionerRetry = 30 * time.Second
+
+// openProvisionerKey opens the provisioner's key ahead of the first
+// revocation, so that a wrong name or password is in the log at start and
+// not found when a certificate has to be revoked. It keeps trying, since
+// the CA may be down or the provisioner not created yet, and says so once
+// per distinct reason. The status page always has the current state.
+func openProvisionerKey(ctx context.Context, client *ca.Client, every time.Duration, log *slog.Logger) {
+	var last string
+	for {
+		attempt, cancel := context.WithTimeout(ctx, time.Minute)
+		err := client.Unlock(attempt)
+		cancel()
+		if err == nil {
+			st := client.ProvisionerState()
+			log.Info("the provisioner's key is open", "provisioner", st.Name, "key_id", st.KeyID)
+			return
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		if err.Error() != last {
+			log.Warn("the provisioner's key could not be opened, so handrail-ca cannot act on the CA yet; trying again", "err", err)
+			last = err.Error()
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(every):
+		}
+	}
+}
+
 // config is what the server is started with. Secrets are never flags: the
-// one secret, the database password, is inside a file that is only named
-// here. The root's fingerprint is public.
+// database password and the provisioner password are inside files that are
+// only named here. The root's fingerprint is public.
 type config struct {
 	listen  string
 	dataDir string
@@ -179,6 +232,12 @@ type config struct {
 	publicURL string
 	// trustedProxies is the -trusted-proxy list, parsed.
 	trustedProxies []netip.Prefix
+	// provisioner is the name of the JWK provisioner handrail-ca acts
+	// through, and provisionerPasswordFile the file holding its password.
+	provisioner             string
+	provisionerPasswordFile string
+	// readOnly means no provisioner at all: view only.
+	readOnly bool
 }
 
 func parseConfig(args []string, stderr io.Writer) (config, int) {
@@ -191,6 +250,9 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 	fs.StringVar(&cfg.caFingerprint, "ca-fingerprint", os.Getenv("HANDRAIL_CA_FINGERPRINT"), "SHA-256 fingerprint of the CA's root certificate, as printed by 'step certificate fingerprint root_ca.crt' (or set HANDRAIL_CA_FINGERPRINT)")
 	fs.StringVar(&cfg.dbURLFile, "db-url-file", os.Getenv("HANDRAIL_DB_URL_FILE"), "file holding the connection string for the CA's PostgreSQL database, for a read-only account: postgres://user:password@host:port/database?sslmode=verify-full (or set HANDRAIL_DB_URL_FILE)")
 	fs.StringVar(&cfg.publicURL, "public-url", os.Getenv("HANDRAIL_PUBLIC_URL"), "the address browsers use, http(s)://host[:port][/path]; needed unless listening on loopback (or set HANDRAIL_PUBLIC_URL)")
+	fs.StringVar(&cfg.provisioner, "provisioner", os.Getenv("HANDRAIL_PROVISIONER"), "name of the JWK provisioner on the CA that handrail-ca revokes through (or set HANDRAIL_PROVISIONER)")
+	fs.StringVar(&cfg.provisionerPasswordFile, "provisioner-password-file", os.Getenv("HANDRAIL_PROVISIONER_PASSWORD_FILE"), "file holding that provisioner's password (or set HANDRAIL_PROVISIONER_PASSWORD_FILE)")
+	fs.BoolVar(&cfg.readOnly, "read-only", envBool("HANDRAIL_READ_ONLY"), "view only: no provisioner is used and nothing can be issued or revoked (or set HANDRAIL_READ_ONLY=1)")
 	proxies := fs.String("trusted-proxy", os.Getenv("HANDRAIL_TRUSTED_PROXIES"), "addresses or CIDR ranges of the reverse proxies in front, comma-separated; only they are believed about who a visitor is (or set HANDRAIL_TRUSTED_PROXIES)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, 2
@@ -214,6 +276,22 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 		if need.value == "" {
 			missing = append(missing, need.name)
 		}
+	}
+	// Acting on the CA is a decision either way: a provisioner and its
+	// password, or read-only said out loud. A missing setting never turns
+	// into a mode by itself.
+	acting := cfg.provisioner != "" || cfg.provisionerPasswordFile != ""
+	switch {
+	case cfg.readOnly && acting:
+		fmt.Fprintln(stderr, "handrail-ca: -read-only (HANDRAIL_READ_ONLY) is set together with a provisioner. Choose one: read-only uses no provisioner.")
+		return cfg, 2
+	case cfg.readOnly:
+	case !acting:
+		missing = append(missing, "-provisioner (HANDRAIL_PROVISIONER) with -provisioner-password-file (HANDRAIL_PROVISIONER_PASSWORD_FILE), or -read-only (HANDRAIL_READ_ONLY=1)")
+	case cfg.provisioner == "":
+		missing = append(missing, "-provisioner (HANDRAIL_PROVISIONER)")
+	case cfg.provisionerPasswordFile == "":
+		missing = append(missing, "-provisioner-password-file (HANDRAIL_PROVISIONER_PASSWORD_FILE)")
 	}
 	if len(missing) > 0 {
 		fmt.Fprintf(stderr, "handrail-ca: not configured: %s. Run with -h for what each one is.\n", strings.Join(missing, ", "))
@@ -270,6 +348,15 @@ func inventoryLog(log *slog.Logger) func(error) {
 // readSecretFile reads a small file that holds a secret, trimmed. Its
 // content never goes into an error.
 func readSecretFile(path string) (string, error) {
+	secret, err := readPasswordFile(path)
+	return strings.TrimSpace(secret), err
+}
+
+// readPasswordFile reads a small file that holds a password. Only what
+// follows the password is trimmed (the newline an editor or `echo` leaves),
+// which is what the step CLI does with its own password files: a password
+// may begin with a space.
+func readPasswordFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", err
@@ -283,10 +370,11 @@ func readSecretFile(path string) (string, error) {
 	if len(data) > limit {
 		return "", fmt.Errorf("%s is larger than %d bytes", path, limit)
 	}
-	if strings.TrimSpace(string(data)) == "" {
+	secret := strings.TrimRightFunc(string(data), unicode.IsSpace)
+	if strings.TrimSpace(secret) == "" {
 		return "", fmt.Errorf("%s is empty", path)
 	}
-	return strings.TrimSpace(string(data)), nil
+	return secret, nil
 }
 
 // sweepSessions removes ended sessions from the store now and then. They
@@ -389,6 +477,16 @@ func probeHost(listenHost string) string {
 		return "::1"
 	}
 	return listenHost
+}
+
+// envBool reads a yes-or-no setting from the environment. Anything but a
+// plain yes is no; an unrecognised value is not guessed at.
+func envBool(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
 }
 
 func envOr(key, def string) string {

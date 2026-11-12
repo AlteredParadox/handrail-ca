@@ -64,6 +64,11 @@ type CA interface {
 	Intermediates(ctx context.Context) ([]*x509.Certificate, error)
 	Provisioners(ctx context.Context) ([]ca.Provisioner, error)
 	CRL(ctx context.Context) (ca.CRL, error)
+	// ProvisionerState says whether handrail-ca has a provisioner to act
+	// through and whether its key is open; Unlock opens the key if it is
+	// not, and its error is the reason it could not be.
+	ProvisionerState() ca.ProvisionerState
+	Unlock(ctx context.Context) error
 }
 
 // Store is what the pages need from the store (*store.Store).

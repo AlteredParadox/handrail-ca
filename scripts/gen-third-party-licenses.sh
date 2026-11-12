@@ -10,7 +10,11 @@
 # For each module it emits EVERY license/notice file that module ships (some
 # carry several — modernc.org/libc has LICENSE plus LICENSE-3RD-PARTY.md), and
 # if none of them carries a copyright LINE it extracts one from the module's
-# source, so MIT/BSD attribution is never silently dropped.
+# source, so MIT/BSD attribution is never silently dropped. A module can also
+# carry code under another license in one of its packages, with the license
+# beside it (go-jose's json package is a copy of Go's encoding/json): the
+# license files in the directory of every package that is linked in are
+# emitted too.
 #
 # Usage: scripts/gen-third-party-licenses.sh [output-path]
 #   Default output THIRD_PARTY_LICENSES.md. `make notices-check` runs it to a
@@ -42,10 +46,12 @@ emit_file() {
 	echo '```'
 }
 
-# license_files <dir>: every top-level license/notice/authors file, sorted.
+# license_files <dir>: every license/notice/authors file in the directory
+# itself, sorted. Source files are not licenses, whatever they are called
+# (pgx has a notice_response.go).
 license_files() {
 	local dir=$1
-	find "$dir" -maxdepth 1 -type f \( \
+	find "$dir" -maxdepth 1 -type f ! -name '*.go' \( \
 		-iname 'LICENSE*' -o -iname 'COPYING*' -o -iname 'NOTICE*' \
 		-o -iname 'PATENTS*' -o -iname 'AUTHORS*' -o -iname '*-LICENSE' -o -iname 'OFL*' \
 		\) | sort
@@ -107,8 +113,19 @@ emit_module() {
 	# (and the PATENTS grant) explicitly.
 	emit_module "Go standard library and runtime (BSD-3-Clause)" "$(go env GOROOT)"
 
+	# Directories of the linked packages, for the license files that sit
+	# beside a package and not at its module's root.
+	PKGDIRS=$(CGO_ENABLED=0 go list -deps -f '{{if .Module}}{{.Dir}}{{end}}' ./cmd/handrail-ca | sort -u)
+
 	go version -m "$PROBE" | awk '$1=="dep"{print $2"@"$3}' | sort | while IFS= read -r mod; do
 		emit_module "$mod" "$MODCACHE/$mod"
+		while IFS= read -r pkgdir; do
+			[[ "$pkgdir" == "$MODCACHE/$mod"/* ]] || continue
+			while IFS= read -r f; do
+				[[ -z "$f" ]] && continue
+				emit_file "$f" "${f#"$MODCACHE/$mod"/}"
+			done < <(license_files "$pkgdir")
+		done <<<"$PKGDIRS"
 	done
 
 	# The web fonts served from the embedded static tree (not Go modules).

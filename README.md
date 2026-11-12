@@ -12,8 +12,10 @@ own: what it says, who issued it, whether and why it was revoked, and the
 certificate to download as PEM, DER or with its chain. A summary lists every
 name the CA's certificates carry, by domain and network, which is what a
 name policy on the CA has to allow. Operators can keep a note and labels on
-a certificate, for what the CA does not record. Issuing and revoking are not
-built yet; the [build plan](docs/PLAN.md) has the order.
+a certificate, for what the CA does not record. handrail-ca now opens the
+key of its provisioner on the CA, and the status page says whether it
+could, but revoking from a certificate's page is the next change and issuing
+comes after it; the [build plan](docs/PLAN.md) has the order.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.
@@ -28,16 +30,20 @@ make build          # static binary ./handrail-ca, version-stamped
 ./handrail-ca version
 ```
 
-handrail-ca needs four things to start: a directory for its own store, the
-CA's address, the fingerprint of the CA's root certificate, and a file with
-the connection string for the CA's PostgreSQL database
-([docs/ca-setup.md](docs/ca-setup.md) says where each comes from).
+handrail-ca needs five things to start: a directory for its own store, the
+CA's address, the fingerprint of the CA's root certificate, a file with
+the connection string for the CA's PostgreSQL database, and the provisioner
+it acts on the CA through, with a file holding that provisioner's password
+([docs/ca-setup.md](docs/ca-setup.md) says where each comes from). To only
+look, leave the provisioner out and say `-read-only`.
 
 ```sh
 export HANDRAIL_DATA=/var/lib/handrail-ca
 export HANDRAIL_CA_URL=https://ca.internal.example
 export HANDRAIL_CA_FINGERPRINT=<64 hex characters>   # step certificate fingerprint root_ca.crt, on the CA's host
 export HANDRAIL_DB_URL_FILE=/etc/handrail-ca/db_url  # a file, because it holds a password
+export HANDRAIL_PROVISIONER=handrail
+export HANDRAIL_PROVISIONER_PASSWORD_FILE=/etc/handrail-ca/provisioner_password
 
 ./handrail-ca user add -role operator alice   # asks for a password
 ./handrail-ca                                 # serves http://127.0.0.1:8080
@@ -49,9 +55,20 @@ export HANDRAIL_DB_URL_FILE=/etc/handrail-ca/db_url  # a file, because it holds 
 | `-ca-url` | `HANDRAIL_CA_URL` | The CA's address, `https://host[:port]`. |
 | `-ca-fingerprint` | `HANDRAIL_CA_FINGERPRINT` | SHA-256 fingerprint of the CA's root certificate. handrail-ca fetches the root from the CA, accepts it only if it has this fingerprint, and from then on verifies every connection to the CA against that root and nothing else. |
 | `-db-url-file` | `HANDRAIL_DB_URL_FILE` | File holding the connection string for the CA's PostgreSQL database: `postgres://user:password@host:port/database?sslmode=verify-full`, for an account that can only read the three certificate tables. Keep the file readable by handrail-ca's user alone. |
+| `-provisioner` | `HANDRAIL_PROVISIONER` | Name of the JWK provisioner on the CA that handrail-ca acts through. The CA must hold that provisioner's encrypted key, which is how `step ca provisioner add --create` leaves it. |
+| `-provisioner-password-file` | `HANDRAIL_PROVISIONER_PASSWORD_FILE` | File holding that provisioner's password. handrail-ca fetches the encrypted key from the CA, opens it with this password and keeps it in memory only. Keep the file readable by handrail-ca's user alone. |
+| `-read-only` | `HANDRAIL_READ_ONLY=1` | View only: no provisioner is used, and nothing can be issued or revoked. One of this and the two settings above is required; giving both is refused. |
 | `-listen` | `HANDRAIL_LISTEN` | Listen address; `127.0.0.1:8080` unless set. |
 | `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. |
 | `-trusted-proxy` | `HANDRAIL_TRUSTED_PROXIES` | Addresses or CIDR ranges of the reverse proxies in front, comma-separated. Set it whenever there is one. |
+
+The provisioner's key is opened when handrail-ca starts, and tried again
+every thirty seconds until it opens: a CA that is down, a provisioner not
+created yet, or a wrong password does not stop the start. The log says
+which it is, and so does the CA status page, under "Acting on the CA".
+The provisioner password can ask the CA for a certificate for any name the
+CA's policy allows and can revoke any certificate; whoever can read that
+file, or the memory of the running process, has that power.
 
 handrail-ca serves plain HTTP. To reach it from another machine, put a
 reverse proxy with TLS in front and set `-public-url` to the proxy's
@@ -199,6 +216,9 @@ docker run -d -p 127.0.0.1:8080:8080 \
   -v handrail-data:/data \
   -v /etc/handrail-ca/db_url:/run/secrets/handrail_db_url:ro \
   -e HANDRAIL_DB_URL_FILE=/run/secrets/handrail_db_url \
+  -v /etc/handrail-ca/provisioner_password:/run/secrets/handrail_provisioner_password:ro \
+  -e HANDRAIL_PROVISIONER=handrail \
+  -e HANDRAIL_PROVISIONER_PASSWORD_FILE=/run/secrets/handrail_provisioner_password \
   -e HANDRAIL_CA_URL=https://ca.internal.example \
   -e HANDRAIL_CA_FINGERPRINT=<the root's SHA-256 fingerprint> \
   -e HANDRAIL_PUBLIC_URL=http://127.0.0.1:8080 \
