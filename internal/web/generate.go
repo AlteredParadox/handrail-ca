@@ -459,7 +459,10 @@ func (want generateAsk) words() string {
 	case want.password != "":
 		words = ", encrypted with a password"
 	}
-	if want.madePassword {
+	switch {
+	case want.madePassword && want.pfx != nil:
+		words += ", opened with a password that handrail-ca made"
+	case want.madePassword:
 		words += " that handrail-ca made"
 	}
 	return words

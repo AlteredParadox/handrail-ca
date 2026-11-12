@@ -91,12 +91,6 @@
   box-sizing: border-box;
 }
 
-/* What is marked hidden stays hidden, whatever its class would display
-   it as: the save buttons wait for their script this way. */
-[hidden] {
-  display: none !important;
-}
-
 body {
   background: var(--ground);
   color: var(--ink);

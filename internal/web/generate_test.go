@@ -560,7 +560,7 @@ func TestGenerateAgainAfterAnUnknownOutcome(t *testing.T) {
 	})
 }
 
-var fileLinkOnPage = regexp.MustCompile(`<button type="button" class="button" hidden data-save-name="([^"]*)" data-save-type="application/x-p(?:em-file|kcs12)" data-save-body="([^"]+)">([^<]*)</button>`)
+var fileLinkOnPage = regexp.MustCompile(`<button type="button" class="secondary" hidden data-save-name="([^"]*)" data-save-type="application/x-p(?:em-file|kcs12)" data-save-body="([^"]+)">([^<]*)</button>`)
 
 // filesOn are the files a page carries to be saved, by name.
 func filesOn(t *testing.T, body string) (names []string, files map[string]string) {
@@ -1006,8 +1006,12 @@ func TestGenerateWithAMadePassword(t *testing.T) {
 					t.Error("the password is in the history")
 				}
 			}
-			if !strings.Contains(events[1].Detail, " that handrail-ca made;") {
-				t.Errorf("history: %q", events[1].Detail)
+			if want := map[string]string{
+				"pem":        "), encrypted with a password that handrail-ca made;",
+				"pfx":        "), handed over in a PFX file, opened with a password that handrail-ca made;",
+				"pfx-legacy": "), handed over in a PFX file for older devices, opened with a password that handrail-ca made;",
+			}[format]; !strings.Contains(events[1].Detail, want) {
+				t.Errorf("history: %q, want %q in it", events[1].Detail, want)
 			}
 			if strings.Contains(s.log.String(), made) {
 				t.Error("the password is in the log")

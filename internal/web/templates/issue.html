@@ -65,7 +65,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 </dl>
 {{range .Differs}}<p class="problem">Not as asked: {{.}}.</p>{{end}}
 <div class="actions">
-{{range .Files}}<button type="button" class="button" hidden data-save-name="{{.Name}}" data-save-type="{{.Type}}" data-save-body="{{.Body}}">{{.Label}}</button>
+{{range .Files}}<button type="button" class="secondary" hidden data-save-name="{{.Name}}" data-save-type="{{.Type}}" data-save-body="{{.Body}}">{{.Label}}</button>
 {{end}}</div>
 <p class="sub" data-save-on hidden>The files are inside this page: saving one fetches nothing from handrail-ca.{{if not .PFX}} They can also be copied from below.{{end}}</p>
 <p class="sub" data-save-off>The buttons that save these as files need JavaScript, which is not running on this page. {{if .PFX}}The PFX file is below as text instead, with how to turn it back into the file.{{else}}Copy the key and the certificate from below instead.{{end}}</p>
