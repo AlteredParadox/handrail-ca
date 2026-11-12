@@ -74,6 +74,14 @@ const maxEncryptedKey = 32 << 10
 type provisioner struct {
 	name string
 
+	// opening is held by the one attempt to open the key that is under
+	// way: a slot, not a mutex, so that waiting for it can be given up.
+	// The attempt talks to the CA and decrypts, which takes as long as
+	// the CA takes; nothing else waits for it.
+	opening chan struct{}
+
+	// mu guards the fields below and is never held across a request to
+	// the CA or a decryption, so asking for the state never waits.
 	mu       sync.Mutex
 	password []byte
 	signer   jose.Signer
@@ -94,7 +102,7 @@ func newProvisioner(cfg *ProvisionerConfig) (*provisioner, error) {
 	if cfg.Password == "" {
 		return nil, errors.New("provisioner: no password")
 	}
-	return &provisioner{name: cfg.Name, password: []byte(cfg.Password)}, nil
+	return &provisioner{name: cfg.Name, password: []byte(cfg.Password), opening: make(chan struct{}, 1)}, nil
 }
 
 // ProvisionerState says what handrail-ca can do on the CA right now.
@@ -107,7 +115,8 @@ type ProvisionerState struct {
 	KeyID string
 }
 
-// ProvisionerState reports the provisioner without asking the CA anything.
+// ProvisionerState reports the provisioner without asking the CA anything
+// and without waiting for an attempt to open the key that is under way.
 func (c *Client) ProvisionerState() ProvisionerState {
 	p := c.provisioner
 	if p == nil {
@@ -118,28 +127,56 @@ func (c *Client) ProvisionerState() ProvisionerState {
 	return ProvisionerState{Configured: true, Name: p.name, Ready: p.signer != nil, KeyID: p.keyID}
 }
 
+// ready is the signer, if the key is open.
+func (p *provisioner) ready() jose.Signer {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.signer
+}
+
 // Unlock opens the provisioner's key if that has not been done yet: it
 // reads the encrypted key from the CA and decrypts it with the configured
 // password. It is called by everything that needs the key, and can be
-// called ahead of time to find a wrong name or password early.
+// called ahead of time to find a wrong name or password early. One attempt
+// runs at a time; a caller waiting for another's attempt stops waiting
+// when its own context ends.
 func (c *Client) Unlock(ctx context.Context) error {
 	p := c.provisioner
 	if p == nil {
 		return ErrNoProvisioner
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.signer != nil {
+	if p.ready() != nil {
 		return nil
 	}
+	select {
+	case p.opening <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-p.opening }()
+	// The attempt that was waited for may have opened it.
+	if p.ready() != nil {
+		return nil
+	}
+
 	listed, err := c.listedKey(ctx, p.name)
 	if err != nil {
 		return err
 	}
-	if p.failedKey != "" && subtle.ConstantTimeCompare([]byte(p.failedKey), []byte(listed.encrypted)) == 1 {
-		return p.failedErr
+	p.mu.Lock()
+	failed := p.failedKey != "" && subtle.ConstantTimeCompare([]byte(p.failedKey), []byte(listed.encrypted)) == 1
+	failedErr := p.failedErr
+	// Only the attempt holding the slot drops the password, and it is this
+	// one: the slice is safe to read without the lock until then.
+	password := p.password
+	p.mu.Unlock()
+	if failed {
+		return failedErr
 	}
-	signer, err := openKey(listed, p.password)
+
+	signer, err := openKey(listed, password)
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if err != nil {
 		err = fmt.Errorf("provisioner %q: %w", p.name, err)
 		if errors.Is(err, errWrongPassword) {
@@ -300,10 +337,7 @@ func (c *Client) token(ctx context.Context, path, subject string) (string, error
 	if err := c.Unlock(ctx); err != nil {
 		return "", err
 	}
-	p := c.provisioner
-	p.mu.Lock()
-	signer, name := p.signer, p.name
-	p.mu.Unlock()
+	signer, name := c.provisioner.ready(), c.provisioner.name
 
 	id := make([]byte, 32)
 	if _, err := rand.Read(id); err != nil {

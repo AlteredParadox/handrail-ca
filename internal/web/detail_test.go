@@ -174,7 +174,7 @@ func TestDetailOfEachStatus(t *testing.T) {
 
 	revoked := b.get("/certificates/103")
 	wantBody(t, revoked, `<span class="badge bad">Revoked</span>`, "Revoked on 2026-11-11. It would have expired on 2027-02-09.",
-		"2026-11-11 08:00 UTC", "Key compromise", "With a provisioner&#39;s token", "The CA will not renew a revoked certificate.")
+		"2026-11-11 08:00 UTC", "Key compromise", "With a provisioner&#39;s token", "The CA will not renew a revoked certificate, but it will issue a new one for the same names")
 	if strings.Contains(revoked.Body.String(), "Not revoked") {
 		t.Error("a revoked certificate's page says it is not revoked")
 	}

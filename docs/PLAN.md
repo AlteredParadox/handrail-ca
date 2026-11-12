@@ -186,6 +186,15 @@ Revoke (`api/revoke.go`, `authority/tls.go`):
   rebuilds the list afterwards: if that fails, the answer is a 500 and the
   certificate is revoked (`authority/tls.go`, `Revoke`; read, not seen).
   The token is used up when the request is authorized, before either.
+- A revocation stops one thing: renewing or rekeying that certificate by
+  presenting it. It does not stop a new certificate for the same names.
+  The CA does not look at revocations when it signs: the same provisioner
+  issues the name again, and so does ACME, whose clients never renew by
+  presenting a certificate but place a new order each time. A machine
+  that gets its certificates over ACME therefore keeps getting them after
+  one is revoked (`make dev-verify` does exactly this). The revoke page
+  says so, and says it again, louder, for a certificate that came from an
+  ACME provisioner.
 - Revoking writes `revoked_x509_certs`, which blocks renewal and rekey of
   that certificate. Relying parties learn of it only through the CRL, and
   only if `crl.enabled` is set in ca.json (`GET /1.0/crl`, 404 when off).
@@ -328,10 +337,17 @@ worked out from both:
 |---|---|---|---|
 | Confirmed | Holds the revocation | ok | The certificate's page, with the record |
 | Confirmed | Does not show it, or cannot be read | ok | That the CA confirmed it and the record was not seen |
-| An error, or nothing | Holds this request's revocation | ok | The certificate's page, with the record |
+| An error, or nothing | Holds this request's revocation | ok | That it is revoked and that the CA did not confirm it, with the CA's words |
 | An error, or nothing | Holds another revocation | failed | The certificate's page, saying it was revoked already |
 | An error, or nothing | Holds none | failed | That it was not revoked, with the CA's words, and the form again |
 | An error, or nothing | Cannot be read | unknown | That it is not known, with both reasons, and the form again |
+
+The third row is not shown as a plain success. A CA that reports a failure
+after recording a revocation may have left something undone: step-ca
+rebuilds a revocation list at that point when it is set to, so the page
+says the certificate is revoked, gives the CA's answer, and says what that
+may mean for the list (or that it could not be learned whether there is
+one).
 
 A record counts as this request's when it carries the same reason and
 note, was made with a provisioner's token, and is dated no earlier than

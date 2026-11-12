@@ -84,13 +84,24 @@ started with `-read-only` refuses for everyone.
 The request goes to the CA once. Whatever the CA answers, handrail-ca then
 reads the CA's database again and tells you what it found there: revoked,
 not revoked, or not known because neither the answer nor the database
-could be had. The attempt and the outcome are both written to the history
+could be had. When the database holds the revocation but the CA answered
+with an error, it says both, with the CA's words: a CA that fails after
+recording a revocation may not have rebuilt its revocation list. The attempt and the outcome are both written to the history
 and the log, with who asked and from where. It does not depend on the
 CA's database being readable: if the certificate list is stale, the page
 says so and the revocation still goes to the CA.
 
 Only certificates in the list can be revoked from here. Revocation cannot
 be undone, by handrail-ca or by step-ca.
+
+Revoking stops the CA renewing that one certificate. It does not stop a
+new certificate being issued for the same names: step-ca does not look at
+revocations when it is asked for one. This matters most for certificates
+issued over ACME, since an ACME client (certbot, acme.sh, Caddy) gets
+every certificate by a new order and never by renewing the old one. A
+machine like that keeps getting certificates after one of them is revoked,
+and has to be stopped on the machine itself. The revoke page says this
+for such a certificate.
 
 handrail-ca serves plain HTTP. To reach it from another machine, put a
 reverse proxy with TLS in front and set `-public-url` to the proxy's

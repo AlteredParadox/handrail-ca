@@ -48,6 +48,10 @@ const (
 	oursWithin = 2 * time.Minute
 )
 
+// acmeType is step-ca's name for the type of an ACME provisioner, as it
+// records it beside each certificate.
+const acmeType = "ACME"
+
 // revokeReasons are the reasons offered, in the order shown: RFC 5280's,
 // less the ones that do not describe an operator revoking a certificate (a
 // compromised CA, a hold, removal from a list).
@@ -65,6 +69,9 @@ type revokeData struct {
 	Expired         bool
 	Provisioner     string
 	ProvisionerType string
+	// ACME is set for a certificate issued by an ACME provisioner, whose
+	// client gets its next certificate by a new order, revoked or not.
+	ACME bool
 
 	// What a revocation will mean on this CA: CRLKnown is false when the
 	// CA could not be asked whether it publishes a revocation list.
@@ -90,6 +97,12 @@ type revokeData struct {
 	// database did not show afterwards; the page then says so, with no
 	// form.
 	Unrecorded *unrecorded
+	// Unconfirmed is set when the CA's database holds the revocation that
+	// was asked for although the CA's answer was not a confirmation. The
+	// certificate is revoked; the page says so, with what the CA said,
+	// since a CA that reports a failure after recording a revocation may
+	// have left something undone.
+	Unconfirmed *revokeFailure
 }
 
 // unrecorded describes a confirmed revocation whose record was not seen.
@@ -183,7 +196,7 @@ func (s *server) newRevokeData(r *http.Request, snap *inventory.Snapshot, c *inv
 		Serial: c.Serial, Title: c.Subject,
 		Subject: c.Subject, Names: row.Names, SerialHex: groupedBy(c.SerialHex, 4),
 		Expires: expiry(c.NotAfter, now), ExpiresDay: c.NotAfter.UTC().Format("2006-01-02"), Expired: !c.NotAfter.After(now),
-		Provisioner: c.Provisioner.Name, ProvisionerType: c.Provisioner.Type,
+		Provisioner: c.Provisioner.Name, ProvisionerType: c.Provisioner.Type, ACME: c.Provisioner.Type == acmeType,
 		Stale: snap.State.Problem,
 		Note:  note, MaxNote: maxRevokeNote,
 	}
@@ -317,6 +330,12 @@ func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 	event.Outcome, event.Detail = outcome.outcome, asked+"; "+outcome.detail
 	s.record(r, event)
 	switch {
+	case outcome.unconfirmed != nil:
+		// Revoked, and the CA said something other than yes. That is not
+		// passed over on the way to the certificate's page: it is shown.
+		data := s.newRevokeData(r, s.opts.Inventory.Snapshot(), c, reason, typedNote)
+		data.Unconfirmed = outcome.unconfirmed
+		s.renderRevoke(w, r, http.StatusOK, data)
 	case rev != nil:
 		// It is revoked, by this request or by another: its page shows the
 		// record, and says which.
@@ -344,7 +363,9 @@ func (s *server) revoke(w http.ResponseWriter, r *http.Request) {
 // revoked is what became of a revocation, for the history and the page.
 type revoked struct {
 	outcome, detail string
-	failure         *revokeFailure
+	// failure is set when the certificate was not revoked, or that is not
+	// known; unconfirmed, when it was revoked without the CA's yes.
+	failure, unconfirmed *revokeFailure
 }
 
 // revokeOutcome works out what became of a revocation from what the CA
@@ -374,7 +395,7 @@ func revokeOutcome(sendErr, readErr error, rev *inventory.Revocation, reason int
 		return revoked{outcome: store.OutcomeFailed, failure: failure,
 			detail: "not revoked: " + sendErr.Error() + "; the CA's database held no revocation for it when read afterwards"}
 	case ours(rev, reason, note, started):
-		return revoked{outcome: store.OutcomeOK,
+		return revoked{outcome: store.OutcomeOK, unconfirmed: failure,
 			detail: "the CA's answer was not a confirmation (" + sendErr.Error() + "), but its database holds this revocation"}
 	}
 	return revoked{outcome: store.OutcomeFailed,

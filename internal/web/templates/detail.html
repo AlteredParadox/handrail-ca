@@ -127,7 +127,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{with .By}}<dt>Provisioner</dt><dd>{{.}}</dd>{{end}}
 </dl>
 {{end}}
-<p class="muted">The CA will not renew a revoked certificate. Whether systems that trust it learn of the revocation depends on the CA publishing a revocation list; the <a href="{{$base}}/status">CA status</a> page says whether it does.</p>
+<p class="muted">The CA will not renew a revoked certificate, but it will issue a new one for the same names to whoever may ask for one. Whether systems that trust it learn of the revocation depends on the CA publishing a revocation list; the <a href="{{$base}}/status">CA status</a> page says whether it does.</p>
+{{if .IssuedOverACME}}<p class="muted">This certificate was issued over ACME. Its client does not renew: it orders a new certificate each time, and the revocation does not stop that.</p>{{end}}
 {{else}}
 {{if not .RevocationsKnown}}<p class="problem">The CA's revocation records have not been read. This certificate may have been revoked.</p>
 {{else if .Stale}}<p class="problem">The CA had no revocation record for this certificate {{.LastRead}}. Its records could not be read again since, so a revocation after that would not show here.</p>

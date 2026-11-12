@@ -32,6 +32,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -539,6 +540,94 @@ func TestUnlockWaitsForTheCA(t *testing.T) {
 	mu.Unlock()
 	if err := c.Unlock(context.Background()); err != nil {
 		t.Fatalf("once the CA is up: %v", err)
+	}
+}
+
+// Opening the key talks to the CA, which can be slow. Asking what state
+// the provisioner is in does not wait for that, and a second caller who
+// wants the key opened stops waiting when its own time is up.
+func TestStateAndImpatientCallersDoNotWaitForASlowCA(t *testing.T) {
+	f := newFakeCA(t)
+	p := newTestProvisioner(t, "P-256", "")
+	asked, release := make(chan struct{}, 4), make(chan struct{})
+	var once sync.Once
+	letGo := func() { once.Do(func() { close(release) }) }
+	// However the test ends, the held request is let go, or the server
+	// could not close.
+	t.Cleanup(letGo)
+	f.mux.HandleFunc("GET /provisioners", func(w http.ResponseWriter, _ *http.Request) {
+		asked <- struct{}{}
+		<-release
+		writeJSON(w, http.StatusOK, map[string]any{"provisioners": []any{p.entry()}})
+	})
+	c := f.acting(t, testPassword, nil)
+
+	first := make(chan error, 1)
+	go func() { first <- c.Unlock(context.Background()) }()
+	<-asked // the first attempt is now waiting for the CA
+
+	state := make(chan ProvisionerState, 1)
+	go func() { state <- c.ProvisionerState() }()
+	select {
+	case st := <-state:
+		if !st.Configured || st.Ready {
+			t.Errorf("state while the key is being opened: %+v", st)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ProvisionerState waited for the CA")
+	}
+
+	impatient, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	second := make(chan error, 1)
+	go func() { second <- c.Unlock(impatient) }()
+	select {
+	case err := <-second:
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("the impatient caller got %v, want its own deadline", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("a caller whose time was up kept waiting for another's attempt")
+	}
+
+	// The CA answers at last: the first attempt opens the key, once, and
+	// later callers find it open without asking the CA again.
+	letGo()
+	if err := <-first; err != nil {
+		t.Fatalf("the first attempt: %v", err)
+	}
+	if err := c.Unlock(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st := c.ProvisionerState(); !st.Ready || st.KeyID != p.public.KeyID {
+		t.Errorf("state = %+v", st)
+	}
+	if len(asked) != 0 {
+		t.Errorf("the CA's list was asked for %d more times", len(asked))
+	}
+}
+
+// Callers that arrive together open the key once between them.
+func TestUnlockTogetherOpensTheKeyOnce(t *testing.T) {
+	f := newFakeCA(t)
+	p := newTestProvisioner(t, "P-256", "")
+	var lists atomic.Int64
+	f.mux.HandleFunc("GET /provisioners", func(w http.ResponseWriter, _ *http.Request) {
+		lists.Add(1)
+		writeJSON(w, http.StatusOK, map[string]any{"provisioners": []any{p.entry()}})
+	})
+	c := f.acting(t, testPassword, nil)
+	errs := make(chan error, 8)
+	for range 8 {
+		go func() { errs <- c.Unlock(context.Background()) }()
+	}
+	for range 8 {
+		if err := <-errs; err != nil {
+			t.Error(err)
+		}
+	}
+	if got := lists.Load(); got != 1 {
+		t.Errorf("the CA's list was read %d times, want once", got)
 	}
 }
 

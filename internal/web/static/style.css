@@ -657,6 +657,10 @@ ul.plain {
   color: var(--ink);
 }
 
+.card.caution {
+  border-color: var(--warn);
+}
+
 .card.failure {
   border-color: var(--bad);
 }
