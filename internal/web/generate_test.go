@@ -17,22 +17,30 @@
 package web
 
 import (
+	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
 	"crypto/x509"
+	"encoding/asn1"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"html"
 	"net/http"
 	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"reflect"
 	"regexp"
 	"strings"
 	"testing"
 	"time"
+
+	pkcs12 "software.sslmate.com/src/go-pkcs12"
 
 	"handrail-ca/internal/ca"
 	"handrail-ca/internal/store"
@@ -549,6 +557,491 @@ func TestGenerateAgainAfterAnUnknownOutcome(t *testing.T) {
 		rec := b.do(http.MethodPost, "/issue/generate", b.generateForm("other.internal.example", "", "p256"))
 		wantStatus(t, rec, http.StatusOK)
 	})
+}
+
+var fileLinkOnPage = regexp.MustCompile(`<a class="button" download="([^"]*)" href="data:application/x-p(?:em-file|kcs12);base64,([^"]+)">([^<]*)</a>`)
+
+// filesOn are the files a page carries to be saved, by name.
+func filesOn(t *testing.T, body string) (names []string, files map[string]string) {
+	t.Helper()
+	files = map[string]string{}
+	for _, m := range fileLinkOnPage.FindAllStringSubmatch(body, -1) {
+		// As a browser reads the address: the page's escaping undone, then
+		// the address's own, and what is left is the file in base64.
+		address, err := url.PathUnescape(html.UnescapeString(m[2]))
+		if err != nil {
+			t.Fatalf("the address of the file %s does not read: %v", m[1], err)
+		}
+		text, err := base64.StdEncoding.DecodeString(address)
+		if err != nil {
+			t.Fatalf("the file %s on the page does not decode: %v", m[1], err)
+		}
+		names = append(names, m[1])
+		files[m[1]] = string(text)
+	}
+	return names, files
+}
+
+// The page that hands the key over also carries it, and the certificate,
+// as files to save: inside the page itself, so that saving one asks
+// handrail-ca for nothing and the key is still in that one answer only.
+func TestGenerateOffersTheFilesToSave(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	rec := b.do(http.MethodPost, "/issue/generate", b.generateForm("Git <server> 01", "git.internal.example", "p256"))
+	wantStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	if strings.Contains(body, "ZgotmplZ") {
+		t.Fatal("a link on the page was blanked by the template's own escaping")
+	}
+	names, files := filesOn(t, body)
+	// Named after the certificate, safely, like the downloads on its page.
+	if want := []string{"git-server-01.key", "git-server-01.pem", "git-server-01-chain.pem", "git-server-01-key-and-chain.pem"}; !reflect.DeepEqual(names, want) {
+		t.Fatalf("files offered: %v, want %v", names, want)
+	}
+	wantBody(t, rec, ">Download key</a>", ">Download certificate</a>", ">Download chain</a>", ">Key and chain in one file</a>", "saving one fetches nothing from handrail-ca")
+
+	// The files are what the page shows, to the byte.
+	shown := pemOnPage.FindAllString(html.UnescapeString(regexp.MustCompile(`(?s)<h3>Private key</h3>.*`).FindString(body)), -1)
+	if len(shown) != 4 {
+		t.Fatalf("%d PEM blocks shown", len(shown))
+	}
+	key, cert, chain := shown[0]+"\n", shown[1]+"\n", shown[2]+"\n"+shown[3]+"\n"
+	for name, want := range map[string]string{
+		"git-server-01.key": key, "git-server-01.pem": cert, "git-server-01-chain.pem": chain, "git-server-01-key-and-chain.pem": key + chain,
+	} {
+		if files[name] != want {
+			t.Errorf("the file %s is not what the page shows:\n%s", name, files[name])
+		}
+	}
+	// Nothing on the page fetches the key from the server: there is no
+	// address for it.
+	if strings.Contains(body, `href="/issue/generate/`) || strings.Contains(body, `/key"`) {
+		t.Error("the page links to an address for the key")
+	}
+}
+
+// With a password, the key is handed over encrypted with it, and the
+// password is nowhere afterwards.
+func TestGenerateWithAPasswordOnTheKey(t *testing.T) {
+	const secret = "a password for one key only"
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	wantBody(t, b.get("/issue/generate"), `name="key_password" type="password" autocomplete="new-password"`, `name="key_password_again" type="password"`,
+		"handrail-ca does not keep the password or show it again")
+
+	form := b.generateForm("git.internal.example", "", "p256")
+	form.Set("key_password", secret)
+	form.Set("key_password_again", secret)
+	rec := b.do(http.MethodPost, "/issue/generate", form)
+	wantStatus(t, rec, http.StatusOK)
+	body := rec.Body.String()
+	wantBody(t, rec, "<dt>Key</dt><dd>ECDSA P-256, encrypted with the password you gave</dd>", "handrail-ca has not kept the password and cannot show it again")
+	blocks := pemBlocks(t, body)
+	if len(blocks) != 4 || blocks[0].Type != "ENCRYPTED PRIVATE KEY" {
+		t.Fatalf("the key on the page is a %q block", blocks[0].Type)
+	}
+	if _, err := x509.ParsePKCS8PrivateKey(blocks[0].Bytes); err == nil {
+		t.Fatal("the key on the page reads without the password")
+	}
+	_, files := filesOn(t, body)
+	for name, text := range files {
+		if strings.Contains(text, "-----BEGIN PRIVATE KEY-----") {
+			t.Errorf("the file %s carries the key unencrypted", name)
+		}
+	}
+	if !strings.Contains(files["git.internal.example.key"], "-----BEGIN ENCRYPTED PRIVATE KEY-----") {
+		t.Error("the key file is not the encrypted key")
+	}
+
+	// The password is not on the page, in the log or in the history.
+	if strings.Contains(body, secret) || strings.Contains(html.UnescapeString(body), secret) {
+		t.Error("the password is on the page")
+	}
+	if strings.Contains(s.log.String(), secret) {
+		t.Error("the password is in the log")
+	}
+	events := s.issueEvents()
+	for _, e := range events {
+		if strings.Contains(e.Detail, secret) {
+			t.Error("the password is in the history")
+		}
+	}
+	if !strings.Contains(events[1].Detail, "key made by handrail-ca (ECDSA P-256), encrypted with a password") {
+		t.Errorf("history: %q", events[1].Detail)
+	}
+
+	// With openssl to hand: the password opens the key, and the key is
+	// the certificate's.
+	if openssl, err := exec.LookPath("openssl"); err == nil {
+		dir := t.TempDir()
+		keyFile := filepath.Join(dir, "k.key")
+		if err := os.WriteFile(keyFile, []byte(files["git.internal.example.key"]), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		cmd := exec.Command(openssl, "pkey", "-in", keyFile, "-passin", "env:GENERATE_TEST_PASSWORD", "-pubout", "-outform", "DER")
+		cmd.Env = append(os.Environ(), "GENERATE_TEST_PASSWORD="+secret)
+		public, err := cmd.Output()
+		if err != nil {
+			t.Fatalf("openssl does not open the key with the password: %v", err)
+		}
+		cert, err := x509.ParseCertificate(blocks[1].Bytes)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(public, cert.RawSubjectPublicKeyInfo) {
+			t.Error("the key that the password opens is not the certificate's")
+		}
+	}
+}
+
+// As a PFX file: one file with the key, the certificate and its chain,
+// opened with the password. The key is then nowhere on the page as text.
+func TestGenerateAsAPFXFile(t *testing.T) {
+	const secret = "a password for one file only"
+	for name, tt := range map[string]struct {
+		format, key string
+		says        []string
+		history     string
+	}{
+		"AES-256":           {"pfx", "p256", []string{"It is protected with AES-256", "Windows 10 and Windows Server 2019 or newer", "can try passwords against it about four times as fast as against a PEM key from here"}, "handed over in a PFX file"},
+		"for older devices": {"pfx-legacy", "rsa3072", []string{"It is the kind for older devices", "Triple DES and SHA-1. That is weak, and a password a person chose can be found from the file quickly"}, "handed over in a PFX file for older devices"},
+		"an Ed25519 key":    {"pfx", "ed25519", []string{"It is protected with AES-256"}, "handed over in a PFX file"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			s := newSite(t, "http://127.0.0.1:8080")
+			b := s.browser()
+			wantRedirect(t, b.signIn("alice", alicePassword), "/")
+			form := b.generateForm("git.internal.example", "git.internal.example\n10.20.0.14", tt.key)
+			form.Set("format", tt.format)
+			form.Set("key_password", secret)
+			form.Set("key_password_again", secret)
+			rec := b.do(http.MethodPost, "/issue/generate", form)
+			wantStatus(t, rec, http.StatusOK)
+			body := rec.Body.String()
+			wantBody(t, rec, "Save the PFX file now. This page is the only place it is.", "inside a PFX file that opens with the password you gave", ">Download PFX file</a>")
+			wantBody(t, rec, tt.says...)
+			if strings.Contains(body, "ZgotmplZ") {
+				t.Fatal("a link on the page was blanked by the template's own escaping")
+			}
+			// The key is not on the page as text, in any form.
+			if strings.Contains(body, "PRIVATE KEY") || strings.Contains(body, secret) {
+				t.Error("the key, or the password, is on the page as text")
+			}
+			names, files := filesOn(t, body)
+			if want := []string{"git.internal.example.pfx", "git.internal.example.pem", "git.internal.example-chain.pem"}; !reflect.DeepEqual(names, want) {
+				t.Fatalf("files offered: %v, want %v", names, want)
+			}
+			if !strings.Contains(body, `download="git.internal.example.pfx" href="data:application/x-pkcs12;base64,`) {
+				t.Error("the PFX file is not offered as one")
+			}
+
+			// The file opens with the password, and holds the certificate's
+			// key, the certificate and its chain.
+			pfx := []byte(files["git.internal.example.pfx"])
+			key, cert, chain, err := pkcs12.DecodeChain(pfx, secret)
+			if err != nil {
+				t.Fatalf("the PFX file does not open with the password: %v", err)
+			}
+			signer, ok := key.(crypto.Signer)
+			if !ok || !reflect.DeepEqual(signer.Public(), cert.PublicKey) {
+				t.Error("the key in the file is not the certificate's")
+			}
+			if cert.Subject.CommonName != "git.internal.example" || len(chain) != 1 || !chain[0].Equal(s.signer.cert) {
+				t.Errorf("the file holds %s and %d more certificates", cert.Subject, len(chain))
+			}
+			if _, _, _, err := pkcs12.DecodeChain(pfx, "another password"); err == nil {
+				t.Error("the file opens with another password")
+			}
+			// The file stretches its password as many times as is meant
+			// for its kind, in each of the three places it is used (the
+			// key, the certificates and the check on the whole), and says
+			// so in itself.
+			rounds := map[string]int{"pfx": pfxIterations, "pfx-legacy": olderPFXIterations}[tt.format]
+			count, err := asn1.Marshal(rounds)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if n := bytes.Count(pfx, count); n != 3 {
+				t.Errorf("the file names %d rounds %d times, want 3 times", rounds, n)
+			}
+			// It is the certificate the page shows.
+			if shown := pemBlocks(t, body); len(shown) != 3 || !bytes.Equal(shown[0].Bytes, cert.Raw) {
+				t.Errorf("%d PEM blocks shown, or the first is not the certificate in the file", len(shown))
+			}
+			if events := s.issueEvents(); !strings.Contains(events[1].Detail, tt.history+";") || strings.Contains(events[1].Detail, secret) {
+				t.Errorf("history: %q", events[1].Detail)
+			}
+			if strings.Contains(s.log.String(), secret) {
+				t.Error("the password is in the log")
+			}
+
+			// With openssl to hand, it reads the file too.
+			if openssl, err := exec.LookPath("openssl"); err == nil {
+				file := filepath.Join(t.TempDir(), "x.pfx")
+				if err := os.WriteFile(file, pfx, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				cmd := exec.Command(openssl, "pkcs12", "-in", file, "-passin", "env:GENERATE_TEST_PASSWORD", "-nokeys")
+				cmd.Env = append(os.Environ(), "GENERATE_TEST_PASSWORD="+secret)
+				if out, err := cmd.CombinedOutput(); err != nil || bytes.Count(out, []byte("BEGIN CERTIFICATE")) != 2 {
+					t.Errorf("openssl does not read the file: %v\n%.300s", err, out)
+				}
+			}
+		})
+	}
+}
+
+// A PFX file is opened with its password, so there has to be one; and
+// only the forms that are offered are taken.
+func TestGenerateKeyFormRefusals(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	wantBody(t, b.get("/issue/generate"), `<option value="pem" selected>PEM files</option>`, `<option value="pfx">One PFX file, AES-256</option>`,
+		`<option value="pfx-legacy">One PFX file for older devices, Triple DES</option>`)
+	for name, tt := range map[string]struct {
+		format, password, want string
+	}{
+		"a PFX file with no password":      {"pfx", "", "a PFX file needs a password: it is what the file is opened with"},
+		"the older kind with no password":  {"pfx-legacy", "", "a PFX file needs a password"},
+		"a PFX file with a short password": {"pfx", "hunter2", "the minimum is 12"},
+		"a form that is not offered":       {"jks", "a password for one file", "choose how the key is handed over from the list"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			form := b.generateForm("git.internal.example", "", "p256")
+			form.Set("format", tt.format)
+			form.Set("key_password", tt.password)
+			form.Set("key_password_again", tt.password)
+			rec := b.do(http.MethodPost, "/issue/generate", form)
+			wantStatus(t, rec, http.StatusUnprocessableEntity)
+			wantBody(t, rec, tt.want)
+			// The choice comes back as it was left, where it was one.
+			if tt.format != "jks" && !strings.Contains(rec.Body.String(), `<option value="`+tt.format+`" selected>`) {
+				t.Error("the chosen form was not kept")
+			}
+		})
+	}
+	if n := len(s.ca.signings()); n != 0 {
+		t.Errorf("the CA was asked to sign %d times", n)
+	}
+}
+
+// If the PFX file cannot be made once the certificate exists, the key
+// still reaches the operator: as PEM, encrypted with the same password.
+func TestGenerateWhenThePFXFileCannotBeMade(t *testing.T) {
+	const secret = "a password for one file only"
+	saved := keyForms[1].pfx
+	// An encoder that refuses any password, standing in for one that fails.
+	keyForms[1].pfx = pkcs12.Passwordless
+	t.Cleanup(func() { keyForms[1].pfx = saved })
+
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	form := b.generateForm("git.internal.example", "", "p256")
+	form.Set("format", "pfx")
+	form.Set("key_password", secret)
+	form.Set("key_password_again", secret)
+	rec := b.do(http.MethodPost, "/issue/generate", form)
+	wantStatus(t, rec, http.StatusOK)
+	wantBody(t, rec, "The PFX file that was asked for could not be made", "The key is handed over below as PEM instead, encrypted with the same password.",
+		"Save the private key now.", ">Download key</a>")
+	blocks := pemBlocks(t, rec.Body.String())
+	if len(blocks) != 4 || blocks[0].Type != "ENCRYPTED PRIVATE KEY" {
+		t.Fatalf("%d PEM blocks, the first a %q", len(blocks), blocks[0].Type)
+	}
+	if names, _ := filesOn(t, rec.Body.String()); len(names) != 4 || names[0] != "git.internal.example.key" {
+		t.Errorf("files offered: %v", names)
+	}
+}
+
+// A password that would leave a key nobody can open, or one too short to
+// protect it, makes nothing; and no password is ever sent back.
+func TestGenerateKeyPasswordRefusals(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	for name, tt := range map[string]struct {
+		first, again, want string
+	}{
+		"typed differently the second time": {"a password for one key", "a password for one kez", "the two passwords for the key are not the same"},
+		"typed once only":                   {"a password for one key", "", "the two passwords for the key are not the same"},
+		"only the second box":               {"", "a password for one key", "the two passwords for the key are not the same"},
+		"too short":                         {"hunter2", "hunter2", "the key&#39;s password has 7 characters; the minimum is 12"},
+		"too long":                          {strings.Repeat("x", 1025), strings.Repeat("x", 1025), "the key&#39;s password is longer than 1024 bytes"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			form := b.generateForm("git.internal.example", "", "p256")
+			form.Set("key_password", tt.first)
+			form.Set("key_password_again", tt.again)
+			rec := b.do(http.MethodPost, "/issue/generate", form)
+			wantStatus(t, rec, http.StatusUnprocessableEntity)
+			wantBody(t, rec, tt.want, "Generate key and sign")
+			for _, typed := range []string{tt.first, tt.again} {
+				if typed != "" && strings.Contains(rec.Body.String(), typed) {
+					t.Error("a password was sent back to the browser")
+				}
+			}
+			if strings.Contains(rec.Body.String(), "PRIVATE KEY") {
+				t.Error("a key was made")
+			}
+		})
+	}
+	if n := len(s.ca.signings()); n != 0 {
+		t.Errorf("the CA was asked to sign %d times", n)
+	}
+}
+
+// madePassword is the password a page shows as made for the key.
+var madePassword = regexp.MustCompile(`<span class="mono made">([^<]+)</span>`)
+
+// A password can be made here instead of typed: it is shown on the one
+// page that carries the key, opens what is handed over, and is in no
+// record.
+func TestGenerateWithAMadePassword(t *testing.T) {
+	for name, format := range map[string]string{"PEM files": "pem", "a PFX file": "pfx", "a PFX file for older devices": "pfx-legacy"} {
+		t.Run(name, func(t *testing.T) {
+			s := newSite(t, "http://127.0.0.1:8080")
+			b := s.browser()
+			wantRedirect(t, b.signIn("alice", alicePassword), "/")
+			wantBody(t, b.get("/issue/generate"), `<input id="make_password" name="make_password" type="checkbox" value="1">`, "A password made here is 20 random characters")
+			form := b.generateForm("git.internal.example", "", "p256")
+			form.Set("format", format)
+			form.Set("make_password", "1")
+			rec := b.do(http.MethodPost, "/issue/generate", form)
+			wantStatus(t, rec, http.StatusOK)
+			body := rec.Body.String()
+			shown := madePassword.FindAllStringSubmatch(body, -1)
+			if len(shown) != 1 || len(shown[0][1]) != 20 {
+				t.Fatalf("passwords shown: %v", shown)
+			}
+			made := shown[0][1]
+			if strings.Count(body, made) != 1 {
+				t.Errorf("the password is on the page %d times", strings.Count(body, made))
+			}
+			wantBody(t, rec, "and its password now. This page is the only place they are.", "shown here once and kept nowhere")
+			_, files := filesOn(t, body)
+			if format == "pem" {
+				wantBody(t, rec, "encrypted with the password below", "encrypted with the password above (PBKDF2 and AES-256)")
+				blocks := pemBlocks(t, body)
+				if blocks[0].Type != "ENCRYPTED PRIVATE KEY" {
+					t.Fatalf("the key on the page is a %q block", blocks[0].Type)
+				}
+				if _, err := x509.ParsePKCS8PrivateKey(blocks[0].Bytes); err == nil {
+					t.Fatal("the key on the page reads without the password")
+				}
+				// With openssl to hand: the password shown opens the key,
+				// and the key is the certificate's.
+				if openssl, err := exec.LookPath("openssl"); err == nil {
+					keyFile := filepath.Join(t.TempDir(), "k.key")
+					if err := os.WriteFile(keyFile, []byte(files["git.internal.example.key"]), 0o600); err != nil {
+						t.Fatal(err)
+					}
+					cmd := exec.Command(openssl, "pkey", "-in", keyFile, "-passin", "env:GENERATE_TEST_PASSWORD", "-pubout", "-outform", "DER")
+					cmd.Env = append(os.Environ(), "GENERATE_TEST_PASSWORD="+made)
+					public, err := cmd.Output()
+					if err != nil {
+						t.Fatalf("openssl does not open the key with the password shown: %v", err)
+					}
+					cert, err := x509.ParseCertificate(blocks[1].Bytes)
+					if err != nil {
+						t.Fatal(err)
+					}
+					if !bytes.Equal(public, cert.RawSubjectPublicKeyInfo) {
+						t.Error("the key that the password opens is not the certificate's")
+					}
+				}
+			} else {
+				wantBody(t, rec, "inside a PFX file that opens with the password below", "opens with the password above")
+				// What is said of a password a person chose is not said of this one.
+				if format == "pfx" {
+					wantBody(t, rec, "Delete the file once it has been imported.")
+				}
+				if strings.Contains(body, "try passwords against it") || strings.Contains(body, "a password a person chose") {
+					t.Error("the page warns about a chosen password, and this one was made")
+				}
+				if strings.Contains(body, "your password") || strings.Contains(body, "you gave") {
+					t.Error("the page speaks of a password the operator gave")
+				}
+				key, cert, _, err := pkcs12.DecodeChain([]byte(files["git.internal.example.pfx"]), made)
+				if err != nil {
+					t.Fatalf("the password shown does not open the file: %v", err)
+				}
+				if signer, ok := key.(crypto.Signer); !ok || !reflect.DeepEqual(signer.Public(), cert.PublicKey) {
+					t.Error("the key in the file is not the certificate's")
+				}
+			}
+			// It is in the history only as having been made, and not in the log.
+			events := s.issueEvents()
+			for _, e := range events {
+				if strings.Contains(e.Detail, made) {
+					t.Error("the password is in the history")
+				}
+			}
+			if !strings.Contains(events[1].Detail, " that handrail-ca made;") {
+				t.Errorf("history: %q", events[1].Detail)
+			}
+			if strings.Contains(s.log.String(), made) {
+				t.Error("the password is in the log")
+			}
+			// Another one is another password.
+			if format != "pem" {
+				return
+			}
+			again := b.generateForm("git.internal.example", "", "p256")
+			again.Set("format", format)
+			again.Set("make_password", "1")
+			rec = b.do(http.MethodPost, "/issue/generate", again)
+			wantStatus(t, rec, http.StatusOK)
+			if next := madePassword.FindStringSubmatch(rec.Body.String()); next == nil || next[1] == made {
+				t.Errorf("the second password: %v", next)
+			}
+		})
+	}
+}
+
+// A password typed and a password made cannot both be meant; and a page
+// that refuses shows no password, and keeps the box as it was left.
+func TestGenerateMadePasswordRefusals(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	form := b.generateForm("git.internal.example", "", "p256")
+	form.Set("key_password", "a password for one key")
+	form.Set("key_password_again", "a password for one key")
+	form.Set("make_password", "1")
+	rec := b.do(http.MethodPost, "/issue/generate", form)
+	wantStatus(t, rec, http.StatusUnprocessableEntity)
+	wantBody(t, rec, "either type a password for the key or have one made, not both", `name="make_password" type="checkbox" value="1" checked>`)
+	if madePassword.MatchString(rec.Body.String()) || strings.Contains(rec.Body.String(), "PRIVATE KEY") {
+		t.Error("a refused form was answered with a password or a key")
+	}
+
+	// Refused for another reason, with the box ticked: no password either.
+	form = b.generateForm("", "", "p256")
+	form.Set("make_password", "1")
+	rec = b.do(http.MethodPost, "/issue/generate", form)
+	wantStatus(t, rec, http.StatusUnprocessableEntity)
+	if madePassword.MatchString(rec.Body.String()) {
+		t.Error("a refused form was answered with a password")
+	}
+	if n := len(s.ca.signings()); n != 0 {
+		t.Errorf("the CA was asked to sign %d times", n)
+	}
+
+	// When the CA refuses, the key is gone and the password with it.
+	s.ca.sign = func(context.Context, *ca.Request, time.Duration) (*ca.Issued, error) {
+		return nil, &ca.StatusError{Status: http.StatusForbidden, Message: "not allowed"}
+	}
+	form = b.generateForm("git.internal.example", "", "p256")
+	form.Set("make_password", "1")
+	rec = b.do(http.MethodPost, "/issue/generate", form)
+	if rec.Code == http.StatusOK || madePassword.MatchString(rec.Body.String()) {
+		t.Errorf("answered %d, or with a password for a key that was thrown away", rec.Code)
+	}
 }
 
 func TestTypedNames(t *testing.T) {

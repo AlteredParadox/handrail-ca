@@ -122,17 +122,43 @@ that cannot make a request of its own. You type the common name and the
 names, choose a kind of key (ECDSA P-256 or P-384, Ed25519, RSA 3072) and
 a validity, and handrail-ca makes the key pair and the request, has the CA
 sign it, and answers with one page that holds the private key, the
-certificate and its chain.
+certificate and its chain, each with a button that saves it as a file.
+
+How the key is handed over is chosen on the form:
+
+| Hand it over as | What you get | Password |
+|---|---|---|
+| PEM files | The key in PKCS #8 PEM, the certificate, its chain, and the key and chain in one file | Optional. With one, the key is encrypted with it (PBKDF2 with 600,000 rounds, AES-256). |
+| One PFX file, AES-256 | A `.pfx` (PKCS #12) file with the key, the certificate and its chain, which is what Windows and many appliances import | Required. Stretched 150,000 times. |
+| One PFX file for older devices | The same, protected with Triple DES and SHA-1 for devices that cannot open the AES-256 kind | Required. Stretched 2,048 times: weak. |
+
+The password is one you type twice, at least 12 characters, or one
+handrail-ca makes when you tick "Make a password for me": 20 random
+characters, shown once on the page that carries the key. handrail-ca
+keeps neither.
+
+A PFX file guards its password less well than the PEM key does, because
+the software that has to open it limits how much stretching a file may
+ask for: someone who gets the file can try guesses about four times as
+fast against the AES-256 kind, and far faster against the older kind. Use
+a made password for a PFX file, and delete the file once the device has
+imported it. The AES-256 kind opens in Windows 10 and Windows Server 2019
+or newer, OpenSSL 1.1.1 or newer and Java 12 or newer; its files have been
+read back here with OpenSSL only.
 
 - That page is the only place the key ever is. It is not written to
   handrail-ca's store or log, and it is not kept in memory after the page
   has been sent. Leave the page and the key is gone; reloading it does not
   bring it back, and does not make another.
-- The key is shown as unencrypted PKCS #8 PEM, over the connection to your
-  browser. Anyone who can read that connection, the browser's memory or
-  the screen has it. A request made on the machine that will use the
+- The key travels over the connection to your browser, and without a
+  password it is unencrypted PKCS #8 PEM: anyone who can read that
+  connection, the browser's memory or the screen has it. A password
+  protects the saved file, not that journey, and a made password is on the
+  same page as the key. A request made on the machine that will use the
   certificate does not have this problem, and is the better way wherever
   it is possible.
+- The files are inside the page itself, so saving one asks handrail-ca
+  for nothing: there is no address the key can be fetched from.
 - If the CA does not answer with a certificate, the key is discarded and
   the page says so. If a certificate for it turns up in the CA's database
   all the same, handrail-ca says that nobody has its key and offers to
