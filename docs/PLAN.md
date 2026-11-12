@@ -460,6 +460,16 @@ why.
   form from before a restart confirms nothing, and the request is shown
   again instead of being signed a second time unasked.
 
+  An attempt whose outcome was not learned is remembered too, for the
+  same ten minutes. The same form sent again does not go to the CA
+  until that attempt is accounted for: the database is read, and if it
+  holds the attempt's certificate, that is the answer and nothing is
+  sent. If it cannot be read, or the attempt is less than a minute and a
+  half old (the token it carried is good for a minute), the form is
+  refused, since sending it could give a second certificate. Only a
+  database that was read and shows nothing, after that time, lets the
+  request go out again.
+
   What a certificate's page says about the request that led to it
   ("issued", "differs from what was asked", "found after a lost answer")
   comes from that same memory of what handrail-ca saw happen, never from
