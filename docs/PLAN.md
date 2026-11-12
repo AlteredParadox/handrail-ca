@@ -489,9 +489,12 @@ why.
   holds the attempt's certificate, that is the answer and nothing is
   sent. If it cannot be read, or the attempt is less than a minute and a
   half old (the token it carried is good for a minute), the form is
-  refused, since sending it could give a second certificate. Only a
-  database that was read and shows nothing, after that time, lets the
-  request go out again.
+  refused, since sending it could give a second certificate. So it is
+  when the search itself was not complete: a new certificate could not
+  be read, or there were more new ones than are looked through. Finding
+  nothing then is not knowing. Only a database that was read, searched
+  to the end and shows nothing, after that time, lets the request go
+  out again.
 
   What a certificate's page says about the request that led to it
   ("issued", "differs from what was asked", "found after a lost answer")

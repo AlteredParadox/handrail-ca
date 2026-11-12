@@ -57,6 +57,9 @@ const (
 	// provisioner's own limits are applied.
 	maxCustomDays = 3660
 	day           = 24 * time.Hour
+	// arrived is what the address of a certificate's page carries when a
+	// request has just led there: it asks the page to say what happened.
+	arrived = "?issued=1"
 	// issueSettles is how long after a signing request went out the CA
 	// may still act on it: the token it carried is good for a minute.
 	// After that, a database that shows no certificate for it means none
@@ -136,6 +139,9 @@ type limitsView struct {
 // issueFailure describes a signing request that did not come back with a
 // certificate. The fields mean what revokeFailure's do.
 type issueFailure struct {
+	// Incomplete is set with Unknown when the CA's database was read but
+	// the certificates new to it could not all be looked at.
+	Incomplete          bool
 	NotSent, Unknown    bool
 	CA, Clock, Database string
 	// KeyDiscarded is set when handrail-ca had made the key: it is gone.
@@ -534,7 +540,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 			done = issuedAt{serial: serial, how: "found", at: now}
 			s.record(r, store.Event{Actor: currentUser(r).user.Username, Action: store.ActionIssue, Outcome: store.OutcomeOK, Serial: serial, Subject: req.CommonName,
 				Detail: "the earlier attempt, whose outcome was not known, was given this certificate: the CA's database holds it now. Not signed again"})
-			http.Redirect(w, r, s.certificateURL(serial)+"?issued=1", http.StatusSeeOther)
+			http.Redirect(w, r, s.certificateURL(serial)+arrived, http.StatusSeeOther)
 			return
 		case wait != "":
 			refuse(http.StatusConflict, "an earlier attempt to sign this request has an outcome that is not known yet, and "+wait+". It was not sent again: that could give a second certificate")
@@ -582,7 +588,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 			s.renderIssue(w, r, http.StatusOK, data)
 			return
 		}
-		http.Redirect(w, r, s.certificateURL(serial)+"?issued=1", http.StatusSeeOther)
+		http.Redirect(w, r, s.certificateURL(serial)+arrived, http.StatusSeeOther)
 		return
 	}
 
@@ -591,7 +597,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 	s.record(r, event)
 	if outcome.serial != "" {
 		done.serial, done.how = outcome.serial, "found"
-		http.Redirect(w, r, s.certificateURL(outcome.serial)+"?issued=1", http.StatusSeeOther)
+		http.Redirect(w, r, s.certificateURL(outcome.serial)+arrived, http.StatusSeeOther)
 		return
 	}
 	if outcome.outcome == store.OutcomeUnknown {
@@ -607,16 +613,23 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 // whose outcome was not learned, before the request is sent again. The
 // CA's database is read now. If it holds the certificate that attempt was
 // given, its serial is returned and nothing more is sent. If it cannot be
-// read, or the attempt is too recent to have finished for certain, wait
-// says why the request is not sent again yet. With neither, the earlier
+// read, or not all of it that matters could be, or the attempt is too
+// recent to have finished for certain, wait says why the request is not
+// sent again yet. With neither, the earlier
 // attempt issued nothing, as far as can be known, and the request may go
 // out again.
 func (s *server) settleEarlier(ctx context.Context, req *ca.Request, earlier issuedAt) (serial, wait string) {
 	if err := s.opts.Inventory.Refresh(ctx); err != nil {
 		return "", "the CA's database cannot be read to find out: " + err.Error()
 	}
-	if serial := s.issuedFor(ctx, earlier.before, s.opts.Inventory.Snapshot(), req, earlier.sentAt); serial != "" {
+	serial, complete := s.issuedFor(ctx, earlier.before, s.opts.Inventory.Snapshot(), req, earlier.sentAt)
+	if serial != "" {
 		return serial, ""
+	}
+	if !complete {
+		// Nothing found is not nothing there: not all of what might be
+		// that attempt's certificate could be looked at.
+		return "", "the certificates that have appeared in the CA's database since could not all be read to look for it"
 	}
 	if s.opts.Now().Sub(earlier.sentAt) < issueSettles {
 		return "", "it was made less than a minute ago and the CA may still be at it. Try again in a minute"
@@ -795,11 +808,17 @@ func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, befor
 		return signed{outcome: store.OutcomeUnknown, failure: failure,
 			detail: "not confirmed: " + sendErr.Error() + "; the CA's database could not be read to check: " + readErr.Error()}
 	}
-	if serial := s.issuedFor(ctx, before, after, req, sentAt); serial != "" {
+	serial, complete := s.issuedFor(ctx, before, after, req, sentAt)
+	if serial != "" {
 		return signed{outcome: store.OutcomeOK, serial: serial,
 			detail: "the CA's answer was not a certificate (" + sendErr.Error() + "), but its database holds one for the request's key and names, issued since"}
 	}
 	failure.Unknown = true
+	if !complete {
+		failure.Incomplete = true
+		return signed{outcome: store.OutcomeUnknown, failure: failure,
+			detail: "not confirmed: " + sendErr.Error() + "; the certificates new to the CA's database could not all be read to look for it"}
+	}
 	return signed{outcome: store.OutcomeUnknown, failure: failure,
 		detail: "not confirmed: " + sendErr.Error() + "; the CA's database held no new certificate for the request's key when read just afterwards, which does not settle it"}
 }
@@ -810,10 +829,15 @@ func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, befor
 // that were issued long ago, and a key may have been used before. So the
 // certificate must carry the request's key, start within issuedWithin of
 // the moment the request was sent, and carry the names that were asked
-// for. Anything less is not taken for this request's, and the outcome
-// stays unknown.
-func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapshot, req *ca.Request, sentAt time.Time) string {
+// for. Anything less is not taken for this request's.
+//
+// complete says whether every candidate was looked at. It is false when
+// one could not be read, or there were more than are searched: finding
+// nothing then does not mean there is nothing, and the caller must not
+// take it to.
+func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapshot, req *ca.Request, sentAt time.Time) (serial string, complete bool) {
 	looked := 0
+	complete = true
 	for _, c := range after.Certificates {
 		if c.Problem != "" || before.Certificate(c.Serial) != nil {
 			continue
@@ -822,19 +846,24 @@ func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapsho
 			continue
 		}
 		if looked++; looked > maxNewToSearch {
-			break
+			return "", false
 		}
 		der, err := s.opts.Inventory.DER(ctx, c.Serial)
 		if err != nil {
+			complete = false
 			continue
 		}
 		cert, err := x509.ParseCertificate(der)
-		if err != nil || !bytes.Equal(cert.RawSubjectPublicKeyInfo, req.CSR.RawSubjectPublicKeyInfo) {
+		if err != nil {
+			complete = false
+			continue
+		}
+		if !bytes.Equal(cert.RawSubjectPublicKeyInfo, req.CSR.RawSubjectPublicKeyInfo) {
 			continue
 		}
 		if len(nameDifferences(req, cert)) == 0 {
-			return c.Serial
+			return c.Serial, true
 		}
 	}
-	return ""
+	return "", complete
 }

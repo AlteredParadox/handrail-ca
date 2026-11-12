@@ -561,6 +561,21 @@ func TestIssueOutcomes(t *testing.T) {
 			detail:  "not confirmed: " + lost.Error() + "; the CA's database held no new certificate for the request's key when read just afterwards, which does not settle it",
 		},
 		{
+			// The certificate is there, and cannot be read to be recognised:
+			// unknown, and recorded as a search that was not complete.
+			name: "the answer was lost, and the new certificate cannot be read",
+			ca: func(s *site, r *ca.Request) (*ca.Issued, error) {
+				s.caStores(s.caSigns(r, 0).Certificate)
+				s.server.opts.Inventory = &unreadable{Inventory: s.inv, serial: "5001"}
+				return nil, lost
+			},
+			status:  http.StatusBadGateway,
+			page:    []string{"It is not known yet whether a certificate was issued", "could not all be read to look for one with this request's key. So one may be there."},
+			absent:  []string{"No certificate was issued", "held no new certificate"},
+			outcome: store.OutcomeUnknown,
+			detail:  "not confirmed: " + lost.Error() + "; the certificates new to the CA's database could not all be read to look for it",
+		},
+		{
 			// Nor is a new certificate for the same key with other names.
 			name: "the answer was lost, and a new certificate for the same key has other names",
 			ca: func(s *site, r *ca.Request) (*ca.Issued, error) {
@@ -639,6 +654,20 @@ func TestIssueOutcomes(t *testing.T) {
 			}
 		})
 	}
+}
+
+// unreadable is an inventory whose picture is whole but one of whose
+// certificates cannot be read from the database when asked for.
+type unreadable struct {
+	Inventory
+	serial string
+}
+
+func (u *unreadable) DER(ctx context.Context, serial string) ([]byte, error) {
+	if serial == u.serial {
+		return nil, errors.New("connection reset by peer")
+	}
+	return u.Inventory.DER(ctx, serial)
 }
 
 func mustReadCSR(t *testing.T, text string) *ca.Request {
@@ -941,6 +970,44 @@ func TestIssueAgainAfterAnUnknownOutcome(t *testing.T) {
 		}
 		// Still remembered: asking twice does not wear it down.
 		wantStatus(t, b.do(http.MethodPost, "/issue", form), http.StatusConflict)
+	})
+
+	// The database is read, but the one certificate that could be the
+	// earlier attempt's cannot be: finding nothing is then not knowing.
+	t.Run("the search could not be completed", func(t *testing.T) {
+		s, b, form, pending := start(t)
+		s.caStores((*pending).Certificate)
+		s.clock.advance(5 * time.Minute)
+		s.server.opts.Inventory = &unreadable{Inventory: s.inv, serial: "5001"}
+		rec := b.do(http.MethodPost, "/issue", form)
+		wantStatus(t, rec, http.StatusConflict)
+		wantBody(t, rec, "could not all be read to look for it", "It was not sent again")
+		if n := len(s.ca.signings()); n != 1 {
+			t.Fatalf("the CA was asked to sign %d times, although its first certificate is in the database", n)
+		}
+		// Readable again, the first certificate is found and nothing is sent.
+		s.server.opts.Inventory = s.inv
+		wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
+		if n := len(s.ca.signings()); n != 1 {
+			t.Errorf("the CA was asked to sign %d times", n)
+		}
+	})
+
+	// More new certificates than are searched: the same.
+	t.Run("more new certificates than are looked through", func(t *testing.T) {
+		s, b, form, _ := start(t)
+		s.rows.mu.Lock()
+		for i := 0; i <= maxNewToSearch; i++ {
+			s.rows.certs = append(s.rows.certs, leafRow(t, int64(9000+i), "other.internal.example", s.clock.Now().Add(-time.Minute), s.clock.Now().Add(time.Hour)))
+		}
+		s.rows.mu.Unlock()
+		s.clock.advance(3 * time.Minute)
+		rec := b.do(http.MethodPost, "/issue", form)
+		wantStatus(t, rec, http.StatusConflict)
+		wantBody(t, rec, "could not all be read to look for it")
+		if n := len(s.ca.signings()); n != 1 {
+			t.Errorf("the CA was asked to sign %d times", n)
+		}
 	})
 
 	t.Run("nothing was issued, as far as can be known", func(t *testing.T) {
