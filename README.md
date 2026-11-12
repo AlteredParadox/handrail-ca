@@ -223,13 +223,28 @@ the user name. Sessions end after an hour unused or twelve hours in all.
 Each user name, and each visitor's address where it is known, gets five
 sign-in attempts in five minutes; a successful sign-in does not count.
 
-**A user name can be locked out by someone else.** The limit per name
-counts attempts on that name from anywhere. After five wrong passwords for
-`alice`, every sign-in as `alice` is refused, the right password included,
-until five minutes after the first of them; someone who knows the name and
-can reach the sign-in page can repeat that for as long as they like. This
-is what stops password guessing, and its cost. Sessions already open are
-not affected. Plan for it:
+**A user name can be locked out by someone else, but not for a browser
+its owner has used.** The limit per name counts attempts on that name from
+strangers anywhere. After five wrong passwords for `alice`, every sign-in
+as `alice` from a browser handrail-ca does not know is refused, the right
+password included, until five minutes after the first of them; someone who
+knows the name and can reach the sign-in page can repeat that for as long
+as they like. This is what stops password guessing, and its cost.
+
+A browser that has signed in as `alice` before is not caught by it. A
+successful sign-in leaves a cookie (`handrail_device`, kept for ninety
+days from the last sign-in) that marks the browser as one of that
+account's, and attempts from it are counted against that browser alone:
+five in five minutes of its own, whatever strangers are doing to the name.
+The cookie is not a credential, and the password is still what signs in.
+What it costs: whoever steals that cookie gets five guesses every five
+minutes for that one account on top of a stranger's five. An account keeps
+its ten most recently used browsers, and changing or resetting its
+password forgets all of them but the browser the change was made from.
+
+So the lockout still bites in two cases: a browser you have never signed
+in from (a new machine, a private window, cleared cookies), and a first
+sign-in. Sessions already open are never affected. Plan for those:
 
 - Limit who can reach the sign-in page: a VPN, or an address allow-list on
   the reverse proxy. For a tool beside a CA this is worth doing anyway.
@@ -237,7 +252,8 @@ not affected. Plan for it:
   sign-in page answers the same for a name that exists and one that does
   not, so a name is only known to those you tell.
 - The counts are in the running server's memory. Restarting handrail-ca
-  clears them; `user passwd` does not.
+  clears them; `user passwd` does not, and it also forgets the account's
+  known browsers.
 - Nothing about the CA depends on handrail-ca. If you are locked out when
   it matters, `step ca revoke` on the CA still works.
 

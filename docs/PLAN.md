@@ -433,14 +433,33 @@ As built in milestone 1:
   restart clears the counts, `step ca revoke` works regardless). The
   mitigation in the code is a device cookie: a browser that has signed in
   as a user before gets its own allowance for that name, apart from the
-  one strangers can use up. It is to be built alongside M3, before
-  revoking through the UI ships (owner's decision, 2026-11-11). Names and
+  one strangers can use up (owner's decision, 2026-11-11; built with M3,
+  described below). Names and
   addresses are counted in two
   bounded tables, and a full table never drops a count that is still
   running. With the table of names full, a name not yet in it is refused:
   that limit is the one that bounds guessing at an account. With the table
   of addresses full, a new address goes uncounted: addresses are cheap to
   produce, and refusing new ones would lock every other visitor out.
+- The device cookie, as built. A successful sign-in sets a second cookie,
+  `handrail_device`: a random token, with the same attributes as the
+  session cookie, kept for ninety days from the last sign-in. The store
+  holds its SHA-256 beside the account (the third schema step). At
+  sign-in, a browser whose cookie the store knows for the account being
+  signed in to is counted against that device alone, five attempts in
+  five minutes, and not against the name or the address; any other
+  browser is counted as before. So strangers who use up a name's
+  allowance do not use up the allowance of the account's own browsers,
+  and the owner signing in from one gives the strangers nothing back. The
+  cookie proves nothing and opens nothing: it only chooses the allowance.
+  A cookie for another account, a made-up one, one unused for ninety
+  days, and any cookie while the store cannot be read all count for
+  nothing. Its cost is that a stolen device cookie adds five guesses per
+  window for that account; an account keeps at most ten devices, and a
+  password change or reset forgets them all (the browser a change was made
+  from is remembered again under a new token). The change-password form
+  draws on the same allowance as that browser's sign-ins. What it does not
+  help: a first sign-in, and a browser that has lost its cookies.
 - Behind a reverse proxy every visitor arrives from the proxy's address.
   `-trusted-proxy` lists the proxies; on a connection from one of them the
   visitor is the rightmost address in `X-Forwarded-For` that is not itself
@@ -473,7 +492,10 @@ As built in milestone 1:
   user)", never with what was typed: people type passwords into that field.
 - History rows are never deleted, so what someone who is not signed in can
   add to them is bounded. Failed sign-ins on a real account are always
-  rows, and the throttle caps them at five per account per five minutes.
+  rows, and the throttle caps them at five per account per five minutes
+  from strangers, and five more for each of the account's known devices
+  (at most ten), which only someone holding such a device's cookie can
+  produce.
   Failed sign-ins for names that are not accounts become rows at most
   twelve times an hour; the rest are counted, written to the log like every
   other, and the next row says how many were passed over. Without this,
@@ -703,10 +725,14 @@ server that answers `/healthz`.
   is escaped like any other. If the store cannot be read the page says
   that, not that nothing was recorded. It shows only what went through
   handrail-ca: what the CA did for anyone else is in the certificate list.
-- A device cookie, as its own change: a browser that has signed in as a
-  user before keeps a sign-in allowance of its own for that name, so that
-  someone hammering a known user name cannot keep its owner out of the UI
-  at the moment a certificate has to be revoked (section 4, access).
+- Done: a device cookie. A browser that has signed in as a user before
+  keeps a sign-in allowance of its own for that name, so that someone
+  hammering a known user name cannot keep its owner out of the UI at the
+  moment a certificate has to be revoked (section 4, access).
+
+Milestone 3 is complete with this. Not built in it: reading the
+provisioner's key from a local file, for a CA that does not hold the
+encrypted key; and handrail-ca serving TLS itself.
 
 **M4. Issue.**
 - CSR path: parse, confirm, sign, download certificate and chain. The

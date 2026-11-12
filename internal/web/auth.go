@@ -65,6 +65,9 @@ const SessionIdle = time.Hour
 const (
 	sessionCookie = "handrail_session"
 	formCookie    = "handrail_form"
+	// deviceCookie marks a browser that has signed in to an account
+	// before (see knownDevice). It outlives the session and signing out.
+	deviceCookie = "handrail_device"
 )
 
 func (s *server) cookieName(name string) string {
@@ -263,14 +266,18 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 		s.renderSignIn(w, r, http.StatusUnauthorized, "", wrongCredentials)
 		return
 	}
+	// A browser that has signed in to this account before is counted by
+	// itself, apart from what strangers do to the name.
+	device := s.knownDevice(r, username)
+	who := attempt{name: username, addr: addr, device: device.key()}
 	// Refused here without waiting for a hashing slot; checkPassword asks
 	// again, and counts, once it has one.
-	if wait := s.limiter.blocked(s.opts.Now(), username, addr); wait > 0 {
+	if wait := s.limiter.blockedFor(s.opts.Now(), who); wait > 0 {
 		s.tooManySignIns(w, r, wait)
 		return
 	}
 
-	checked, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"), addr)
+	checked, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"), who)
 	if err != nil {
 		s.log.Error("checking a password", "err", err)
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not check the password. The log has the details.")
@@ -308,9 +315,10 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not open a session. The log has the details.")
 		return
 	}
-	s.limiter.succeed(username, addr)
+	s.limiter.succeedFor(checked.counted)
 	s.setCookie(w, sessionCookie, encoded, sessionLifetime)
 	s.setCookie(w, formCookie, "", 0)
+	s.rememberDevice(w, r, device, checked)
 	s.recordSignIn(r, checked.user.Username, true, "")
 	http.Redirect(w, r, s.base+"/", http.StatusSeeOther)
 }
@@ -329,34 +337,106 @@ type passwordCheck struct {
 	// against; zero unless the account exists.
 	user store.User
 	hash string
+	// counted is the attempt as the throttle counted it, for giving it
+	// back after a success.
+	counted attempt
 }
 
 // checkPassword reports whether pw opens the account. It takes about as
 // long whether or not the account exists, and at most maxConcurrentHashes
-// run at once. The attempt is counted by the throttle, for the name and
-// for addr (the client's address, empty if not known), after a slot is
-// held and before the password is looked at, so requests that queued for a
-// slot cannot outnumber the attempts the throttle allows.
-func (s *server) checkPassword(ctx context.Context, username, pw, addr string) (passwordCheck, error) {
+// run at once. The attempt is counted by the throttle (see attempt) after a
+// slot is held and before the password is looked at, so requests that
+// queued for a slot cannot outnumber the attempts the throttle allows.
+func (s *server) checkPassword(ctx context.Context, username, pw string, who attempt) (passwordCheck, error) {
 	select {
 	case s.hashSlots <- struct{}{}:
 		defer func() { <-s.hashSlots }()
 	case <-ctx.Done():
 		return passwordCheck{}, ctx.Err()
 	}
-	if wait := s.limiter.begin(s.opts.Now(), username, addr); wait > 0 {
+	counted, wait := s.limiter.beginFor(s.opts.Now(), who)
+	if wait > 0 {
 		return passwordCheck{wait: wait}, nil
 	}
 	user, hash, err := s.opts.Store.Credentials(ctx, username)
 	if errors.Is(err, store.ErrNotFound) {
 		_, _ = password.Verify(s.dummyHash, pw)
-		return passwordCheck{}, nil
+		return passwordCheck{counted: counted}, nil
 	}
 	if err != nil {
 		return passwordCheck{}, err
 	}
 	ok, err := password.Verify(hash, pw)
-	return passwordCheck{ok: ok, user: user, hash: hash}, err
+	return passwordCheck{ok: ok, user: user, hash: hash, counted: counted}, err
+}
+
+// device is a browser's device cookie that the store knows for the
+// account being signed in to. The zero value is a browser that is not
+// known for it.
+type device struct {
+	token []byte
+	hash  store.TokenHash
+}
+
+func (d device) known() bool { return d.token != nil }
+
+// key is what the throttle counts a known device under.
+func (d device) key() string {
+	if !d.known() {
+		return ""
+	}
+	return hex.EncodeToString(d.hash[:])
+}
+
+// knownDevice says whether the request comes from a browser that has
+// signed in to this account before: it carries a device cookie whose token
+// the store has recorded for the account. A cookie for another account, a
+// made-up one, or one the store has forgotten counts for nothing, and so
+// does a store that cannot be asked: the browser is then treated as any
+// stranger is. Being a known device opens nothing; it only decides which
+// allowance of attempts this one is counted against.
+func (s *server) knownDevice(r *http.Request, username string) device {
+	token := s.cookieToken(r, deviceCookie)
+	if token == nil {
+		return device{}
+	}
+	hash := store.HashToken(token)
+	owner, err := s.opts.Store.DeviceUser(r.Context(), hash, s.opts.Now())
+	if errors.Is(err, store.ErrNotFound) {
+		return device{}
+	}
+	if err != nil {
+		s.log.Warn("could not look a device up; this sign-in is counted as a stranger's", "err", err)
+		return device{}
+	}
+	if owner != username {
+		return device{}
+	}
+	return device{token: token, hash: hash}
+}
+
+// rememberDevice is called after a successful sign-in. A browser already
+// known for the account keeps its cookie, renewed; any other gets a new
+// one, recorded for the account. A failure here costs the browser its own
+// allowance next time and nothing else, so it is logged and not shown.
+func (s *server) rememberDevice(w http.ResponseWriter, r *http.Request, d device, checked passwordCheck) {
+	now := s.opts.Now()
+	if d.known() {
+		if err := s.opts.Store.TouchDevice(r.Context(), d.hash, now); err != nil {
+			s.log.Warn("could not record a device's use", "err", err)
+		}
+		s.setCookie(w, deviceCookie, base64.RawURLEncoding.EncodeToString(d.token), store.DeviceLifetime)
+		return
+	}
+	raw, encoded, err := newToken()
+	if err == nil {
+		err = s.opts.Store.RememberDevice(r.Context(), checked.user.ID, checked.hash, store.HashToken(raw), now)
+	}
+	if err != nil {
+		s.log.Warn("could not remember this browser as one of the account's", "err", err)
+		return
+	}
+	s.setCookie(w, deviceCookie, encoded, store.DeviceLifetime)
 }
 
 // dummyPasswordHash is a hash of a password nobody has, with the current
@@ -489,11 +569,74 @@ func (s *server) record(r *http.Request, e store.Event) {
 //   - A new address goes uncounted. Addresses are cheap for an attacker to
 //     produce, so refusing new ones would let them lock every other
 //     visitor out; the limit per name still applies to whatever they try.
+//
+// A third table counts known devices: browsers that have signed in to the
+// account before (see knownDevice). An attempt from one is counted against
+// that device alone, not against the name or the address, so that someone
+// who keeps failing on a known user name uses up the allowance strangers
+// share and not the one the account's own browsers have. A stolen device
+// cookie buys its thief limiterAttempts guesses per window and no more.
+// Entries here exist only for devices the store knows, of which an account
+// keeps a bounded number; if the table is full all the same, a device is
+// counted as a stranger.
 type limiter struct {
-	mu     sync.Mutex
-	names  map[string]*limiterEntry
-	addrs  map[string]*limiterEntry
-	maxLen int
+	mu      sync.Mutex
+	names   map[string]*limiterEntry
+	addrs   map[string]*limiterEntry
+	devices map[string]*limiterEntry
+	maxLen  int
+}
+
+// attempt is who a sign-in attempt is counted against: a known device, if
+// device is set, and otherwise the user name and the client's address
+// (either of which may be empty and is then not counted).
+type attempt struct {
+	name, addr, device string
+}
+
+// blockedFor is blocked for an attempt.
+func (l *limiter) blockedFor(now time.Time, a attempt) time.Duration {
+	if a.device == "" {
+		return l.blocked(now, a.name, a.addr)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return left(l.devices[a.device], now)
+}
+
+// beginFor counts an attempt, as begin does, and returns it as it was
+// counted: a known device whose table had no room is counted, and
+// returned, as a stranger.
+func (l *limiter) beginFor(now time.Time, a attempt) (attempt, time.Duration) {
+	if a.device != "" {
+		l.mu.Lock()
+		if wait := left(l.devices[a.device], now); wait > 0 {
+			l.mu.Unlock()
+			return a, wait
+		}
+		if e := l.live(l.devices, a.device, now); e != nil {
+			e.attempts++
+			l.mu.Unlock()
+			return a, 0
+		}
+		l.mu.Unlock()
+		a.device = ""
+	}
+	return a, l.begin(now, a.name, a.addr)
+}
+
+// succeedFor records a successful sign-in for an attempt as it was
+// counted. A device's count is cleared. The name's is left alone then:
+// the account's owner signing in from a known browser says nothing about
+// whoever is guessing at the name from elsewhere.
+func (l *limiter) succeedFor(a attempt) {
+	if a.device == "" {
+		l.succeed(a.name, a.addr)
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.devices, a.device)
 }
 
 type limiterEntry struct {
@@ -509,7 +652,7 @@ const (
 )
 
 func newLimiter() *limiter {
-	return &limiter{names: map[string]*limiterEntry{}, addrs: map[string]*limiterEntry{}, maxLen: limiterEntries}
+	return &limiter{names: map[string]*limiterEntry{}, addrs: map[string]*limiterEntry{}, devices: map[string]*limiterEntry{}, maxLen: limiterEntries}
 }
 
 // blocked returns how long an attempt for this name from this address must

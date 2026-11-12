@@ -285,6 +285,8 @@ type brokenStore struct {
 	// readHistoryErr fails the reading of the history; historyErr, above,
 	// the writing of it.
 	readHistoryErr atomic.Pointer[error]
+	// deviceErr fails looking a device up, rememberErr recording one.
+	deviceErr, rememberErr atomic.Pointer[error]
 	// beforeCreate runs between the password check and the session being
 	// created, where a concurrent `user passwd` could land. beforeChange
 	// runs at the same point of a change of password.
@@ -310,6 +312,20 @@ func (b *brokenStore) SetNote(ctx context.Context, n store.Note) error {
 		return *err
 	}
 	return b.Store.SetNote(ctx, n)
+}
+
+func (b *brokenStore) DeviceUser(ctx context.Context, h store.TokenHash, now time.Time) (string, error) {
+	if err := b.deviceErr.Load(); err != nil {
+		return "", *err
+	}
+	return b.Store.DeviceUser(ctx, h, now)
+}
+
+func (b *brokenStore) RememberDevice(ctx context.Context, id int64, hash string, h store.TokenHash, now time.Time) error {
+	if err := b.rememberErr.Load(); err != nil {
+		return *err
+	}
+	return b.Store.RememberDevice(ctx, id, hash, h, now)
 }
 
 func (b *brokenStore) History(ctx context.Context, q store.HistoryQuery) ([]store.Event, error) {
@@ -442,6 +458,18 @@ func (s *site) caRecords(r ca.Revocation) {
 	s.rows.mu.Lock()
 	defer s.rows.mu.Unlock()
 	s.rows.revocations = append(s.rows.revocations, inventory.RawRevocation{Serial: r.Serial, JSON: record})
+}
+
+// attemptsOfDevices is how many sign-in attempts are counted against
+// known devices, all together.
+func (l *limiter) attemptsOfDevices() int {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	n := 0
+	for _, e := range l.devices {
+		n += e.attempts
+	}
+	return n
 }
 
 type syncWriter struct {
@@ -1882,9 +1910,14 @@ func TestChangeOwnPasswordRefusals(t *testing.T) {
 			wantStatus(t, b.get("/account"), http.StatusOK)
 		})
 	}
-	// Only the wrong current password was an attempt at anything.
-	if e := s.server.limiter.names["alice"]; e == nil || e.attempts != 1 {
-		t.Errorf("attempts counted for alice: %+v, want 1", e)
+	// Only the wrong current password was an attempt at anything. It was
+	// made from a browser that has signed in as alice, so it is counted
+	// against that browser and not against her name.
+	if n := s.server.limiter.attemptsOfDevices(); n != 1 {
+		t.Errorf("attempts counted for alice's browser: %d, want 1", n)
+	}
+	if e := s.server.limiter.names["alice"]; e != nil {
+		t.Errorf("attempts counted against the name: %+v, want none", e)
 	}
 	if last := s.history()[0]; last.Action != store.ActionUserPasswd || last.Outcome != store.OutcomeFailed || last.Detail != "wrong current password" {
 		t.Errorf("history = %+v", last)
@@ -1903,7 +1936,7 @@ func TestChangeOwnPasswordRefusals(t *testing.T) {
 
 // The form must not be a second, unthrottled place to guess a password:
 // someone at a stolen session gets the same five tries as at the sign-in
-// page, out of the same allowance.
+// page, out of the allowance that browser's sign-ins come from.
 func TestChangePasswordIsThrottledLikeSignIn(t *testing.T) {
 	s := newSite(t, "http://127.0.0.1:8080")
 	b := s.browser()
@@ -1916,16 +1949,42 @@ func TestChangePasswordIsThrottledLikeSignIn(t *testing.T) {
 	rec := b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword))
 	wantStatus(t, rec, http.StatusTooManyRequests)
 	wantBody(t, rec, "Too many wrong passwords")
-	if ok := s.browser().signIn("alice", alicePassword); ok.Code != http.StatusTooManyRequests {
-		t.Errorf("sign-in after five wrong guesses in the form: %d, want 429", ok.Code)
+	// The same browser at the sign-in page has no tries left either: the
+	// form and the page draw on one allowance.
+	same := s.browser()
+	same.cookies[deviceCookie] = b.cookies[deviceCookie]
+	if again := same.signIn("alice", alicePassword); again.Code != http.StatusTooManyRequests {
+		t.Errorf("sign-in from that browser after five wrong guesses in the form: %d, want 429", again.Code)
 	}
 	// The session itself carries on, and after the window the change works.
 	wantStatus(t, b.get("/status"), http.StatusOK)
 	s.clock.advance(limiterWindow)
 	wantRedirect(t, b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword)), "/account?changed=1")
-	if e := s.server.limiter.names["alice"]; e != nil {
-		t.Errorf("the count was kept after a successful change: %+v", e)
+	if n := s.server.limiter.attemptsOfDevices(); n != 0 {
+		t.Errorf("%d attempts are still counted after a successful change", n)
 	}
+}
+
+// Without the account's device cookie, the form's guesses come out of the
+// name's allowance, the one the sign-in page gives a stranger.
+func TestChangePasswordFromAnUnknownBrowserCountsAgainstTheName(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	token := tokenIn(t, b.get("/account"))
+	// The session cookie alone, as if it had been taken from the browser.
+	thief := s.browser()
+	thief.cookies[sessionCookie] = b.cookies[sessionCookie]
+	for i := range limiterAttempts {
+		rec := thief.do(http.MethodPost, "/account/password", passwordForm(token, fmt.Sprintf("guess number %d", i), newPassword, newPassword))
+		wantStatus(t, rec, http.StatusForbidden)
+	}
+	wantStatus(t, thief.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword)), http.StatusTooManyRequests)
+	if ok := s.browser().signIn("alice", alicePassword); ok.Code != http.StatusTooManyRequests {
+		t.Errorf("a stranger's sign-in after five wrong guesses in the form: %d, want 429", ok.Code)
+	}
+	// Alice, at her own browser, is not held up by any of it.
+	wantRedirect(t, b.do(http.MethodPost, "/account/password", passwordForm(token, alicePassword, newPassword, newPassword)), "/account?changed=1")
 }
 
 func TestChangePasswordWhenTheAccountChangesMeanwhile(t *testing.T) {

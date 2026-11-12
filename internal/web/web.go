@@ -82,6 +82,9 @@ type Store interface {
 	Session(ctx context.Context, token store.TokenHash, now time.Time) (store.Session, error)
 	TouchSession(ctx context.Context, token store.TokenHash, now time.Time) error
 	DeleteSession(ctx context.Context, token store.TokenHash) error
+	DeviceUser(ctx context.Context, token store.TokenHash, now time.Time) (string, error)
+	RememberDevice(ctx context.Context, userID int64, passwordHash string, token store.TokenHash, now time.Time) error
+	TouchDevice(ctx context.Context, token store.TokenHash, now time.Time) error
 	AppendHistory(ctx context.Context, e store.Event) error
 	History(ctx context.Context, q store.HistoryQuery) ([]store.Event, error)
 	Note(ctx context.Context, serial string) (store.Note, error)

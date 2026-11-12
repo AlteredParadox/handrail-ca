@@ -131,6 +131,11 @@ func (s *Store) SetPassword(ctx context.Context, username, passwordHash string, 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
 		return err
 	}
+	// And its known devices: whoever had the old password does not keep
+	// a sign-in allowance of their own.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE user_id = ?`, id); err != nil {
+		return err
+	}
 	return tx.Commit()
 }
 
@@ -160,6 +165,9 @@ func (s *Store) ChangePassword(ctx context.Context, userID int64, oldHash, newHa
 		return ErrNotFound
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE user_id = ?`, userID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
 	return tx.Commit()
