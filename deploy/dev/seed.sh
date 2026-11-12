@@ -50,6 +50,14 @@ quiet step ca provisioner add handrail --type JWK --create \
 # added the same way.
 quiet step ca provisioner add acme --type ACME "${ADMIN[@]}"
 
+echo "seed: a provisioner with a certificate template (docs/ca-setup.md, section 6)"
+# The same key password as handrail's, so that handrail-ca's tests can act
+# through either. The template copies the request's whole subject.
+quiet step ca provisioner add handrail-template --type JWK --create \
+	--password-file /run/secrets/handrail_provisioner_password \
+	--x509-max-dur 2160h --ssh=false \
+	--x509-template /dev-leaf-subject.tpl "${ADMIN[@]}"
+
 echo "seed: name policy (docs/ca-setup.md, section 2)"
 # The admin's own subject first: step-ca refuses a policy that would lock
 # its admins out.

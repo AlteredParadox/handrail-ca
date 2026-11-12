@@ -30,6 +30,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -92,6 +93,35 @@ type fakeCA struct {
 	revoke func(ctx context.Context, r ca.Revocation) error
 	mu     sync.Mutex
 	asked  []ca.Revocation
+
+	// sign is what the CA does when asked to sign; newSite sets it to
+	// issue a certificate and store it in the site's database. signed is
+	// every signing it was asked for.
+	sign   func(ctx context.Context, r *ca.Request, validity time.Duration) (*ca.Issued, error)
+	signed []signing
+}
+
+// signing is one signing request the fake CA received.
+type signing struct {
+	request  *ca.Request
+	validity time.Duration
+}
+
+func (f *fakeCA) Sign(ctx context.Context, r *ca.Request, validity time.Duration) (*ca.Issued, error) {
+	if f.readOnly {
+		return nil, &ca.NotSentError{Err: ca.ErrNoProvisioner}
+	}
+	f.mu.Lock()
+	f.signed = append(f.signed, signing{r, validity})
+	f.mu.Unlock()
+	return f.sign(ctx, r, validity)
+}
+
+// signings is every signing the CA was asked for.
+func (f *fakeCA) signings() []signing {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]signing{}, f.signed...)
 }
 
 func (f *fakeCA) Revoke(ctx context.Context, r ca.Revocation) error {
@@ -393,6 +423,10 @@ type site struct {
 	clock   *clock
 	log     *bytes.Buffer
 	public  *url.URL
+	// signer is what the fake CA signs certificates with, and nextSerial
+	// the serial number of the next one.
+	signer     issuer
+	nextSerial int64
 }
 
 // newSite builds a site at publicURL, with the given addresses or ranges
@@ -424,6 +458,12 @@ func newSite(t *testing.T, publicURL string, trustedProxies ...string) *site {
 		s.caRecords(r)
 		return nil
 	}
+	s.signer = newIssuer(t, "Example Issuing CA")
+	s.ca.sign = func(_ context.Context, r *ca.Request, validity time.Duration) (*ca.Issued, error) {
+		issued := s.caSigns(r, validity)
+		s.caStores(issued.Certificate)
+		return issued, nil
+	}
 	// The inventory as it is after its first read, on the site's clock.
 	s.inv = inventory.New(s.rows)
 	s.inv.SetClock(s.clock.Now)
@@ -443,6 +483,54 @@ func newSite(t *testing.T, publicURL string, trustedProxies ...string) *site {
 	s.server.dummyHash = cheapHash("nobody has this password")
 	s.server.hash = func(pw string) (string, error) { return cheapHash(pw), nil }
 	return s
+}
+
+// caSigns makes the certificate step-ca would for a request: the common
+// name and names the request was read as, valid for the length asked (a
+// day if none) and dated a minute back.
+func (s *site) caSigns(r *ca.Request, validity time.Duration) *ca.Issued {
+	s.t.Helper()
+	if validity == 0 {
+		validity = 24 * time.Hour
+	}
+	s.rows.mu.Lock()
+	s.nextSerial++
+	serial := 5000 + s.nextSerial
+	s.rows.mu.Unlock()
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: r.CommonName},
+		DNSNames: r.DNSNames, EmailAddresses: r.EmailAddresses,
+		NotBefore: s.clock.Now().Add(-time.Minute), NotAfter: s.clock.Now().Add(validity),
+		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
+	}
+	for _, ip := range r.IPAddresses {
+		tmpl.IPAddresses = append(tmpl.IPAddresses, net.ParseIP(ip))
+	}
+	for _, u := range r.URIs {
+		parsed, err := url.Parse(u)
+		if err != nil {
+			s.t.Fatal(err)
+		}
+		tmpl.URIs = append(tmpl.URIs, parsed)
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, s.signer.cert, r.CSR.PublicKey, s.signer.key)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		s.t.Fatal(err)
+	}
+	return &ca.Issued{Certificate: cert, Intermediates: []*x509.Certificate{s.signer.cert}}
+}
+
+// caStores puts a certificate into the site's database as step-ca would.
+func (s *site) caStores(cert *x509.Certificate) {
+	s.rows.mu.Lock()
+	defer s.rows.mu.Unlock()
+	s.rows.certs = append(s.rows.certs, inventory.RawCertificate{
+		Serial: cert.SerialNumber.String(), DER: cert.Raw, Data: []byte(`{"provisioner":{"id":"p1","name":"handrail","type":"JWK"}}`),
+	})
 }
 
 // caRecords writes a revocation into the site's database as step-ca
@@ -883,7 +971,11 @@ func TestOversizedFormIsRefused(t *testing.T) {
 	wantRedirect(t, b.signIn("alice", alicePassword), "/")
 	page := b.get("/status")
 	big = url.Values{"form_token": {tokenIn(t, page)}, "padding": {strings.Repeat("x", maxForm)}}
-	wantStatus(t, b.do(http.MethodPost, "/sign-out", big), http.StatusForbidden)
+	rec := b.do(http.MethodPost, "/sign-out", big)
+	wantStatus(t, rec, http.StatusRequestEntityTooLarge)
+	wantBody(t, rec, "What was sent is larger than this form takes.")
+	// Nothing in it was acted on: still signed in.
+	wantStatus(t, b.get("/status"), http.StatusOK)
 }
 
 func TestSignInIsThrottled(t *testing.T) {

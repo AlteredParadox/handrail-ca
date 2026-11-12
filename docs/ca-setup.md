@@ -23,7 +23,11 @@ PostgreSQL's and may differ on yours. How step-ca behaves when its
 database restarts under it was not tried either. Section 4 (revocation lists) was run once by hand on that CA: with
 the block shown there the list is served, and a certificate revoked
 afterwards appears in it at once. It is not part of the automatic checks,
-and it was not tried with a signing key held in a hardware token.
+and it was not tried with a signing key held in a hardware token. Section 6
+(a certificate template) is run on every fresh development CA: a second
+provisioner there has the template from this page, and `make dev-verify`
+checks what it changes, that it can be removed and put back, and that the
+text on this page is the text it was given.
 
 The examples use `internal.example` and `10.20.0.0/16`; substitute your own.
 
@@ -56,6 +60,9 @@ step ca provisioner add handrail --type JWK --create \
   `--x509-default-dur`; handrail-ca asks for a specific validity each time,
   within these bounds.
 - `--ssh=false` because handrail-ca does not issue SSH certificates.
+- By default the CA keeps only the common name of a request's subject. If
+  your certificates need an organisation or other fields there, see
+  section 6 before you start issuing.
 
 Check it:
 
@@ -120,8 +127,29 @@ Things to know, each checked on the development CA:
   `git`. Allow each of those you use.
 - A request for a literal wildcard certificate (`*.internal.example`) is
   refused unless you also run `step ca policy authority x509 wildcards allow`.
-- The certificate's common name is checked too: a common name that is not
-  itself an allowed name is refused.
+- The certificate's common name is checked too, as a name in its own
+  right, whether or not it is among the request's names. A common name
+  that is an allowed DNS name or address passes. One that is not is
+  refused, and in two different ways:
+  - a common name that reads as a name but is not allowed (`printer`,
+    `outside.example.org`) is refused with a reason: `cn name "printer"
+    not allowed`;
+  - a common name that cannot be read as a name at all, because it has a
+    space or an underscore in it (`HP LaserJet 400`, `host_name`), is
+    refused with a bare error 500, "error creating certificate". The
+    reason is only in the CA's own log (`cannot parse cn domain`).
+
+  Devices that write their own requests, such as printers and switches,
+  often use a fixed common name like these. Allow such a common name by
+  itself, exactly as the device writes it:
+
+  ```sh
+  step ca policy authority x509 allow cn "HP LaserJet 400"
+  step ca policy authority x509 allow cn "HP LaserJet 400" --remove   # to take it back
+  ```
+
+  That allows the common name only; the request's names still have to be
+  allowed as names. Other common names are held to the policy as before.
 - The policy does not limit revocation. Any JWK provisioner can revoke any
   certificate of the CA, including a serial the CA never issued.
 - Before applying it to a CA that is in use, list what your ACME clients and
@@ -319,3 +347,80 @@ handrail-ca dates each token it sends the CA with its own clock, and the CA
 accepts a token only within a minute of its own. If the two machines'
 clocks differ by more, the CA refuses everything handrail-ca asks it to do;
 keep both on NTP.
+
+## 6. A certificate template, if certificates need more than names (optional)
+
+What step-ca puts in a certificate from a JWK provisioner is decided by a
+template on the CA, not by the request. With the default template (checked
+on the development CA):
+
+- **Names are kept.** The certificate carries the request's DNS names, IP
+  addresses, email addresses and URIs, exactly, if the CA's name policy
+  allows them.
+- **Of the subject, only the common name is kept.** Organisation, unit,
+  country and the rest of a request's subject are dropped. A request with
+  no common name gets its first name as one.
+- **Extensions the request asks for are not copied.** Every certificate is
+  for server and for client authentication, and none can sign others,
+  whatever the request says.
+- **Validity is one minute longer than asked**, because the CA dates the
+  start a minute back.
+
+If names are all your certificates need, there is nothing to do. If a
+device or a service wants an organisation or other fields in the subject,
+give handrail-ca's provisioner this template, which is the default with
+one line changed: the subject is taken whole from the request.
+
+<!-- leaf-subject.tpl -->
+```
+{
+	"subject": {{ toJson .Insecure.CR.Subject }},
+	"sans": {{ toJson .SANs }},
+{{- if typeIs "*rsa.PublicKey" .Insecure.CR.PublicKey }}
+	"keyUsage": ["keyEncipherment", "digitalSignature"],
+{{- else }}
+	"keyUsage": ["digitalSignature"],
+{{- end }}
+	"extKeyUsage": ["serverAuth", "clientAuth"]
+}
+```
+
+Save it as `leaf-subject.tpl` and, as a CA admin:
+
+```sh
+# on the provisioner from section 1, which already exists
+step ca provisioner update handrail --x509-template leaf-subject.tpl
+
+# or when creating it: add the flag to the command in section 1
+#   --x509-template leaf-subject.tpl
+
+# to go back to the default
+step ca provisioner update handrail --x509-template ""
+```
+
+It takes effect at once, with no restart, and the CA publishes the template
+with the provisioner: `step ca provisioner list` shows it under
+`options.x509.template`, and handrail-ca's Issue page shows it too.
+
+What to know about it:
+
+- `.Insecure.CR` is step-ca's name for what comes straight from the
+  request, unchecked. With this template, whoever holds the provisioner's
+  password decides the subject's fields: through handrail-ca, the operator
+  sees the request's subject before signing. The names are still limited
+  by the name policy (section 2), template or not, and the request's common
+  name still has to be the one the token was made for.
+- A request with no subject gets a certificate with an empty subject under
+  this template, where the default would have filled in a common name.
+  That is a valid certificate (its names are what is checked), but some
+  older software wants a common name; put one in the request if in doubt.
+- To change what certificates may be used for, edit `extKeyUsage`: for
+  example `["serverAuth"]` alone. That variant was tried once by hand on
+  the development CA and is not part of the automatic checks.
+- A template cannot be set from handrail-ca. Its provisioner can ask for
+  certificates and revoke them; changing a provisioner takes a CA admin,
+  on purpose.
+- Not tried: copying extensions from the request (key usage, basic
+  constraints). A template that did so would let a request ask to be a
+  certificate authority; this guide does not offer one.
+

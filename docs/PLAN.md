@@ -112,10 +112,8 @@ version: `make dev-verify` runs those checks on the development CA
 version. The read endpoints are also exercised by handrail-ca's own client
 in `make dev-test`. So are the token claims and the request body for a
 revocation, as handrail-ca's own client builds them: `make dev-test`
-revokes a certificate on the development CA with them. **Still from source
-only:** the token claims and the request body for signing, which the step
-CLI builds in those checks; handrail-ca's integration tests exercise them
-in milestone 4.
+revokes a certificate on the development CA with them, and issues
+certificates with the token claims and request body for signing.
 
 Listing:
 
@@ -155,12 +153,46 @@ Issue (`api/sign.go`, `authority/provisioner/jwk.go`):
   one minute of leeway; `iat` must not predate the CA's start.
 - `sub` must be non-empty. If the CSR has a common name, `sub` (or one of
   `sans`) must equal it; a CSR with no common name passes that check with
-  any subject. With the default certificate template the CA builds the
-  certificate's subject from `sub`, not from the CSR, so the token decides
-  the common name the certificate ends up with (read from
-  `CreateTemplateData` in `jwk.go`; to be confirmed on a running CA).
+  any subject.
+- What the certificate carries is the template's doing, not the
+  request's. With the default template (all of this seen on the
+  development CA, through handrail-ca's own client):
+  - the subject is `sub` as the common name and nothing else: the
+    organisation and other fields of a request's subject are dropped;
+  - the names are the token's `sans`, which the CA sorts into kinds by
+    what each looks like (an IP address if it parses as one, a URI if it
+    has a scheme, an email address if it has an `@`, a DNS name
+    otherwise), and which must then match the request's names kind by
+    kind. A token with no `sans` gets `sub` as its one name;
+  - extensions in the request are not copied: a request asking to be a
+    CA gets a leaf, for server and client authentication.
+- A provisioner can have a template of its own
+  (`step ca provisioner update NAME --x509-template FILE`, which works on
+  open-source step-ca), and the CA publishes it in `/provisioners` under
+  `options.x509.template`. [ca-setup.md](ca-setup.md), section 6, has one
+  that keeps a request's whole subject.
+- `cnf.x5rt#S256` in the token, the SHA-256 of the request, binds the
+  token to that request: the CA refuses it for another (403, "certificate
+  request fingerprint does not match").
+- `notAfter` may be a length (`"2160h0m0s"`), counted from the CA's
+  clock. The certificate is dated a minute back, so it is valid for that
+  length and a minute.
 - Validity must fall inside the provisioner's `minTLSCertDuration` and
-  `maxTLSCertDuration` (global defaults 5 minutes and 24 hours), else 403.
+  `maxTLSCertDuration` (global defaults 5 minutes and 24 hours), else a
+  403 that names the limit. `/provisioners` shows only the limits a
+  provisioner sets itself.
+- A name the policy does not allow is a 403 that names it. The common
+  name is held to the policy too, as a name of its own, whether or not it
+  is among the request's names: one that reads as a name and is not
+  allowed is a 403, `cn name "printer" not allowed`; one that cannot be
+  read as a name at all, for a space or an underscore in it
+  (`HP LaserJet 400`), is a 500, "error creating certificate", with the
+  reason (`cannot parse cn domain`) only in the CA's log. The policy can
+  allow a common name by itself, `step ca policy authority x509 allow cn
+  NAME`, which is what a device with a fixed common name needs.
+  `make dev-verify` runs each of these. The Issue page says when a
+  request's common name is not among its names, and explains the bare
+  500 when the common name is one a policy cannot read.
 - The provisioner's private key is published encrypted
   (`GET /1.0/provisioners/{kid}/encrypted-key`, a PBES2 JWE) and opened with
   the provisioner password.
@@ -387,6 +419,69 @@ why.
   common name the certificate will carry, including when it was filled in
   from a SAN. Requested validity is bounded by the provisioner's claims
   before the request is sent.
+
+  As built: one place (`ca.ReadRequest`) reads a request and works out
+  what the certificate will carry, and both the page and the token come
+  from it. It refuses what the CA would refuse where it can say why: a
+  key the CA does not sign for, and a name the CA would sort into another
+  kind than the request has it under. A pasted private key is refused,
+  not shown back and not logged. The page has two steps on one address,
+  with no script: reading shows the request back, and signing carries the
+  fingerprint of what was shown, so a request changed in between is read
+  again and not signed. The token carries that fingerprint too
+  (`cnf`), so it is good for that request alone.
+
+  The page says what the CA's default template will do with the request,
+  and stops saying it when the provisioner has a template of its own: it
+  then shows the template and the request's whole subject. After signing,
+  the certificate that came back is compared with the names asked for,
+  and with the common name unless there is a template; a difference is
+  written to the history and said on the certificate's page.
+
+  The certificate is checked before it is believed: it must be for the
+  request's key and chain to the pinned root. Outcomes follow the
+  revocation's rules. With no certificate back and nothing to say the CA
+  made none, the inventory is read again and the certificates new to it
+  are searched for the one this request was given: the request's key, a
+  start within five minutes of the request, and the names asked for.
+  Found, it is the outcome. A certificate that is only new to the
+  inventory, or has the key and other names, is not taken for it: an
+  inventory catching up shows old certificates, and a key may have been
+  used before.
+  A request signed in the last ten minutes is not signed again by the
+  same form, and two forms at once give one certificate. A certificate
+  the CA issued that the inventory does not have yet (its database could
+  not be read) is handed over on the page itself, since that answer is
+  the only place it is; it is kept in memory for those ten minutes, so
+  that the same form sent again, after an answer that never reached the
+  browser, gets the certificate again and not a page that does not
+  exist. That memory is the process's own. So the signing form's
+  fingerprint is keyed with a secret made when the process starts: a
+  form from before a restart confirms nothing, and the request is shown
+  again instead of being signed a second time unasked.
+
+  An attempt whose outcome was not learned is remembered too, for the
+  same ten minutes. The same form sent again does not go to the CA
+  until that attempt is accounted for: the database is read, and if it
+  holds the attempt's certificate, that is the answer and nothing is
+  sent. If it cannot be read, or the attempt is less than three minutes
+  old, the form is refused, since sending it could give a second
+  certificate: the token the attempt carried is good for a minute, the CA
+  accepts it for a minute more against clocks that differ, and a request
+  accepted at the last moment still has to be worked through. So it is
+  when the search settles nothing: a new certificate could not be read,
+  there were more new ones than are looked through, or a certificate for
+  the request's key was issued at that moment with other names, which a
+  provisioner's template can do and which is then named for the operator
+  to look at. Finding no exact match then is not knowing. Only a
+  database that was read, searched to the end and shows nothing of the
+  kind, after that time, lets the request go out again.
+
+  What a certificate's page says about the request that led to it
+  ("issued", "differs from what was asked", "found after a lost answer")
+  comes from that same memory of what handrail-ca saw happen, never from
+  the address. An address anyone can write must not be able to make a
+  page tell an operator something untrue about a certificate.
 - *Revoke:* offered only on certificates in the inventory, behind a
   confirmation that names the certificate, with a reason code. The page says
   what passive revocation means and whether the CA publishes a CRL. After a
@@ -744,12 +839,25 @@ provisioner's key from a local file, for a CA that does not hold the
 encrypted key; and handrail-ca serving TLS itself.
 
 **M4. Issue.**
-- CSR path: parse, confirm, sign, download certificate and chain. The
-  real-CA tests cover a CSR with a common name, a SAN-only CSR, and a CSR
-  whose common name is not among its SANs, and check the subject of what
-  comes back.
+- Done: the CSR path, at `/issue`: paste, read back, choose a validity,
+  sign, and land on the certificate's page with its downloads. The
+  real-CA tests (`make dev-test`) cover a request with a common name, one
+  with names only, one whose common name is not among its names, one with
+  a common name only, one with more in its subject, and one that asks to
+  be a CA, and check the subject and names of what comes back; and the
+  same through the pages.
+- Done: validity limits from the provisioner's claims. The page offers
+  the lengths the provisioner allows, marks its longest, and holds a
+  length typed by hand to its limits before anything is sent. Limits the
+  provisioner does not set are the CA's own, which the CA does not
+  publish: there the CA refuses, in words that name the limit.
+- Done: certificate templates. step-ca's default template keeps only the
+  common name of a request's subject. That is decided on the CA and
+  cannot be changed from handrail-ca, so the setup guide has a tested
+  template that keeps the whole subject, the development CA has a second
+  provisioner with it, and the Issue page reads which the provisioner
+  has.
 - Generated-key path (per D3).
-- Validity limits from the provisioner's claims.
 
 **M5. First release, v0.1.0.**
 - Deployment documentation: creating the provisioner with its name policy

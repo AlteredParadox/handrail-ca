@@ -93,6 +93,15 @@ type detailData struct {
 	// certificate. Nil for a row that is not a certificate.
 	Note *noteView
 
+	// JustIssued says how the visitor got here from the issue page: "now"
+	// for the certificate their request was just given, "differs" when it
+	// does not carry what was asked for, "found" when the CA's answer was
+	// lost and the certificate was found in its database, "before" when
+	// the same request had been signed a moment earlier. Only set for a
+	// certificate that a request through this handrail-ca was given in
+	// the last few minutes, and from its own record of that.
+	JustIssued string
+
 	// History is what was done to the certificate through handrail-ca.
 	// Nil for a row that is not a certificate.
 	History *certificateEvents
@@ -255,6 +264,18 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	}
 	if said := r.URL.Query().Get("revoked"); data.Revocation != nil && (said == "now" || said == "before") {
 		data.JustRevoked = said
+	}
+	// What is said about the request that led here comes from what
+	// handrail-ca itself saw happen a moment ago, never from the address:
+	// anyone can write an address. The address only asks for it to be
+	// said, and tells a first arrival from a form sent again.
+	if asked := r.URL.Query(); asked.Has("issued") {
+		if how, ok := s.issues.about(summary.Serial, now); ok {
+			data.JustIssued = how
+			if asked.Get("issued") == "again" {
+				data.JustIssued = "before"
+			}
+		}
 	}
 	s.render(w, r, code, "detail.html", data.Title, data)
 }
@@ -447,7 +468,16 @@ func newRevocationView(rev *inventory.Revocation, known []inventory.ProvisionerC
 }
 
 func publicKeyWords(cert *x509.Certificate) string {
-	switch key := cert.PublicKey.(type) {
+	if words := keyWords(cert.PublicKey); words != "" {
+		return words
+	}
+	return cert.PublicKeyAlgorithm.String()
+}
+
+// keyWords says a public key's kind and size, empty for a kind it does
+// not know.
+func keyWords(public any) string {
+	switch key := public.(type) {
 	case *ecdsa.PublicKey:
 		return "ECDSA " + key.Curve.Params().Name
 	case *rsa.PublicKey:
@@ -455,7 +485,7 @@ func publicKeyWords(cert *x509.Certificate) string {
 	case ed25519.PublicKey:
 		return "Ed25519"
 	}
-	return cert.PublicKeyAlgorithm.String()
+	return ""
 }
 
 func keyUsageWords(usage x509.KeyUsage) []string {

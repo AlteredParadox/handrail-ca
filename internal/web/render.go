@@ -36,7 +36,7 @@ var templateFS embed.FS
 // that page's content.
 type pages map[string]*template.Template
 
-var pageNames = []string{"signin.html", "list.html", "detail.html", "revoke.html", "names.html", "history.html", "status.html", "account.html", "error.html"}
+var pageNames = []string{"signin.html", "list.html", "detail.html", "revoke.html", "issue.html", "names.html", "history.html", "status.html", "account.html", "error.html"}
 
 func loadPages() (pages, error) {
 	set := pages{}
@@ -64,6 +64,9 @@ type view struct {
 	CAHost string
 	// HistoryBroken is set while history cannot be written.
 	HistoryBroken bool
+	// CanAct is set for a user who may issue: the navigation then has
+	// the way to it.
+	CanAct bool
 	// Page is the template's own name, for marking the current nav item.
 	Page string
 	Data any
@@ -79,6 +82,7 @@ func (s *server) render(w http.ResponseWriter, r *http.Request, status int, page
 	if u := currentUser(r); u != nil {
 		v.User = &u.user
 		v.FormToken = formToken(u.token)
+		v.CanAct = s.canAct(r)
 	}
 	var buf bytes.Buffer
 	if err := s.pages[page].Execute(&buf, v); err != nil {

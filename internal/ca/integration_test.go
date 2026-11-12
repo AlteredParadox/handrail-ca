@@ -19,7 +19,10 @@ package ca
 import (
 	"context"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"errors"
+	"net"
 	"os"
 	"regexp"
 	"strings"
@@ -259,5 +262,235 @@ func TestIntegrationAClockThatIsOffIsReported(t *testing.T) {
 	t.Logf("the CA's refusal of an expired token: %v", refused)
 	if d := refused.ClockDifference; d < 9*time.Minute || d > 11*time.Minute {
 		t.Errorf("clock difference = %s, want about ten minutes", d)
+	}
+}
+
+// devRequest is a certificate signing request as ReadRequest reads it.
+func devRequest(t *testing.T, tmpl *x509.CertificateRequest) *Request {
+	t.Helper()
+	text, _ := csrPEM(t, "P-256", tmpl)
+	r, err := ReadRequest(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return r
+}
+
+// Signing against a real step-ca. The certificate that comes back carries
+// what ReadRequest said it would, for each shape of request: this is the
+// check that the working-out in ReadRequest is step-ca's own, and that the
+// token claims and request body, first read from step-ca's source, are
+// what a running CA accepts. Sign itself checks every certificate for the
+// request's key and a chain to the pinned root.
+func TestIntegrationSign(t *testing.T) {
+	caURL, fingerprint := devCA(t)
+	c, err := New(Config{URL: caURL, Fingerprint: fingerprint, Provisioner: devProvisioner(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := devContext(t)
+	// Names inside the development CA's policy (seed.sh): one label under
+	// handrail.test, and addresses in 10.20.0.0/16.
+	tests := []struct {
+		name string
+		tmpl x509.CertificateRequest
+	}{
+		{"a common name among its names", x509.CertificateRequest{Subject: pkix.Name{CommonName: "issue1.handrail.test"}, DNSNames: []string{"issue1.handrail.test"}, IPAddresses: []net.IP{net.ParseIP("10.20.3.1")}}},
+		{"names and no common name", x509.CertificateRequest{IPAddresses: []net.IP{net.ParseIP("10.20.3.2")}, DNSNames: []string{"issue2.handrail.test", "issue2b.handrail.test"}}},
+		{"a common name that is not among the names", x509.CertificateRequest{Subject: pkix.Name{CommonName: "issue3.handrail.test"}, DNSNames: []string{"issue3b.handrail.test"}}},
+		{"a common name and no names", x509.CertificateRequest{Subject: pkix.Name{CommonName: "issue4.handrail.test"}}},
+		{"an address for a common name and no names", x509.CertificateRequest{Subject: pkix.Name{CommonName: "10.20.3.5"}}},
+		{"more in the subject than a common name", x509.CertificateRequest{Subject: pkix.Name{CommonName: "issue6.handrail.test", Organization: []string{"Example"}, Country: []string{"DE"}}, DNSNames: []string{"issue6.handrail.test"}}},
+		// The request asks to be a CA. step-ca's template does not copy
+		// extensions from the request.
+		{"a request that asks for more than a leaf", x509.CertificateRequest{Subject: pkix.Name{CommonName: "issue7.handrail.test"}, DNSNames: []string{"issue7.handrail.test"},
+			ExtraExtensions: []pkix.Extension{{Id: asn1.ObjectIdentifier{2, 5, 29, 19}, Critical: true, Value: []byte{0x30, 0x03, 0x01, 0x01, 0xff}}}}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := devRequest(t, &tt.tmpl)
+			issued, err := c.Sign(ctx, req, 0)
+			if err != nil {
+				t.Fatalf("Sign: %v", err)
+			}
+			cert := issued.Certificate
+			// The subject is the common name ReadRequest named, and nothing
+			// else of the request's subject.
+			if got := cert.Subject.String(); got != "CN="+req.CommonName {
+				t.Errorf("subject = %q, want CN=%s alone", got, req.CommonName)
+			}
+			var ips, uris []string
+			for _, ip := range cert.IPAddresses {
+				ips = append(ips, ip.String())
+			}
+			for _, u := range cert.URIs {
+				uris = append(uris, u.String())
+			}
+			for kind, pair := range map[string][2][]string{
+				"DNS names": {cert.DNSNames, req.DNSNames}, "IP addresses": {ips, req.IPAddresses},
+				"email addresses": {cert.EmailAddresses, req.EmailAddresses}, "URIs": {uris, req.URIs},
+			} {
+				if strings.Join(pair[0], " ") != strings.Join(pair[1], " ") {
+					t.Errorf("%s = %v, want %v as the request was read", kind, pair[0], pair[1])
+				}
+			}
+			if cert.IsCA || cert.KeyUsage&x509.KeyUsageCertSign != 0 {
+				t.Error("the certificate may sign others")
+			}
+			// The provisioner's default validity, dated a minute back.
+			if d := cert.NotAfter.Sub(cert.NotBefore); d != 24*time.Hour+time.Minute {
+				t.Errorf("validity = %s, want the default 24 hours and the CA's minute of backdating", d)
+			}
+			if len(issued.Intermediates) != 1 {
+				t.Errorf("%d intermediates came with it", len(issued.Intermediates))
+			}
+		})
+	}
+}
+
+func TestIntegrationSignLimits(t *testing.T) {
+	caURL, fingerprint := devCA(t)
+	c, err := New(Config{URL: caURL, Fingerprint: fingerprint, Provisioner: devProvisioner(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := devContext(t)
+	request := func(name string) *Request {
+		return devRequest(t, &x509.CertificateRequest{Subject: pkix.Name{CommonName: name}, DNSNames: []string{name}})
+	}
+	refused := func(err error, status int, says string) bool {
+		var se *StatusError
+		return errors.As(err, &se) && se.Status == status && strings.Contains(se.Message, says)
+	}
+
+	// A validity is a length the CA counts from its own clock, and the
+	// certificate is that long plus the minute it is dated back.
+	issued, err := c.Sign(ctx, request("limit1.handrail.test"), 2160*time.Hour)
+	if err != nil {
+		t.Fatalf("the provisioner's longest validity: %v", err)
+	}
+	if d := issued.Certificate.NotAfter.Sub(issued.Certificate.NotBefore); d != 2160*time.Hour+time.Minute {
+		t.Errorf("validity = %s, want 90 days and a minute", d)
+	}
+	if _, err := c.Sign(ctx, request("limit2.handrail.test"), 2161*time.Hour); !refused(err, 403, "more than the authorized maximum certificate duration") {
+		t.Errorf("an hour over the provisioner's longest: %v", err)
+	}
+	if _, err := c.Sign(ctx, request("limit3.handrail.test"), time.Minute); !refused(err, 403, "less than the authorized minimum certificate duration") {
+		t.Errorf("under the CA's shortest: %v", err)
+	}
+	// The CA's name policy, and its words for it.
+	if _, err := c.Sign(ctx, request("outside.example.org"), 0); !refused(err, 403, `dns name "outside.example.org" not allowed`) {
+		t.Errorf("a name outside the policy: %v", err)
+	}
+
+	// A token is good for the one request it was made for.
+	mine, another := request("bound.handrail.test"), request("bound.handrail.test")
+	body, err := c.signRequest(ctx, mine, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sent := body.(map[string]string)
+	sent["csr"] = another.PEM
+	if _, err := c.postJSON(ctx, signPath, sent, maxSigned); !refused(err, 403, "certificate request fingerprint does not match") {
+		t.Errorf("another request sent with this request's token: %v", err)
+	}
+}
+
+// The development CA's second provisioner has the certificate template
+// from docs/ca-setup.md, section 6, which takes the subject whole from the
+// request. Through it, the same client gets certificates that carry more
+// than a common name; and the client can tell which provisioner has a
+// template, since the CA publishes it.
+func TestIntegrationSignUnderATemplate(t *testing.T) {
+	caURL, fingerprint := devCA(t)
+	acting := devProvisioner(t)
+	acting.Name = "handrail-template"
+	c, err := New(Config{URL: caURL, Fingerprint: fingerprint, Provisioner: acting})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := devContext(t)
+
+	provisioners, err := c.Provisioners(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range provisioners {
+		switch p.Name {
+		case "handrail-template":
+			if !p.HasTemplate() || !strings.Contains(p.Template, ".Insecure.CR.Subject") {
+				t.Errorf("handrail-template is listed with the template %q", p.Template)
+			}
+		case "handrail", "acme", "Admin JWK":
+			if p.HasTemplate() {
+				t.Errorf("%s is listed with a template: %q", p.Name, p.Template)
+			}
+		}
+	}
+
+	// The whole subject of the request, and its names as before.
+	req := devRequest(t, &x509.CertificateRequest{
+		Subject:  pkix.Name{CommonName: "tpl1.handrail.test", Organization: []string{"Example Org"}, OrganizationalUnit: []string{"Ops"}, Country: []string{"DE"}},
+		DNSNames: []string{"tpl1.handrail.test"}, IPAddresses: []net.IP{net.ParseIP("10.20.5.1")},
+	})
+	issued, err := c.Sign(ctx, req, 0)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	cert := issued.Certificate
+	if got := cert.Subject.String(); got != "CN=tpl1.handrail.test,OU=Ops,O=Example Org,C=DE" {
+		t.Errorf("subject = %q, want the request's whole subject", got)
+	}
+	if len(cert.DNSNames) != 1 || cert.DNSNames[0] != "tpl1.handrail.test" || len(cert.IPAddresses) != 1 || cert.IPAddresses[0].String() != "10.20.5.1" {
+		t.Errorf("names = %v %v", cert.DNSNames, cert.IPAddresses)
+	}
+
+	// A request with no subject: the template has none to copy, so the
+	// certificate's subject is empty, where the default template would
+	// have made a common name of the first name.
+	req = devRequest(t, &x509.CertificateRequest{DNSNames: []string{"tpl2.handrail.test"}})
+	issued, err = c.Sign(ctx, req, 0)
+	if err != nil {
+		t.Fatalf("Sign, a request with names only: %v", err)
+	}
+	if got := issued.Certificate.Subject.String(); got != "" {
+		t.Errorf("subject = %q, want none", got)
+	}
+	if names := issued.Certificate.DNSNames; len(names) != 1 || names[0] != "tpl2.handrail.test" {
+		t.Errorf("names = %v", names)
+	}
+
+	// The name policy holds under a template.
+	_, err = c.Sign(ctx, devRequest(t, &x509.CertificateRequest{Subject: pkix.Name{CommonName: "outside.example.org", Organization: []string{"Example Org"}}, DNSNames: []string{"outside.example.org"}}), 0)
+	var refused *StatusError
+	if !errors.As(err, &refused) || refused.Status != 403 || !strings.Contains(refused.Message, "not allowed") {
+		t.Errorf("a name outside the policy, under the template: %v", err)
+	}
+}
+
+// The development CA has a name policy, and a policy holds the common name
+// to its rules as a name of its own. What the CA answers differs with the
+// common name, and the Issue page's explanation of the second answer rests
+// on this.
+func TestIntegrationSignCommonNamesUnderThePolicy(t *testing.T) {
+	caURL, fingerprint := devCA(t)
+	c, err := New(Config{URL: caURL, Fingerprint: fingerprint, Provisioner: devProvisioner(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := devContext(t)
+	sign := func(cn string) error {
+		_, err := c.Sign(ctx, devRequest(t, &x509.CertificateRequest{Subject: pkix.Name{CommonName: cn}, DNSNames: []string{"cn-test.handrail.test"}}), 0)
+		return err
+	}
+	if err := sign("cn-other.handrail.test"); err != nil {
+		t.Errorf("a common name that is an allowed name, not among the names: %v", err)
+	}
+	var refused *StatusError
+	if err := sign("printer"); !errors.As(err, &refused) || refused.Status != 403 || !strings.Contains(refused.Message, `cn name "printer" not allowed`) {
+		t.Errorf("a common name that reads as a name and is not allowed: %v", err)
+	}
+	if err := sign("HP LaserJet 400"); !errors.As(err, &refused) || refused.Status != 500 || !strings.Contains(refused.Message, "error creating certificate") || strings.Contains(refused.Message, "LaserJet") {
+		t.Errorf("a common name that is no name: %v, want a 500 that gives no reason", err)
 	}
 }

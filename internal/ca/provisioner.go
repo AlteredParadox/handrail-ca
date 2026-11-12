@@ -331,9 +331,9 @@ func signatureAlgorithm(key jose.JSONWebKey) (jose.SignatureAlgorithm, error) {
 }
 
 // token signs a one-time token for one request: audience is the endpoint's
-// address, subject what the request is about. It is the caller's to send
-// once and never to log.
-func (c *Client) token(ctx context.Context, path, subject string) (string, error) {
+// address, subject what the request is about, and more are claims a kind
+// of request adds. It is the caller's to send once and never to log.
+func (c *Client) token(ctx context.Context, path, subject string, more map[string]any) (string, error) {
 	if err := c.Unlock(ctx); err != nil {
 		return "", err
 	}
@@ -346,7 +346,12 @@ func (c *Client) token(ctx context.Context, path, subject string) (string, error
 	now := c.now()
 	audience := *c.base
 	audience.Path = path
-	claims, err := json.Marshal(map[string]any{
+	all := map[string]any{}
+	for claim, value := range more {
+		all[claim] = value
+	}
+	// What every token says is not for a request to replace.
+	for claim, value := range map[string]any{
 		"iss": name,
 		"sub": subject,
 		"aud": audience.String(),
@@ -354,7 +359,10 @@ func (c *Client) token(ctx context.Context, path, subject string) (string, error
 		"iat": now.Unix(),
 		"nbf": now.Unix(),
 		"exp": now.Add(tokenLifetime).Unix(),
-	})
+	} {
+		all[claim] = value
+	}
+	claims, err := json.Marshal(all)
 	if err != nil {
 		return "", err
 	}

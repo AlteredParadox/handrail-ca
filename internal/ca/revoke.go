@@ -116,7 +116,7 @@ func (c *Client) revocationRequest(ctx context.Context, r Revocation) (any, erro
 	}
 	// The token's subject is the serial, in exactly the form sent beside
 	// it: the CA compares the two as strings.
-	token, err := c.token(ctx, revokePath, serial)
+	token, err := c.token(ctx, revokePath, serial, nil)
 	if err != nil {
 		return nil, err
 	}

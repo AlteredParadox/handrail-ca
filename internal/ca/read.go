@@ -108,7 +108,21 @@ type Provisioner struct {
 	// KeyID is the key ID of a JWK provisioner, empty for other types.
 	KeyID  string
 	Claims Claims
+	// Template is the provisioner's own X.509 certificate template, if it
+	// has one: with it, what a certificate carries is the template's
+	// doing and not step-ca's default. TemplateFile is set instead when
+	// the template is a file on the CA's host, whose text is not
+	// published.
+	Template     string
+	TemplateFile string
 }
+
+// HasTemplate reports whether the provisioner replaces step-ca's default
+// certificate template with one of its own.
+func (p Provisioner) HasTemplate() bool { return p.Template != "" || p.TemplateFile != "" }
+
+// maxTemplate bounds a template that is kept for showing.
+const maxTemplate = 8 << 10
 
 // Claims are a provisioner's own X.509 validity limits. A zero duration
 // means the provisioner does not set that limit and the CA's default
@@ -170,6 +184,13 @@ func (c *Client) eachProvisioner(ctx context.Context, visit func(json.RawMessage
 	return fmt.Errorf("/provisioners: more than %d pages", maxProvisionerPages)
 }
 
+// listedTemplate is a provisioner's X.509 template options as the CA
+// lists them.
+type listedTemplate struct {
+	Template     string `json:"template"`
+	TemplateFile string `json:"templateFile"`
+}
+
 func parseProvisioner(raw json.RawMessage) (Provisioner, error) {
 	var in struct {
 		Type string `json:"type"`
@@ -182,6 +203,9 @@ func parseProvisioner(raw json.RawMessage) (Provisioner, error) {
 			Max     string `json:"maxTLSCertDuration"`
 			Default string `json:"defaultTLSCertDuration"`
 		} `json:"claims"`
+		Options *struct {
+			X509 *listedTemplate `json:"x509"`
+		} `json:"options"`
 	}
 	if err := json.Unmarshal(raw, &in); err != nil {
 		return Provisioner{}, fmt.Errorf("/provisioners: an entry is not the expected JSON: %w", err)
@@ -192,6 +216,12 @@ func parseProvisioner(raw json.RawMessage) (Provisioner, error) {
 	p := Provisioner{Type: clip(in.Type), Name: clip(in.Name)}
 	if in.Key != nil {
 		p.KeyID = clip(in.Key.KeyID)
+	}
+	if in.Options != nil && in.Options.X509 != nil {
+		p.Template, p.TemplateFile = in.Options.X509.Template, clip(in.Options.X509.TemplateFile)
+		if len(p.Template) > maxTemplate {
+			p.Template = p.Template[:maxTemplate] + "\n… (the rest is not shown)"
+		}
 	}
 	if in.Claims == nil {
 		return p, nil

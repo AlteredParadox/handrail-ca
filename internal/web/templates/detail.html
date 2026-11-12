@@ -35,6 +35,11 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{end}}
 </div>
 
+{{if eq .JustIssued "now"}}<output class="notice">Issued. This is the certificate the CA signed for the request. Download it below.</output>
+{{else if eq .JustIssued "differs"}}<output class="stale">Issued, but the certificate does not carry exactly what was asked for. The <a href="#history">history</a> below says where it differs.</output>
+{{else if eq .JustIssued "found"}}<output class="stale">Issued. The CA's answer to the request did not arrive, but its database holds this certificate for the request's key, issued since. Download it below.</output>
+{{else if eq .JustIssued "before"}}<output class="stale">This request had already been signed a moment ago, and this is the certificate it was given. It was not signed a second time.</output>{{end}}
+
 {{if .Stale}}
 <output class="stale">This page is as the CA's database was {{.LastRead}}: the last attempt to read it again failed. If this certificate has been revoked since then, that is not shown here. {{.Stale}}</output>
 {{end}}

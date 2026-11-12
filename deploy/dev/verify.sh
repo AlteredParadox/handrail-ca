@@ -131,6 +131,39 @@ check "a revoked ACME certificate cannot be renewed by presenting it" inca "! st
 check "a new ACME order for the same name is filled all the same" inca "step ca certificate acme3.handrail.test a2.crt a2.key $ACME"
 check "and it is a new certificate" inca "test \"\$(step certificate inspect a2.crt --format json | jq -r .serial_number)\" != $acme"
 
+echo "Certificate templates (docs/ca-setup.md, section 6)"
+TP='--provisioner handrail-template --provisioner-password-file /run/secrets/handrail_provisioner_password'
+# A request whose subject says more than a common name.
+inca "step certificate create org.handrail.test o.csr o.key --csr --san org.handrail.test --san 10.20.4.1 --no-password --insecure --force \
+	--template <(echo '{\"subject\": {\"commonName\": \"org.handrail.test\", \"organization\": \"Example Org\", \"organizationalUnit\": \"Ops\", \"country\": \"DE\"}, \"sans\": {{ toJson .SANs }}}') >/dev/null 2>&1"
+# subject_of <certificate>: its subject's fields, and its names.
+subject_of() {
+	local cert=$1
+	inca "step certificate inspect $cert --format json | jq -c '[.subject, .extensions.subject_alt_name]'"
+}
+inca "t=\$(step ca token org.handrail.test --san org.handrail.test --san 10.20.4.1 $HP 2>/dev/null) && step ca sign o.csr plain.crt --token \"\$t\" --force >/dev/null 2>&1"
+same "without a template, only the request's common name is kept in the subject" "$(subject_of plain.crt)" \
+	'[{"common_name":["org.handrail.test"]},{"dns_names":["org.handrail.test"],"ip_addresses":["10.20.4.1"]}]'
+same "the CA publishes a provisioner's template with the provisioner" \
+	"$(inca "$API/1.0/provisioners | jq -r '.provisioners[] | select(.name == \"handrail-template\") | .options.x509.template' | grep -c 'Insecure.CR.Subject'")" "1"
+inca "t=\$(step ca token org.handrail.test --san org.handrail.test --san 10.20.4.1 $TP 2>/dev/null) && step ca sign o.csr tpl.crt --token \"\$t\" --force >/dev/null 2>&1"
+same "with the guide's template, the request's whole subject is kept, and the names are as before" "$(subject_of tpl.crt)" \
+	'[{"common_name":["org.handrail.test"],"country":["DE"],"organization":["Example Org"],"organizational_unit":["Ops"]},{"dns_names":["org.handrail.test"],"ip_addresses":["10.20.4.1"]}]'
+check "the name policy still applies under a template" inca "! step ca certificate outside.example.org x.crt x.key $TP --force"
+# Taking the template away and putting it back, as an administrator would
+# on a provisioner that already exists.
+check "a template is removed with an empty --x509-template" inca "step ca provisioner update handrail-template --x509-template '' $ADMIN"
+same "the provisioner then has no template" \
+	"$(inca "$API/1.0/provisioners | jq -c '.provisioners[] | select(.name == \"handrail-template\") | .options.x509'")" "{}"
+check "a template is given to an existing provisioner with provisioner update" inca "step ca provisioner update handrail-template --x509-template /dev-leaf-subject.tpl $ADMIN"
+same "and is published again" \
+	"$(inca "$API/1.0/provisioners | jq -r '.provisioners[] | select(.name == \"handrail-template\") | .options.x509.template' | grep -c 'Insecure.CR.Subject'")" "1"
+# The template in the guide is this file, so what the guide tells an
+# administrator to use is what is checked here.
+same "the template in docs/ca-setup.md is the one this CA was given" \
+	"$(awk '/<!-- leaf-subject.tpl -->/ {want = 1; next} want && /^```/ {if (inside) exit; inside = 1; next} inside' ../../docs/ca-setup.md)" \
+	"$(cat leaf-subject.tpl)"
+
 echo "Limits (docs/ca-setup.md, sections 1 and 2)"
 # refused|allowed <name> [extra step ca certificate flags]
 refused() {
@@ -157,6 +190,28 @@ same "a policy on one provisioner is refused by open-source step-ca" \
 same "the authority policy is the one the seed set" \
 	"$(inca "step ca policy authority view $ADMIN 2>/dev/null | sed -n '/^{/,\$p' | jq -c '.x509.allow'")" \
 	'{"dns":["step","*.handrail.test"],"ips":["10.20.0.0/16"]}'
+
+echo "Common names under the policy (docs/ca-setup.md, section 2)"
+# The policy holds a certificate's common name to its rules too, as a name
+# of its own. These requests all have an allowed DNS name; what differs is
+# the common name. signing <common name> <file for the error>
+signing() {
+	local cn=$1 err=$2
+	inca "step ca certificate '$cn' c.crt c.key --san cn1.handrail.test $HP --force >/dev/null 2>$err"
+}
+not_signing() {
+	! signing "$@"
+}
+check "a common name that is an allowed name, and not among the names, is issued" signing other.handrail.test e0
+check "a common name that reads as a name and is not allowed is refused" not_signing printer e1
+same "and the CA says which" "$(inca "grep -c 'cn name \"printer\" not allowed' e1")" "1"
+check "a common name that is not a name at all is refused" not_signing 'HP LaserJet 400' e2
+same "with no reason given to the one who asked" "$(inca "grep -c 'not allowed' e2")" "0"
+check "the policy can allow a common name by itself" inca "step ca policy authority x509 allow cn 'HP LaserJet 400' $ADMIN"
+check "which is then issued" signing 'HP LaserJet 400' e3
+check "while another that is not a name is still refused" not_signing 'Jane Doe' e4
+check "and the rule can be taken back" inca "step ca policy authority x509 allow cn 'HP LaserJet 400' --remove $ADMIN"
+check "after which it is refused again" not_signing 'HP LaserJet 400' e5
 
 echo "Read-only database role (docs/ca-setup.md, section 3)"
 for t in x509_certs x509_certs_data revoked_x509_certs; do

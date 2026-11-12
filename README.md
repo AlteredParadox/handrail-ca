@@ -14,9 +14,11 @@ name the CA's certificates carry, by domain and network, which is what a
 name policy on the CA has to allow. Operators can keep a note and labels on
 a certificate, for what the CA does not record, and can revoke one from its
 page: after a confirmation that names the certificate and says what
-revoking will and will not do on your CA. A history page lists what was
-done through handrail-ca, by whom and from where. Issuing is not built yet;
-the [build plan](docs/PLAN.md) has the order.
+revoking will and will not do on your CA. Operators can issue a certificate
+for a certificate signing request: paste it, check what will be signed,
+choose how long it is valid. A history page lists what was done through
+handrail-ca, by whom and from where. Having handrail-ca make the key for
+you is not built yet; the [build plan](docs/PLAN.md) has the order.
 
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.
@@ -70,6 +72,46 @@ which it is, and so does the CA status page, under "Acting on the CA".
 The provisioner password can ask the CA for a certificate for any name the
 CA's policy allows and can revoke any certificate; whoever can read that
 file, or the memory of the running process, has that power.
+
+### Issuing
+
+An operator issues a certificate from the Issue page, for a certificate
+signing request made on the machine that will use the certificate. The
+private key never leaves that machine. The page has commands for making a
+request with the step CLI and with OpenSSL.
+
+Pasting a request does not sign it. handrail-ca first reads it back to
+you: the common name and every name the certificate will carry, the kind
+of key, and that the request's own signature is good. Then you choose a
+validity, from what the provisioner allows, and sign. The token that
+authorizes it is good for that one request and no other.
+
+What step-ca puts in the certificate is decided on the CA, by a template,
+not by the request:
+
+- The names are kept, as far as the CA's name policy allows them.
+- Of the subject, only the common name is kept, unless the provisioner
+  has a template of its own. The page says so when a request has more.
+  [docs/ca-setup.md](docs/ca-setup.md), section 6, has a tested template
+  that keeps the whole subject, and how to set it.
+- Extensions a request asks for are not copied.
+- The certificate is valid one minute longer than you chose.
+- A name policy on the CA holds the common name to its rules too. A
+  device with a fixed common name that is not a host name (a printer's
+  model, say) is refused until the policy allows that common name by
+  itself; [docs/ca-setup.md](docs/ca-setup.md), section 2, has the
+  command. The page says when a request's common name is not among its
+  names.
+
+After signing you land on the certificate's page, where it can be
+downloaded with or without its chain. If what came back does not carry
+the names that were asked for, the page says so. As with revoking, the
+request goes to the CA once, the CA's database is read again afterwards,
+and "no certificate was issued" is said only when the CA refused or
+nothing was sent; otherwise handrail-ca looks in the CA's database for a
+certificate with the request's key and names, issued just then, before
+saying it does not know. The same form sent
+twice gives one certificate.
 
 ### Revoking
 

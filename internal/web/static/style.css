@@ -678,10 +678,6 @@ form.revoke {
   max-width: 360px;
 }
 
-label .ink {
-  color: var(--ink);
-}
-
 input.mono {
   font-family: var(--mono);
   font-size: 14px;
@@ -716,6 +712,74 @@ a.button.danger:hover {
 a.cancel {
   font-weight: 500;
   padding: 0 12px;
+}
+
+/* Issuing */
+.split {
+  align-items: flex-start;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 20px;
+}
+
+.main-col {
+  display: flex;
+  flex: 999 1 560px;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+.side-col {
+  display: flex;
+  flex: 1 1 300px;
+  flex-direction: column;
+  gap: 20px;
+  min-width: 0;
+}
+
+textarea.mono {
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.validity {
+  align-items: flex-end;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.field.tiny {
+  max-width: 130px;
+}
+
+.good {
+  color: var(--ok);
+  font-weight: 500;
+}
+
+pre.code {
+  background: var(--ink);
+  border-radius: 6px;
+  color: var(--line-soft);
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  margin: 0;
+  overflow-x: auto;
+  padding: 12px;
+}
+
+button.wide {
+  padding: 0 20px;
+}
+
+.card h3 {
+  font-size: 14px;
+  font-weight: 600;
+  margin: 0;
 }
 
 /* History */
