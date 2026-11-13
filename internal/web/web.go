@@ -227,8 +227,6 @@ func build(opts Options) (*server, http.Handler, error) {
 		return nil, nil, err
 	}
 	s := &server{
-		refreshGap: refreshGap,
-
 		formKey:   formKey,
 		opts:      opts,
 		base:      strings.TrimRight(u.Path, "/"),
@@ -248,6 +246,7 @@ func build(opts Options) (*server, http.Handler, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	s.refreshGap = refreshGap
 	mux := http.NewServeMux()
 	// Open to everyone: the probe, the legal pages, the style sheet, and
 	// signing in.
