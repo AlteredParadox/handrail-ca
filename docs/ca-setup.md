@@ -43,6 +43,13 @@ admin's credentials, or takes `--admin-subject`, `--admin-provisioner` and
 `--admin-password-file`; on a CA initialised with remote management the
 admin provisioner is named `Admin JWK`.
 
+Do not give handrail-ca that provisioner, or any other that the CA's
+administrators are registered under. Its operators would then be issuing
+through the administrators' own provisioner; handrail-ca warns at start
+when the provisioner it is given has that name. What a certificate from
+it would let its holder do at the CA's admin interface was not tried
+here.
+
 ```sh
 step ca provisioner add handrail --type JWK --create \
   --x509-max-dur 2160h \

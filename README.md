@@ -75,6 +75,11 @@ export HANDRAIL_PROVISIONER_PASSWORD_FILE=/etc/handrail-ca/provisioner_password
 | `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. |
 | `-trusted-proxy` | `HANDRAIL_TRUSTED_PROXIES` | Addresses or CIDR ranges of the reverse proxies in front, comma-separated. Set it whenever there is one. |
 
+The two switches read `1`, `true`, `yes` or `on` as on, and `0`, `false`,
+`no`, `off` or nothing as off. Anything else stops the start with a
+message naming the variable: a switch that takes something away is not
+read as off because it was misspelt.
+
 The provisioner's key is opened when handrail-ca starts, and tried again
 every thirty seconds until it opens: a CA that is down, a provisioner not
 created yet, or a wrong password does not stop the start. The log says

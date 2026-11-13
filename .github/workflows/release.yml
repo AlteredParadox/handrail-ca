@@ -40,6 +40,16 @@ jobs:
         run: |
           echo "$GITHUB_REF_NAME" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' || { echo "tag $GITHUB_REF_NAME is not vMAJOR.MINOR.PATCH"; exit 1; }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The whole history, for the step below.
+          fetch-depth: 0
+      # A tag can be put on any commit, one that no pull request and no
+      # required check ever saw included. Only what is on main is released.
+      - name: The tagged commit is on main
+        if: github.event_name == 'push' && github.ref_type == 'tag'
+        run: |
+          git fetch --quiet --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || { echo "the commit tagged $GITHUB_REF_NAME is not on main"; exit 1; }
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
@@ -80,9 +90,13 @@ jobs:
         goarch: [amd64, arm64]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # No cache: what is released is compiled from the modules go.sum
+      # names, fetched for this run, and not from build or module caches
+      # that other jobs saved, some of which run third-party tooling.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
+          cache: false
 
       # A run on a tag ref (pushed, or dispatched on the tag) stamps the tag;
       # one on a branch stamps "dev". Only a tag push publishes (see publish).
@@ -153,8 +167,8 @@ jobs:
           # One plain manifest list per tag (no attestation manifests), so
           # `docker pull` and the GHCR UI show exactly two images.
           provenance: false
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # No layer cache, for the reason the binaries have none: the image
+          # that is released is built from its sources in this run.
 
   # Tag PUSH only: this is the ONLY job granted contents: write. Requiring
   # event_name == 'push' keeps a manual dispatch — which can target a tag —
