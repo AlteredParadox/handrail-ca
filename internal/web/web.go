@@ -148,6 +148,10 @@ type server struct {
 	secure bool   // the public URL is https
 	pages  pages
 	log    *slog.Logger
+	// refreshes spaces the reads asked for from the page by refreshGap
+	// (see refreshInventory).
+	refreshes  pacedReads
+	refreshGap time.Duration
 
 	limiter   *limiter
 	hashSlots chan struct{} // bounds concurrent password hashing
@@ -174,11 +178,6 @@ type server struct {
 	// that must not be taken twice are keyed with it, so that one from
 	// before a restart is not taken at all.
 	formKey []byte
-
-	// refreshes spaces the reads asked for from the page by refreshGap
-	// (see refreshInventory).
-	refreshes  pacedReads
-	refreshGap time.Duration
 }
 
 // New returns the handler for the whole site.
@@ -228,6 +227,8 @@ func build(opts Options) (*server, http.Handler, error) {
 		return nil, nil, err
 	}
 	s := &server{
+		refreshGap: refreshGap,
+
 		formKey:   formKey,
 		opts:      opts,
 		base:      strings.TrimRight(u.Path, "/"),
@@ -242,7 +243,6 @@ func build(opts Options) (*server, http.Handler, error) {
 		hash:      password.Hash,
 		status:    &statusCache{},
 	}
-	s.refreshGap = refreshGap
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {
