@@ -23,6 +23,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/asn1"
+	"fmt"
 	"math/big"
 	"net/http"
 	"strings"
@@ -84,7 +85,7 @@ func TestACertificatesPageSaysWhatItDoesNotShow(t *testing.T) {
 	page := b.get("/certificates/5151")
 	wantStatus(t, page, http.StatusOK)
 	wantBody(t, page, "shown.internal.example",
-		"The subject has 2 common names", "zz-first-cn", "last-cn.internal.example",
+		"The subject has 2 common names", "All of them are: ", "zz-first-cn", "last-cn.internal.example",
 		"also hold 1 directory name, 1 other name, which handrail-ca does not show")
 	if strings.Contains(page.Body.String(), "zz-upn@corp.invalid") {
 		t.Error("the page shows the other name after all: the note is wrong")
@@ -101,6 +102,46 @@ func TestACertificatesPageSaysWhatItDoesNotShow(t *testing.T) {
 	}
 
 	wantBody(t, b.get("/names"), "Every name handrail-ca can read in", "a certificate's own page says when it holds any")
+}
+
+// A subject of more common names than a page lists says how many there
+// are and that the list is not all of them (Codex, on this change).
+func TestManyCommonNamesAreCountedWhole(t *testing.T) {
+	var names []pkix.AttributeTypeAndValue
+	for i := range maxShownNames + 5 {
+		names = append(names, pkix.AttributeTypeAndValue{Type: asn1.ObjectIdentifier{2, 5, 4, 3}, Value: fmt.Sprintf("cn-%d", i)})
+	}
+	cert := &x509.Certificate{Subject: pkix.Name{Names: names}}
+	shown, total := commonNames(cert)
+	if total != maxShownNames+5 || len(shown) != maxShownNames || shown[0] != "cn-0" {
+		t.Errorf("commonNames: %d shown, %d in all", len(shown), total)
+	}
+	for _, one := range [][]pkix.AttributeTypeAndValue{nil, names[:1]} {
+		if shown, total := commonNames(&x509.Certificate{Subject: pkix.Name{Names: one}}); shown != nil || total != 0 {
+			t.Errorf("%d common names: %q, %d", len(one), shown, total)
+		}
+	}
+
+	// And the page, from a certificate the CA could have signed.
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(5153), Subject: pkix.Name{ExtraNames: names},
+		NotBefore: t0.Add(-time.Hour), NotAfter: t0.Add(24 * time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := newSite(t, "http://127.0.0.1:8080")
+	s.addRows(inventory.RawCertificate{Serial: "5153", DER: der, Data: []byte(`{"provisioner":{"id":"p1","name":"handrail","type":"JWK"}}`)})
+	page := signedIn(t, s).get("/certificates/5153")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page, fmt.Sprintf("The subject has %d common names", maxShownNames+5),
+		fmt.Sprintf("The first %d are", maxShownNames), "and 5 more, in the downloaded certificate")
+	if strings.Contains(page.Body.String(), "All of them are") {
+		t.Error("a list cut short is said to be all of them")
+	}
 }
 
 // The counting itself: every kind of GeneralName, and a SAN extension that

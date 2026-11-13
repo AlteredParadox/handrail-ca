@@ -75,7 +75,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{end}}
 </dl>
 {{if .CommonNames}}
-<p class="muted">The subject has {{len .CommonNames}} common names. handrail-ca shows, lists and searches only the last; all of them are: {{range $i, $n := .CommonNames}}{{if $i}}, {{end}}<span class="mono small">{{$n}}</span>{{end}}.</p>
+<p class="muted">The subject has {{.CommonNameCount}} common names. handrail-ca shows, lists and searches only the last, the common name above. {{if .MoreCommonNames}}The first {{len .CommonNames}} are{{else}}All of them are{{end}}: {{range $i, $n := .CommonNames}}{{if $i}}, {{end}}<span class="mono small">{{$n}}</span>{{end}}{{if .MoreCommonNames}}, and {{.MoreCommonNames}} more, in the downloaded certificate{{end}}.</p>
 {{end}}
 {{if .UnshownNames}}
 <p class="muted">The subject alternative names also hold {{range $i, $n := .UnshownNames}}{{if $i}}, {{end}}{{$n}}{{end}}, which handrail-ca does not show or search. The downloaded certificate has them (<span class="mono small">openssl x509 -text</span>).</p>

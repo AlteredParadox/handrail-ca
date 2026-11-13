@@ -62,6 +62,9 @@ type detailData struct {
 	// Go's parser does not hand over (unshown.go).
 	UnshownNames []string
 	CommonNames  []string
+	// CommonNameCount is how many common names there are in all, and
+	// MoreCommonNames how many of them CommonNames leaves out.
+	CommonNameCount, MoreCommonNames int
 
 	NotBefore, NotAfter string
 	Lifetime            string
@@ -360,7 +363,9 @@ func fillCertificate(data *detailData, cert *x509.Certificate, now time.Time) {
 		data.Issuer = cert.Issuer.String()
 	}
 	data.Names = nameGroups(cert)
-	data.UnshownNames, data.CommonNames = unshownNames(cert), commonNames(cert)
+	data.UnshownNames = unshownNames(cert)
+	data.CommonNames, data.CommonNameCount = commonNames(cert)
+	data.MoreCommonNames = data.CommonNameCount - len(data.CommonNames)
 
 	data.NotBefore, data.NotAfter = cert.NotBefore.UTC().Format(stamp), cert.NotAfter.UTC().Format(stamp)
 	total := cert.NotAfter.Sub(cert.NotBefore)

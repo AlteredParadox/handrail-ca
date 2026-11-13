@@ -102,19 +102,20 @@ func kindOf(name asn1.RawValue) [2]string {
 }
 
 // commonNames is every common name in the subject, in order, when there is
-// more than one; Go's parser keeps only the last of them.
-func commonNames(cert *x509.Certificate) []string {
-	var cns []string
+// more than one (Go's parser keeps only the last of them): the first
+// maxShownNames, and how many there are in all.
+func commonNames(cert *x509.Certificate) (shown []string, total int) {
 	for _, atv := range cert.Subject.Names {
-		if atv.Type.Equal(oidCommonName) {
-			cns = append(cns, fmt.Sprint(atv.Value))
+		if !atv.Type.Equal(oidCommonName) {
+			continue
+		}
+		total++
+		if len(shown) < maxShownNames {
+			shown = append(shown, fmt.Sprint(atv.Value))
 		}
 	}
-	if len(cns) < 2 {
-		return nil
+	if total < 2 {
+		return nil, 0
 	}
-	if len(cns) > maxShownNames {
-		cns = cns[:maxShownNames]
-	}
-	return cns
+	return shown, total
 }
