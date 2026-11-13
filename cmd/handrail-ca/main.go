@@ -42,6 +42,10 @@ import (
 	"handrail-ca/internal/web"
 )
 
+// program is the name the binary answers to: in -version and in the
+// usage text.
+const program = "handrail-ca"
+
 // version is stamped at build time by `make build`, the Dockerfile and the
 // release workflow via -ldflags "-X main.version=vX.Y.Z". Plain `go build`
 // reports "dev".
@@ -64,7 +68,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	if len(args) > 0 {
 		switch args[0] {
 		case "version", "--version", "-version":
-			fmt.Fprintln(stdout, "handrail-ca", version)
+			fmt.Fprintln(stdout, program, version)
 			return 0
 		case "healthcheck":
 			return healthcheck(args[1:], stderr)
@@ -245,7 +249,7 @@ type config struct {
 
 func parseConfig(args []string, stderr io.Writer) (config, int) {
 	var cfg config
-	fs := flag.NewFlagSet("handrail-ca", flag.ContinueOnError)
+	fs := flag.NewFlagSet(program, flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	fs.StringVar(&cfg.listen, "listen", envOr("HANDRAIL_LISTEN", defaultListen), "address to listen on (or set HANDRAIL_LISTEN)")
 	fs.StringVar(&cfg.dataDir, "data", os.Getenv("HANDRAIL_DATA"), "directory for handrail-ca's own store (or set HANDRAIL_DATA)")
@@ -424,7 +428,10 @@ func serve(ctx context.Context, ln net.Listener, handler http.Handler, log *slog
 			return 1
 		}
 	case <-ctx.Done():
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// ctx is cancelled by now, which is why we are here: the draining
+		// gets its values but not its cancellation, or it would be over
+		// before it began and requests in flight would be cut off.
+		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
 		defer cancel()
 		if err := srv.Shutdown(shutdown); err != nil {
 			log.Error("shutdown", "err", err)
