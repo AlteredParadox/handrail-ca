@@ -281,6 +281,7 @@ func (s *Store) scrub(ctx context.Context) {
 		return
 	}
 	_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	whileScrubbing()
 	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout.Milliseconds())); err != nil {
 		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
 	}
@@ -288,6 +289,10 @@ func (s *Store) scrub(ctx context.Context) {
 
 // scrubTimeout bounds scrub as a whole.
 const scrubTimeout = 5 * time.Second
+
+// whileScrubbing runs while the writer's busy timeout is set aside. It
+// does nothing; a test puts in its place what may happen at that moment.
+var whileScrubbing = func() {}
 
 // Ping reports whether the store can be read.
 func (s *Store) Ping(ctx context.Context) error {

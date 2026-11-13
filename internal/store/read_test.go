@@ -289,12 +289,13 @@ func TestWhatIsRemovedIsNotLeftInTheFiles(t *testing.T) {
 // in, and has to be back afterwards whatever becomes of the request that
 // caused it: without it every later write fails at once when another
 // process holds the lock, instead of waiting.
-func TestTheWritersBusyTimeoutSurvivesARequestThatWentAway(t *testing.T) {
+func TestTheWritersBusyTimeoutSurvivesARequestThatGoesAway(t *testing.T) {
 	s := newStore(t)
+	ctx := context.Background()
 	timeout := func() int64 {
 		t.Helper()
 		var ms int64
-		if err := s.db.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&ms); err != nil {
+		if err := s.db.QueryRowContext(ctx, "PRAGMA busy_timeout").Scan(&ms); err != nil {
 			t.Fatal(err)
 		}
 		return ms
@@ -303,25 +304,38 @@ func TestTheWritersBusyTimeoutSurvivesARequestThatWentAway(t *testing.T) {
 	if got := timeout(); got != want {
 		t.Fatalf("the writer starts with a busy timeout of %d ms, want %d", got, want)
 	}
-	gone, leave := context.WithCancel(context.Background())
-	leave()
-	s.scrub(gone)
-	if got := timeout(); got != want {
-		t.Errorf("after a scrub for a request that had gone away the busy timeout is %d ms, want %d", got, want)
-	}
-	// And through the calls that scrub: the change is made, and the
-	// writer is as it was.
-	ctx := context.Background()
 	if _, err := s.AddUser(ctx, "alice", "hash", RoleOperator, t0); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.SetNote(ctx, Note{Serial: "1234", Text: "a note", UpdatedAt: t0, UpdatedBy: "alice"}); err != nil {
+
+	// The request goes away at the worst moment: after the timeout was set
+	// aside and before it is put back.
+	request, leave := context.WithCancel(ctx)
+	saved := whileScrubbing
+	t.Cleanup(func() { whileScrubbing = saved })
+	left := false
+	// (The hook must not ask the store anything: the one connection for
+	// writing is in use at that moment, by what is being tested.)
+	whileScrubbing = func() {
+		leave()
+		left = true
+	}
+	if err := s.SetNote(request, Note{Serial: "1234", Text: "a note", UpdatedAt: t0, UpdatedBy: "alice"}); err != nil {
 		t.Fatal(err)
 	}
+	if !left {
+		t.Fatal("saving a note did not fold the log in: this test would prove nothing")
+	}
+	if got := timeout(); got != want {
+		t.Errorf("after a request that went away in the middle the busy timeout is %d ms, want %d", got, want)
+	}
+
+	// And with nothing going wrong it is as it was.
+	whileScrubbing = saved
 	if err := s.SetPassword(ctx, "alice", "another hash", t0); err != nil {
 		t.Fatal(err)
 	}
 	if got := timeout(); got != want {
-		t.Errorf("after a note and a change of password the busy timeout is %d ms, want %d", got, want)
+		t.Errorf("after a change of password the busy timeout is %d ms, want %d", got, want)
 	}
 }
