@@ -284,3 +284,44 @@ func TestWhatIsRemovedIsNotLeftInTheFiles(t *testing.T) {
 	}
 	holds("after their removal, with the store closed", false)
 }
+
+// The writer's busy timeout is set aside for the moment the log is folded
+// in, and has to be back afterwards whatever becomes of the request that
+// caused it: without it every later write fails at once when another
+// process holds the lock, instead of waiting.
+func TestTheWritersBusyTimeoutSurvivesARequestThatWentAway(t *testing.T) {
+	s := newStore(t)
+	timeout := func() int64 {
+		t.Helper()
+		var ms int64
+		if err := s.db.QueryRowContext(context.Background(), "PRAGMA busy_timeout").Scan(&ms); err != nil {
+			t.Fatal(err)
+		}
+		return ms
+	}
+	want := busyTimeout.Milliseconds()
+	if got := timeout(); got != want {
+		t.Fatalf("the writer starts with a busy timeout of %d ms, want %d", got, want)
+	}
+	gone, leave := context.WithCancel(context.Background())
+	leave()
+	s.scrub(gone)
+	if got := timeout(); got != want {
+		t.Errorf("after a scrub for a request that had gone away the busy timeout is %d ms, want %d", got, want)
+	}
+	// And through the calls that scrub: the change is made, and the
+	// writer is as it was.
+	ctx := context.Background()
+	if _, err := s.AddUser(ctx, "alice", "hash", RoleOperator, t0); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetNote(ctx, Note{Serial: "1234", Text: "a note", UpdatedAt: t0, UpdatedBy: "alice"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetPassword(ctx, "alice", "another hash", t0); err != nil {
+		t.Fatal(err)
+	}
+	if got := timeout(); got != want {
+		t.Errorf("after a note and a change of password the busy timeout is %d ms, want %d", got, want)
+	}
+}

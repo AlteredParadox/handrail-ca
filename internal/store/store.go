@@ -24,6 +24,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -258,7 +259,19 @@ func (s *Store) Close() error {
 // as they were until it is next folded in. It is tried once and not waited
 // for: a reader in the middle of something makes it fail, and the log is
 // folded in sooner or later anyway.
+//
+// "Not waited for" is the writer's own busy timeout set to nothing for the
+// one statement, and it has to be set back whatever happens: this is the
+// only connection there is for writing, and left without its timeout every
+// later write would fail at once whenever another process (a `user`
+// command) holds the lock, where it should wait. So none of this runs
+// under the caller's context, which a browser going away would end between
+// the two settings; and a connection that could not be given its timeout
+// back is thrown away, for the next one to be opened as every connection
+// is, with the timeout in place.
 func (s *Store) scrub(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scrubTimeout)
+	defer cancel()
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return
@@ -268,8 +281,13 @@ func (s *Store) scrub(ctx context.Context) {
 		return
 	}
 	_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
-	_, _ = conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout.Milliseconds()))
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout.Milliseconds())); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
 }
+
+// scrubTimeout bounds scrub as a whole.
+const scrubTimeout = 5 * time.Second
 
 // Ping reports whether the store can be read.
 func (s *Store) Ping(ctx context.Context) error {
