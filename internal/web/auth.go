@@ -644,6 +644,27 @@ func (t *touches) remember(h store.TokenHash, now time.Time) {
 	}
 }
 
+// remembered returns the uses remembered, for saving them.
+func (t *touches) remembered() map[store.TokenHash]time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make(map[store.TokenHash]time.Time, len(t.at))
+	for h, at := range t.at {
+		out[h] = at
+	}
+	return out
+}
+
+// forgetIf forgets the use of h remembered at at, unless a later one has
+// been remembered since.
+func (t *touches) forgetIf(h store.TokenHash, at time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.at[h].Equal(at) {
+		delete(t.at, h)
+	}
+}
+
 func (t *touches) forget(h store.TokenHash) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
@@ -687,61 +708,47 @@ func (s *server) record(r *http.Request, e store.Event) {
 func (s *server) appendHistory(ctx context.Context, e store.Event) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	if err := s.opts.Store.AppendHistory(ctx, e); err != nil {
-		s.missing.add(e.At)
+	err := s.opts.Store.AppendHistory(ctx, e)
+	// Counting a lost row, writing the row about a gap and taking the
+	// alarm down happen under one lock, so that two writers cannot report
+	// the same gap, nor one take the alarm down while another counts a
+	// row it lost.
+	m := &s.missing
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err != nil {
+		if m.n == 0 {
+			m.since = e.At
+		}
+		m.n++
 		s.historyBroken.Store(true)
 		s.log.Error("history is NOT being recorded", "err", err)
 		return
 	}
-	n, since := s.missing.count()
-	if n == 0 {
+	if m.n == 0 {
 		s.historyBroken.Store(false)
 		return
 	}
 	gap := store.Event{
 		At: s.opts.Now(), Actor: store.ActorHandrail, Action: store.ActionHistoryGap, Outcome: store.OutcomeFailed,
-		Detail: fmt.Sprintf("%d history rows could not be written since %s; the log has them", n, since.UTC().Format(time.RFC3339)),
+		Detail: fmt.Sprintf("%d history rows could not be written since %s; the log has them", m.n, m.since.UTC().Format(time.RFC3339)),
 	}
 	if err := s.opts.Store.AppendHistory(ctx, gap); err != nil {
 		s.log.Error("history is NOT being recorded", "err", err)
 		return
 	}
 	s.log.Warn("audit", "actor", gap.Actor, "action", gap.Action, "outcome", gap.Outcome, "detail", gap.Detail)
-	if s.missing.settle(n) {
-		s.historyBroken.Store(false)
-	}
+	m.n = 0
+	s.historyBroken.Store(false)
 }
 
 // missingRows counts the history rows that could not be written and have
-// not yet been accounted for by a gap row.
+// not yet been accounted for by a gap row. appendHistory holds mu for all
+// of it.
 type missingRows struct {
 	mu    sync.Mutex
 	n     int
 	since time.Time
-}
-
-func (m *missingRows) add(at time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.n == 0 {
-		m.since = at
-	}
-	m.n++
-}
-
-func (m *missingRows) count() (int, time.Time) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.n, m.since
-}
-
-// settle takes away the n rows a gap row has accounted for, and reports
-// whether none is left: rows lost meanwhile wait for the next gap row.
-func (m *missingRows) settle(n int) bool {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.n -= n
-	return m.n == 0
 }
 
 // maxLateRows bounds how many history rows may be waiting to be written

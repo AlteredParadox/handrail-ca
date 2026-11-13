@@ -191,6 +191,24 @@ type Site struct {
 	server *server
 }
 
+// SaveSessionUses writes to the store the uses of sessions it could not
+// record when they happened (see touches), and forgets those it wrote. A
+// sweep of idle sessions goes by the store's record of their last use, so
+// it is to run only after this has worked: otherwise, once a store that
+// could not be written to can be again, a sweep would end sessions that
+// are in use. Ending a session and its expiry are not affected: a session
+// that is no longer in the store is not written back.
+func (h *Site) SaveSessionUses(ctx context.Context) error {
+	s := h.server
+	for hash, at := range s.touches.remembered() {
+		if err := s.opts.Store.TouchSession(ctx, hash, at); err != nil {
+			return err
+		}
+		s.touches.forgetIf(hash, at)
+	}
+	return nil
+}
+
 // Settle waits, for no longer than limit, until the history rows that are
 // written after their answer (see recordLater) have been written. It is
 // for the end of the process, once no request is being served any more.

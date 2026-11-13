@@ -175,7 +175,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		log.Warn("no -trusted-proxy (HANDRAIL_TRUSTED_PROXIES) is set: visitors cannot be told apart, " +
 			"so sign-in attempts are limited per user name only and the history records the proxy's address")
 	}
-	go sweepSessions(ctx, st, log)
+	go sweepSessions(ctx, st, handler.SaveSessionUses, log)
 	go inv.Run(ctx, web.InventoryRefresh, inventoryLog(log))
 	if cfg.readOnly {
 		log.Info("read-only: no provisioner is configured, so certificates cannot be issued or revoked from here")
@@ -390,8 +390,11 @@ func readPasswordFile(path string) (string, error) {
 
 // sweepSessions removes ended sessions from the store now and then. They
 // are refused whether or not they have been swept; this only keeps the
-// table small.
-func sweepSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
+// table small. saveUses first writes the uses of sessions the store could
+// not record when they happened (web.Site.SaveSessionUses); until it can,
+// idle sessions are not swept, since the store's record of their last use
+// is behind.
+func sweepSessions(ctx context.Context, st *store.Store, saveUses func(context.Context) error, log *slog.Logger) {
 	ticker := time.NewTicker(10 * time.Minute)
 	defer ticker.Stop()
 	for {
@@ -399,14 +402,23 @@ func sweepSessions(ctx context.Context, st *store.Store, log *slog.Logger) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			if _, err := st.DeleteExpiredSessions(ctx, now, now.Add(-web.SessionIdle)); err != nil && ctx.Err() == nil {
-				log.Warn("sweeping ended sessions", "err", err)
-			}
-			// And the browsers nobody has signed in from for a long time.
-			if _, err := st.DeleteUnusedDevices(ctx, now.Add(-store.DeviceLifetime)); err != nil && ctx.Err() == nil {
-				log.Warn("sweeping devices that are no longer used", "err", err)
-			}
+			sweepOnce(ctx, st, saveUses, now, log)
 		}
+	}
+}
+
+// sweepOnce is one round of sweepSessions.
+func sweepOnce(ctx context.Context, st *store.Store, saveUses func(context.Context) error, now time.Time, log *slog.Logger) {
+	if err := saveUses(ctx); err != nil {
+		if ctx.Err() == nil {
+			log.Warn("not sweeping idle sessions: the uses of sessions could not be saved", "err", err)
+		}
+	} else if _, err := st.DeleteExpiredSessions(ctx, now, now.Add(-web.SessionIdle)); err != nil && ctx.Err() == nil {
+		log.Warn("sweeping ended sessions", "err", err)
+	}
+	// And the browsers nobody has signed in from for a long time.
+	if _, err := st.DeleteUnusedDevices(ctx, now.Add(-store.DeviceLifetime)); err != nil && ctx.Err() == nil {
+		log.Warn("sweeping devices that are no longer used", "err", err)
 	}
 }
 

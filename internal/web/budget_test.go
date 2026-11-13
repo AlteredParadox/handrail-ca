@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -244,5 +245,97 @@ func TestTheAlarmStaysUntilTheGapIsWritten(t *testing.T) {
 	}
 	if n := countActions(s.history())[store.ActionHistoryGap]; n != 1 {
 		t.Errorf("%d gap rows, want 1", n)
+	}
+}
+
+// Two writers that work at once after rows were lost report the gap once,
+// and the count of rows missing does not go below what was lost.
+func TestAGapIsReportedOnceByWritersAtOnce(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	boom := errors.New("database or disk is full")
+	ev := store.Event{At: s.clock.Now(), Actor: "alice", Action: store.ActionNote, Outcome: store.OutcomeOK}
+	s.store.historyErr.Store(&boom)
+	for range 3 {
+		s.server.appendHistory(t.Context(), ev)
+	}
+	s.store.historyErr.Store(nil)
+
+	// The first gap row is held until the second writer has written its
+	// own row and come to the gap.
+	release := make(chan struct{})
+	entered := make(chan struct{}, 2)
+	s.store.beforeGap = func() {
+		entered <- struct{}{}
+		<-release
+	}
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.server.appendHistory(t.Context(), ev)
+		}()
+	}
+	<-entered
+	time.Sleep(100 * time.Millisecond) // the other writer's row is in; it waits for the gap
+	close(release)
+	wg.Wait()
+	s.store.beforeGap = nil
+
+	n := countActions(s.history())[store.ActionHistoryGap]
+	if n != 1 {
+		t.Fatalf("%d gap rows for one gap, want 1", n)
+	}
+	if s.server.missing.n != 0 || s.server.historyBroken.Load() {
+		t.Fatalf("after the gap was reported: %d missing, alarm %v", s.server.missing.n, s.server.historyBroken.Load())
+	}
+	// One more lost row is one more gap, and the alarm is up for it.
+	s.store.historyErr.Store(&boom)
+	s.server.appendHistory(t.Context(), ev)
+	s.store.historyErr.Store(nil)
+	if !s.server.historyBroken.Load() {
+		t.Fatal("a row lost after the gap was reported left the alarm down")
+	}
+	s.server.appendHistory(t.Context(), ev)
+	if got := s.history()[0]; got.Action != store.ActionHistoryGap || !strings.HasPrefix(got.Detail, "1 history rows") {
+		t.Errorf("the second gap: newest row %+v", got)
+	}
+}
+
+// fred's case: a write outage of over an hour, a session in use all the
+// while, the store writable again, and the sweep running before the
+// session's next request. The session goes on.
+func TestASweepAfterAnOutageLeavesASessionInUse(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	full := errors.New("database or disk is full")
+	s.store.touchErr.Store(&full)
+	for range 3 {
+		s.clock.advance(sessionIdle - time.Minute)
+		wantStatus(t, b.get("/status"), http.StatusOK)
+	}
+	s.store.touchErr.Store(nil)
+
+	site := &Site{server: s.server}
+	if err := site.SaveSessionUses(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	now := s.clock.Now()
+	if _, err := s.store.Store.DeleteExpiredSessions(t.Context(), now, now.Add(-sessionIdle)); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, b.get("/status"), http.StatusOK)
+	if n := len(s.server.touches.at); n != 0 {
+		t.Errorf("%d uses still remembered after they were saved", n)
+	}
+
+	// While the uses cannot be saved, SaveSessionUses says so (and the
+	// sweep is not run: TestSweepWaitsForTheUsesOfSessionsToBeSaved).
+	s.store.touchErr.Store(&full)
+	s.clock.advance(sessionIdle - time.Minute)
+	wantStatus(t, b.get("/status"), http.StatusOK)
+	if err := site.SaveSessionUses(t.Context()); !errors.Is(err, full) {
+		t.Errorf("saving uses on a full store: %v", err)
 	}
 }

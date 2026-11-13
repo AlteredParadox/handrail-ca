@@ -324,6 +324,9 @@ type brokenStore struct {
 	writesLeft  atomic.Int32
 	// beforeDelete runs as a session is about to be ended.
 	beforeDelete func(store.TokenHash)
+	// beforeGap, when set, runs as a row about a gap in the history is
+	// about to be written.
+	beforeGap func()
 	// appendGate, when set, holds every history write until it is closed.
 	appendGate atomic.Pointer[chan struct{}]
 	// beforeCreate runs between the password check and the session being
@@ -380,6 +383,9 @@ func (b *brokenStore) AppendHistory(ctx context.Context, e store.Event) error {
 	}
 	if err := b.historyErr.Load(); err != nil {
 		return *err
+	}
+	if e.Action == store.ActionHistoryGap && b.beforeGap != nil {
+		b.beforeGap()
 	}
 	if b.limitWrites.Load() && b.writesLeft.Add(-1) < 0 {
 		return errors.New("database or disk is full")
