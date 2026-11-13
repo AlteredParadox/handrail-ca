@@ -175,6 +175,13 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		log.Warn("no -trusted-proxy (HANDRAIL_TRUSTED_PROXIES) is set: visitors cannot be told apart, " +
 			"so sign-in attempts are limited per user name only and the history records the proxy's address")
 	}
+	if publicURL.Scheme == "http" {
+		// Browsers keep cookies for a host name, not for a port.
+		log.Warn("the public URL is plain http on a loopback name: a browser sends this site's cookies, the session " +
+			"cookie included, to every other web service on that name, whatever its port, and that cookie alone is the " +
+			"session. Use it only where all of them are trusted as much as an operator; otherwise put a reverse proxy " +
+			"with TLS and a host name of its own in front (README, \"Serving plain HTTP\")")
+	}
 	go sweepSessions(ctx, st, log)
 	go inv.Run(ctx, web.InventoryRefresh, inventoryLog(log))
 	if cfg.readOnly {

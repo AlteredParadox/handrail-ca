@@ -587,6 +587,15 @@ As built in milestone 1:
   `http://` public URL is refused unless its host is a loopback name:
   handrail-ca will not send passwords and session cookies across a network
   in the clear.
+  On loopback the clear text stays on the machine, but the cookies do not
+  stay with handrail-ca: a browser sends a host name's cookies to every
+  port on it, and the session cookie alone is the session (found by both
+  passes of the security review, 2026-11-13). The plain-HTTP address is
+  therefore for a machine whose other loopback services are trusted as
+  much as an operator. handrail-ca now says so in its log at start and the
+  README says so where the mode comes up; nothing in the code changes.
+  Binding a session to more than its cookie, or asking for the plain-HTTP
+  mode by name, was not done before the first release.
 - Sessions last twelve hours, or one hour unused. The cookie holds a random
   token; the store holds its SHA-256. Over HTTPS at the root of a host the
   cookie carries the `__Host-` prefix.
@@ -670,6 +679,13 @@ As built in milestone 1:
   as `Host` and every page is a 421; the log explains that once per name
   asked for, and the README carries the configuration that works. Not
   tried: visitors from another machine, or any proxy other than nginx.
+- A listed address is believed whoever connects from it, and on the
+  proxy's machine that is every process there: one of them can write any
+  address into the history for what it does, and use up a chosen visitor
+  address's sign-in attempts (found by both passes of the security
+  review, 2026-11-13). The README now says so. Not done before the first
+  release: a secret only the proxy sends, without which a listed address
+  is treated as unlisted.
 - A sign-in for a name that is not an account is recorded as "(unknown
   user)", never with what was typed: people type passwords into that field.
 - History rows are never deleted, so what someone who is not signed in can
