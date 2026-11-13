@@ -96,13 +96,13 @@ func serverArgs(t *testing.T, listen string, more ...string) []string {
 	t.Helper()
 	clearEnv(t)
 	return append([]string{"-listen", listen, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-fingerprint", testFingerprint, "-db-url-file", dbURLFile(t),
-		"-provisioner", "handrail", "-provisioner-password-file", passwordFile(t)}, more...)
+		"-provisioner", "handrail", "-provisioner-password-file", passwordFile(t), "-plain-http"}, more...)
 }
 
 func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, name := range []string{"HANDRAIL_LISTEN", "HANDRAIL_DATA", "HANDRAIL_CA_URL", "HANDRAIL_CA_FINGERPRINT", "HANDRAIL_DB_URL_FILE", "HANDRAIL_PUBLIC_URL", "HANDRAIL_TRUSTED_PROXIES",
-		"HANDRAIL_PROVISIONER", "HANDRAIL_PROVISIONER_PASSWORD_FILE", "HANDRAIL_READ_ONLY", "HANDRAIL_NO_KEY_GENERATION"} {
+		"HANDRAIL_PROVISIONER", "HANDRAIL_PROVISIONER_PASSWORD_FILE", "HANDRAIL_READ_ONLY", "HANDRAIL_NO_KEY_GENERATION", "HANDRAIL_PLAIN_HTTP"} {
 		t.Setenv(name, "")
 	}
 }
@@ -273,6 +273,7 @@ func TestRunRefusesAnIncompleteConfiguration(t *testing.T) {
 		{"CA over plain HTTP", []string{"-data", data, "-ca-url", "http://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-read-only"}, 1, "must start with https://"},
 		{"bad public URL", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-read-only", "-public-url", "handrail.example"}, 1, "-public-url"},
 		{"plain HTTP public URL beyond this machine", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-read-only", "-public-url", "http://handrail.example"}, 1, "only accepted for a loopback address"},
+		{"plain HTTP on loopback not asked for", []string{"-listen", "127.0.0.1:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-read-only"}, 1, "Set -plain-http (HANDRAIL_PLAIN_HTTP=1)"},
 		{"beyond loopback without a public URL", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-read-only"}, 1, "-public-url (HANDRAIL_PUBLIC_URL) is required"},
 		{"beyond loopback without an account", []string{"-listen", "0.0.0.0:0", "-data", data, "-ca-url", "https://ca.invalid", "-ca-fingerprint", root, "-db-url-file", db, "-read-only", "-public-url", "https://handrail.example"}, 1, "no accounts yet"},
 	}
@@ -295,20 +296,25 @@ func TestResolvePublicURL(t *testing.T) {
 		name, configured string
 		addr             net.Addr
 		want             string
+		plainHTTP        bool
 	}{
-		{"loopback default", "", loopback, "http://127.0.0.1:8080"},
-		{"IPv6 loopback default", "", v6, "http://[::1]:8080"},
-		{"configured on loopback", "https://handrail.example/ca/", loopback, "https://handrail.example/ca/"},
-		{"configured beyond loopback", "https://handrail.example", anywhere, "https://handrail.example"},
-		{"required beyond loopback", "", anywhere, ""},
-		{"no scheme", "handrail.example", anywhere, ""},
-		{"with credentials", "https://u:p@handrail.example", anywhere, ""},
-		{"with query", "https://handrail.example/?a=b", anywhere, ""},
-		{"unparseable", "https://handrail.example:port", anywhere, ""},
+		{"loopback default", "", loopback, "http://127.0.0.1:8080", true},
+		{"IPv6 loopback default", "", v6, "http://[::1]:8080", true},
+		// Plain HTTP on loopback has to be asked for, the default included.
+		{"loopback default, not asked for", "", loopback, "", false},
+		{"plain HTTP on localhost, not asked for", "http://localhost:8080", loopback, "", false},
+		{"plain HTTP on localhost", "http://localhost:8080", loopback, "http://localhost:8080", true},
+		{"configured on loopback", "https://handrail.example/ca/", loopback, "https://handrail.example/ca/", false},
+		{"configured beyond loopback", "https://handrail.example", anywhere, "https://handrail.example", false},
+		{"required beyond loopback", "", anywhere, "", false},
+		{"no scheme", "handrail.example", anywhere, "", false},
+		{"with credentials", "https://u:p@handrail.example", anywhere, "", false},
+		{"with query", "https://handrail.example/?a=b", anywhere, "", false},
+		{"unparseable", "https://handrail.example:port", anywhere, "", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			u, err := config{publicURL: tt.configured}.resolvePublicURL(tt.addr)
+			u, err := config{publicURL: tt.configured, plainHTTP: tt.plainHTTP}.resolvePublicURL(tt.addr)
 			if tt.want == "" {
 				if err == nil {
 					t.Fatalf("accepted, as %v", u)
@@ -693,7 +699,7 @@ func TestRunReadOnly(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			addr := freeAddr(t)
 			clearEnv(t)
-			args := set(t, []string{"-listen", addr, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-fingerprint", testFingerprint, "-db-url-file", dbURLFile(t)})
+			args := set(t, []string{"-listen", addr, "-data", t.TempDir(), "-ca-url", "https://ca.invalid:9000", "-ca-fingerprint", testFingerprint, "-db-url-file", dbURLFile(t), "-plain-http"})
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			var errOut syncBuffer
@@ -739,7 +745,7 @@ func TestEnvBool(t *testing.T) {
 // value is not understood. Read as "off", a misspelt switch would leave
 // operators able to do what its writer meant to forbid, without a word.
 func TestAMisspeltSwitchStopsTheStart(t *testing.T) {
-	for _, name := range []string{"HANDRAIL_READ_ONLY", "HANDRAIL_NO_KEY_GENERATION"} {
+	for _, name := range []string{"HANDRAIL_READ_ONLY", "HANDRAIL_NO_KEY_GENERATION", "HANDRAIL_PLAIN_HTTP"} {
 		for _, value := range []string{"enabled", "y", `"1"`, "1 # view only"} {
 			t.Run(name+"="+value, func(t *testing.T) {
 				t.Setenv(name, value)
@@ -758,10 +764,11 @@ func TestAMisspeltSwitchStopsTheStart(t *testing.T) {
 	for value, want := range map[string]bool{"1": true, "0": false, "": false} {
 		t.Setenv("HANDRAIL_NO_KEY_GENERATION", value)
 		t.Setenv("HANDRAIL_READ_ONLY", value)
+		t.Setenv("HANDRAIL_PLAIN_HTTP", value)
 		var errOut bytes.Buffer
 		cfg, _ := parseConfig([]string{"-data", t.TempDir()}, &errOut)
-		if cfg.noKeyGeneration != want || cfg.readOnly != want || strings.Contains(errOut.String(), "not understood") {
-			t.Errorf("with %q: read-only %v, no key generation %v: %s", value, cfg.readOnly, cfg.noKeyGeneration, errOut.String())
+		if cfg.noKeyGeneration != want || cfg.readOnly != want || cfg.plainHTTP != want || strings.Contains(errOut.String(), "not understood") {
+			t.Errorf("with %q: read-only %v, no key generation %v, plain HTTP %v: %s", value, cfg.readOnly, cfg.noKeyGeneration, cfg.plainHTTP, errOut.String())
 		}
 	}
 }

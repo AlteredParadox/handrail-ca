@@ -58,8 +58,12 @@ export HANDRAIL_PROVISIONER=handrail
 export HANDRAIL_PROVISIONER_PASSWORD_FILE=/etc/handrail-ca/provisioner_password
 
 ./handrail-ca user add -role operator alice   # asks for a password
-./handrail-ca                                 # serves http://127.0.0.1:8080
+./handrail-ca -plain-http                     # serves http://127.0.0.1:8080
 ```
+
+`-plain-http` is needed for that plain `http://` address, and only for it;
+read [Serving plain HTTP](#serving-plain-http-and-other-services-on-the-machine)
+before you use it. Behind a reverse proxy with TLS it is not needed.
 
 | Flag | Environment | |
 |---|---|---|
@@ -71,14 +75,15 @@ export HANDRAIL_PROVISIONER_PASSWORD_FILE=/etc/handrail-ca/provisioner_password
 | `-provisioner-password-file` | `HANDRAIL_PROVISIONER_PASSWORD_FILE` | File holding that provisioner's password. handrail-ca fetches the encrypted key from the CA, opens it with this password and keeps it in memory only. Keep the file readable by handrail-ca's user alone. |
 | `-read-only` | `HANDRAIL_READ_ONLY=1` | View only: no provisioner is used, and nothing can be issued or revoked. One of this and the two settings above is required; giving both is refused. |
 | `-no-key-generation` | `HANDRAIL_NO_KEY_GENERATION=1` | Do not offer to generate private keys. Certificates are then issued for pasted certificate signing requests only. |
+| `-plain-http` | `HANDRAIL_PLAIN_HTTP=1` | Allow a plain `http://` public URL on `localhost`, `127.0.0.1` or `::1`, the default when listening on loopback. Without it handrail-ca refuses to start on such an address (see [Serving plain HTTP](#serving-plain-http-and-other-services-on-the-machine)). Not needed behind a proxy with TLS. |
 | `-listen` | `HANDRAIL_LISTEN` | Listen address; `127.0.0.1:8080` unless set. |
 | `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`, and then every other web service on that name gets handrail-ca's cookies (see [Serving](#serving-plain-http-and-other-services-on-the-machine) below). |
 | `-trusted-proxy` | `HANDRAIL_TRUSTED_PROXIES` | Addresses or CIDR ranges of the reverse proxies in front, comma-separated. Set it whenever there is one. |
 
-The two switches read `1`, `true`, `yes` or `on` as on, and `0`, `false`,
+The three switches read `1`, `true`, `yes` or `on` as on, and `0`, `false`,
 `no`, `off` or nothing as off. Anything else stops the start with a
-message naming the variable: a switch that takes something away is not
-read as off because it was misspelt.
+message naming the variable: a switch is not read as off, or on, because
+it was misspelt.
 
 The provisioner's key is opened when handrail-ca starts, and tried again
 every thirty seconds until it opens: a CA that is down, a provisioner not
@@ -249,8 +254,8 @@ operator, or keep a browser profile for handrail-ca alone; otherwise give
 it a host name of its own behind a reverse proxy with TLS, where the
 cookies are `Secure` and `__Host-` and go to that name only. Sign out when
 you are done: that ends the session on the server, wherever its cookie has
-gone. handrail-ca says this in its log when it starts on a plain-HTTP
-address.
+gone. handrail-ca starts on a plain-HTTP address only with `-plain-http`
+(`HANDRAIL_PLAIN_HTTP=1`), and then says this in its log.
 
 The proxy has to do two things besides TLS: pass the visitor's `Host`
 header through unchanged, and set `X-Forwarded-For`. handrail-ca answers
@@ -471,6 +476,7 @@ docker run -d -p 127.0.0.1:8080:8080 \
   -e HANDRAIL_CA_URL=https://ca.internal.example \
   -e HANDRAIL_CA_FINGERPRINT=<the root's SHA-256 fingerprint> \
   -e HANDRAIL_PUBLIC_URL=http://127.0.0.1:8080 \
+  -e HANDRAIL_PLAIN_HTTP=1 \
   handrail-ca
 ```
 

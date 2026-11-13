@@ -135,7 +135,7 @@ jobs:
             -e HANDRAIL_PROVISIONER_PASSWORD_FILE=/run/secrets/handrail_provisioner_password \
             -e HANDRAIL_CA_URL=https://ca.invalid:9000 \
             -e HANDRAIL_CA_FINGERPRINT=0000000000000000000000000000000000000000000000000000000000000000 \
-            -e HANDRAIL_PUBLIC_URL=http://127.0.0.1:8080 handrail-ca:ci
+            -e HANDRAIL_PUBLIC_URL=http://127.0.0.1:8080 -e HANDRAIL_PLAIN_HTTP=1 handrail-ca:ci
           for i in $(seq 1 30); do
             if out=$(curl -sf http://127.0.0.1:8080/healthz); then break; fi
             sleep 1

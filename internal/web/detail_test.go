@@ -570,3 +570,36 @@ func TestCertificateWords(t *testing.T) {
 		t.Errorf("issuer %q, authority %q", data.Issuer, data.Authority)
 	}
 }
+
+// N-19 of the security review: a certificate with thousands of names, as
+// a client of the provisioner can have the CA issue, is more than 64 KiB
+// of DER. Its page shows it and it can be revoked from there. The cap on
+// what is read from the database is the query's, tested against the
+// development CA (TestIntegrationReadsALargeCertificate); this is the
+// pages, given such a certificate.
+func TestALargeCertificateHasItsPageAndCanBeRevoked(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 3200)
+	for i := range names {
+		names[i] = fmt.Sprintf("n%d-large.internal.example", i)
+	}
+	tmpl := &x509.Certificate{SerialNumber: big.NewInt(4242), Subject: pkix.Name{CommonName: "large.internal.example"}, DNSNames: names,
+		NotBefore: t0.Add(-time.Hour), NotAfter: t0.Add(24 * time.Hour)}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(der) <= 64<<10 {
+		t.Fatalf("the fixture is %d bytes, not over 64 KiB", len(der))
+	}
+	s.addRows(inventory.RawCertificate{Serial: "4242", DER: der, Data: []byte(`{"provisioner":{"id":"p1","name":"handrail","type":"JWK"}}`)})
+	b := signedIn(t, s)
+	page := b.get("/certificates/4242")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page, "large.internal.example", `href="/certificates/4242/revoke"`)
+	wantStatus(t, b.get("/certificates/4242/revoke"), http.StatusOK)
+}

@@ -440,6 +440,13 @@ Changed after the security review before the first release (2026-11-13):
   presses waiting together are answered by one read, begun after each of
   them was made, so a press still sees everything stored before it. The
   reads after an issue or a revocation are not held back.
+- A certificate's DER was taken up to 64 KiB, and step-ca puts in as many
+  names as a client of the provisioner asks for: one with 3,200 names,
+  about 70 KiB, issued on the development CA, was a row that is not a
+  certificate, which handrail-ca could not revoke (N-19). The cap is now
+  256 KiB; handrail-ca itself still asks for 100 names at most. A batch of
+  500 rows that large would be 128 MiB while it is read, against 32 MiB
+  before. The development CA's tests issue such a certificate and read it.
 - The size of a row's key was not bounded, and a key is kept in memory as
   the row's identity. A key that is no serial number is still kept, and
   its row shown as unreadable, up to 1 KiB; a longer one is not transferred
@@ -705,9 +712,12 @@ As built in milestone 1:
   passes of the security review, 2026-11-13). The plain-HTTP address is
   therefore for a machine whose other loopback services are trusted as
   much as an operator. handrail-ca now says so in its log at start and the
-  README says so where the mode comes up; nothing in the code changes.
-  Binding a session to more than its cookie, or asking for the plain-HTTP
-  mode by name, was not done before the first release.
+  README says so where the mode comes up. And the mode has to be asked for
+  by name (owner's decision, 2026-11-13): a plain-HTTP public URL on a
+  loopback name, the default one included, starts only with `-plain-http`
+  (`HANDRAIL_PLAIN_HTTP=1`); without it the start is refused with a message
+  saying why. Binding a session to more than its cookie was not done
+  before the first release.
 - Sessions last twelve hours, or one hour unused. The cookie holds a random
   token; the store holds its SHA-256. Over HTTPS at the root of a host the
   cookie carries the `__Host-` prefix.

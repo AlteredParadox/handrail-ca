@@ -57,6 +57,30 @@ issue_to_revoke() {
 	fi
 	printf '%s' "$serial"
 }
+# A certificate with 3,200 names, as another client of the provisioner can
+# have the CA issue (handrail-ca asks for 100 at most): more than 64 KiB of
+# DER, which the inventory must still read as a certificate. Its names sort
+# after every other: the names page shows the first 200 of a domain, and
+# the page tests look for the seed's names there.
+issue_large() {
+	local serial
+	serial=$(docker compose exec -T ca bash -c '
+		set -euo pipefail
+		work=$(mktemp -d) && cd "$work"
+		tag="zz-large$RANDOM$RANDOM"
+		sans=()
+		for i in $(seq 1 3200); do sans+=(--san "$tag-n$i.handrail.test"); done
+		step ca certificate "$tag.handrail.test" t.crt t.key --provisioner handrail \
+			--provisioner-password-file /run/secrets/handrail_provisioner_password --not-after 1h "${sans[@]}" >/dev/null 2>&1
+		step certificate inspect t.crt --format json | jq -r .serial_number
+		rm -rf "$work"')
+	if [[ ! "$serial" =~ ^[0-9]+$ ]]; then
+		echo "test: could not issue the large certificate" >&2
+		exit 1
+	fi
+	printf '%s' "$serial"
+}
+large_serial=$(issue_large)
 revoke_serial=$(issue_to_revoke)
 revoke_serial_pages=$(issue_to_revoke)
 
@@ -65,6 +89,7 @@ HANDRAIL_DEV_CA_URL=https://localhost:19000 \
 	HANDRAIL_DEV_CA_FINGERPRINT="$fingerprint" \
 	HANDRAIL_DEV_PROVISIONER_PASSWORD_FILE="$(pwd)/deploy/dev/.secrets/handrail_provisioner_password" \
 	HANDRAIL_DEV_REVOKE_SERIAL="$revoke_serial" \
+	HANDRAIL_DEV_LARGE_SERIAL="$large_serial" \
 	HANDRAIL_DEV_REVOKE_SERIAL_PAGES="$revoke_serial_pages" \
 	HANDRAIL_DEV_DB_URL_FILE="$db_url_file" \
 	HANDRAIL_DEV_DB_OWNER_URL_FILE="$owner_url_file" \

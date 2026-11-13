@@ -330,3 +330,37 @@ func TestIntegrationKeysPastTheBoundAreNotTransferred(t *testing.T) {
 		t.Errorf("a certificate with a key of %d bytes: %v", len(long), err)
 	}
 }
+
+// N-19 of the security review: the CA issues a certificate with as many
+// names as a client of the provisioner asks for. One with 3,200 names
+// (test.sh) is more than 64 KiB of DER, and was shown as a row that is not
+// a certificate, with no way to revoke it from handrail-ca. It is read as
+// a certificate, and can be shown in full.
+func TestIntegrationReadsALargeCertificate(t *testing.T) {
+	serial := os.Getenv("HANDRAIL_DEV_LARGE_SERIAL")
+	if serial == "" {
+		t.Skip("no large certificate: run `make dev-test`")
+	}
+	p := devDatabase(t)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	inv := New(p)
+	if err := inv.Refresh(ctx); err != nil {
+		t.Fatal(err)
+	}
+	c := inv.Snapshot().Certificate(serial)
+	if c == nil || c.Problem != "" {
+		t.Fatalf("the certificate with 3,200 names: %+v", c)
+	}
+	der, err := inv.DER(ctx, serial)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil || len(cert.DNSNames) != 3200 {
+		t.Fatalf("its DER: %d names, %v", len(cert.DNSNames), err)
+	}
+	if len(der) <= 64<<10 || len(der) > maxDER {
+		t.Errorf("its DER is %d bytes: want it over 64 KiB, the old cap, and within %d", len(der), maxDER)
+	}
+}
