@@ -154,8 +154,6 @@ type server struct {
 	hash      func(pw string) (string, error)
 	status    *statusCache
 	strangers strangerBudget
-	// builds bounds the pages built from the whole inventory.
-	builds *buildGate
 
 	// Things already warned about once: peers that are not listed
 	// proxies (see clientAddr), and host names requests were refused for.
@@ -174,6 +172,9 @@ type server struct {
 	// that must not be taken twice are keyed with it, so that one from
 	// before a restart is not taken at all.
 	formKey []byte
+
+	// builds bounds the pages built from the whole inventory.
+	builds *buildGate
 }
 
 // New returns the handler for the whole site.
@@ -223,6 +224,7 @@ func build(opts Options) (*server, http.Handler, error) {
 		return nil, nil, err
 	}
 	s := &server{
+		builds:    newBuildGate(),
 		formKey:   formKey,
 		opts:      opts,
 		base:      strings.TrimRight(u.Path, "/"),
@@ -236,7 +238,6 @@ func build(opts Options) (*server, http.Handler, error) {
 		dummyHash: dummy,
 		hash:      password.Hash,
 		status:    &statusCache{},
-		builds:    newBuildGate(),
 	}
 
 	static, err := fs.Sub(staticFS, "static")

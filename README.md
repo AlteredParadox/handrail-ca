@@ -308,6 +308,11 @@ Accounts are kept in the store and managed from the command line on the
 host. The one thing an account does for itself in the browser is change
 its own password, on the page behind its name in the top bar.
 
+A link to handrail-ca from a page on another site, or on another host name
+or port of the same site, lands on the sign-in page even when you are
+signed in: requests that other pages start are answered as a stranger's.
+Your session is still there for an address you type or a bookmark.
+
 ```sh
 ./handrail-ca user add -role operator alice  # asks for a password, typed unseen
 ./handrail-ca user add -generate bob         # viewer; generates one, prints it once
@@ -329,10 +334,6 @@ the current password, and signs the account out everywhere else.
 
 A viewer reads; an operator will also issue and revoke. Flags come before
 the user name. Sessions end after an hour unused or twelve hours in all.
-A link to handrail-ca from a page on another site, or on another host name
-or port of the same site, lands on the sign-in page even when you are
-signed in: requests that other pages start are answered as a stranger's.
-Your session is still there for an address you type or a bookmark.
 Each user name, and each visitor's address where it is known, gets five
 sign-in attempts in five minutes; a successful sign-in does not count.
 
