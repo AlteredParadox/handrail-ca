@@ -23,6 +23,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"handrail-ca/internal/inventory"
@@ -35,6 +36,11 @@ const (
 	maxSearch = 200
 	// refreshTimeout bounds a refresh asked for from the page.
 	refreshTimeout = 20 * time.Second
+	// refreshGap spaces the reads asked for from the page: one begins at
+	// least this long after the last one ended, so that however many
+	// presses of the button, from however many people, the CA's database
+	// is read on request every few seconds at most.
+	refreshGap = 5 * time.Second
 )
 
 // listQuery is the list's query string, parsed: what to show and how.
@@ -406,8 +412,45 @@ func shortSerial(s string) string {
 func (s *server) refreshInventory(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), refreshTimeout)
 	defer cancel()
-	if err := s.opts.Inventory.Refresh(ctx); err != nil {
+	back := parseListQuery(r.PostForm).href(s.base)
+	// Taken before waiting: every press that waits out the same gap is
+	// answered by the one read that follows it, begun after each of them.
+	ticket := s.opts.Inventory.Ticket()
+	if wait := s.refreshes.wait(time.Now()); wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			http.Redirect(w, r, back, http.StatusSeeOther)
+			return
+		}
+	}
+	err := s.opts.Inventory.RefreshSince(ctx, ticket)
+	s.refreshes.ended(time.Now(), s.refreshGap)
+	if err != nil {
 		s.log.Warn("the certificate inventory could not be read on request", "err", err)
 	}
-	http.Redirect(w, r, parseListQuery(r.PostForm).href(s.base), http.StatusSeeOther)
+	http.Redirect(w, r, back, http.StatusSeeOther)
+}
+
+// pacedReads spaces the reads asked for from the page, in real time
+// whatever clock the server is given: it paces the load on the database.
+type pacedReads struct {
+	mu   sync.Mutex
+	next time.Time
+}
+
+// wait is how long a read asked for at now waits before it may begin.
+func (p *pacedReads) wait(now time.Time) time.Duration {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.next.Sub(now)
+}
+
+// ended records that a read asked for from the page ended at now.
+func (p *pacedReads) ended(now time.Time, gap time.Duration) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if next := now.Add(gap); next.After(p.next) {
+		p.next = next
+	}
 }

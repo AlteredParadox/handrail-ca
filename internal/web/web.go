@@ -101,6 +101,8 @@ type Store interface {
 type Inventory interface {
 	Snapshot() *inventory.Snapshot
 	Refresh(ctx context.Context) error
+	Ticket() uint64
+	RefreshSince(ctx context.Context, ticket uint64) error
 	DER(ctx context.Context, serial string) ([]byte, error)
 }
 
@@ -172,6 +174,11 @@ type server struct {
 	// that must not be taken twice are keyed with it, so that one from
 	// before a restart is not taken at all.
 	formKey []byte
+
+	// refreshes spaces the reads asked for from the page by refreshGap
+	// (see refreshInventory).
+	refreshes  pacedReads
+	refreshGap time.Duration
 }
 
 // New returns the handler for the whole site.
@@ -235,6 +242,7 @@ func build(opts Options) (*server, http.Handler, error) {
 		hash:      password.Hash,
 		status:    &statusCache{},
 	}
+	s.refreshGap = refreshGap
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {

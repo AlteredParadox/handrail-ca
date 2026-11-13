@@ -34,6 +34,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -200,6 +201,12 @@ const (
 	maxText = 256
 	// maxSerial bounds a row key: a serial number has at most 49 digits.
 	maxSerial = 64
+	// maxKey bounds the key of a row that is taken in at all. A key past
+	// maxSerial is no serial number, and its row is kept and shown as
+	// unreadable, found by that key; one past maxKey, which no step-ca
+	// writes, fails the read instead, since the key is kept in memory as
+	// the row's identity.
+	maxKey = 1 << 10
 
 	// DefaultExpiringWindow is how long before its end a certificate is
 	// called expiring, unless a third of its lifetime is shorter.
@@ -322,9 +329,14 @@ type Inventory struct {
 	// the one reading. A channel and not a mutex, so that waiting for a
 	// turn can be given up. mu guards the fields below it.
 	refreshing chan struct{}
-	mu         sync.RWMutex
-	certs      map[string]*Certificate
-	current    *Snapshot
+	// begun counts the reads begun, and done is the count at the start of
+	// the last one that finished, failed or not: a read answers whoever
+	// asked before it began (RefreshSince). Both change only while
+	// holding refreshing.
+	begun, done atomic.Uint64
+	mu          sync.RWMutex
+	certs       map[string]*Certificate
+	current     *Snapshot
 }
 
 // New returns an empty inventory over src. Nothing is read until Refresh.
@@ -376,6 +388,22 @@ func (inv *Inventory) Run(ctx context.Context, interval time.Duration, report fu
 // caller stopped waiting". Running out of time while reading is different:
 // the database did not answer in the time allowed, and the State says so.
 func (inv *Inventory) Refresh(ctx context.Context) error {
+	return inv.refresh(ctx, false, 0)
+}
+
+// Ticket marks the moment it is called, for RefreshSince.
+func (inv *Inventory) Ticket() uint64 { return inv.begun.Load() }
+
+// RefreshSince is Refresh for whoever needs a picture read after the
+// moment ticket marks, and no more: a read begun after that moment that
+// has finished, by the time this one has its turn, answers it, and
+// nothing is read again. Many asking at about the same moment are then
+// answered by one read. Its error is that of the read that answered it.
+func (inv *Inventory) RefreshSince(ctx context.Context, ticket uint64) error {
+	return inv.refresh(ctx, true, ticket)
+}
+
+func (inv *Inventory) refresh(ctx context.Context, shared bool, asked uint64) error {
 	select {
 	case inv.refreshing <- struct{}{}:
 	case <-ctx.Done():
@@ -386,12 +414,20 @@ func (inv *Inventory) Refresh(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
+	if shared && inv.done.Load() > asked {
+		if problem := inv.Snapshot().State.Problem; problem != "" {
+			return errors.New(problem)
+		}
+		return nil
+	}
 
 	attempted := inv.now()
+	this := inv.begun.Add(1)
 	certs, revoked, orphans, err := inv.read(ctx)
 	if err != nil && errors.Is(ctx.Err(), context.Canceled) {
 		return err
 	}
+	inv.done.Store(this)
 
 	inv.mu.Lock()
 	defer inv.mu.Unlock()
@@ -466,6 +502,10 @@ func (inv *Inventory) read(ctx context.Context) (map[string]*Certificate, map[st
 	certs := make(map[string]*Certificate, len(serials))
 	var missing []string
 	for _, serial := range serials {
+		// Whatever the Source (see maxKey).
+		if len(serial) > maxKey {
+			return nil, nil, 0, fmt.Errorf("listing certificates: a key of more than %d bytes", maxKey)
+		}
 		if c, ok := known[serial]; ok {
 			certs[serial] = c
 		} else if _, dup := certs[serial]; !dup {
@@ -484,6 +524,9 @@ func (inv *Inventory) read(ctx context.Context) (map[string]*Certificate, map[st
 	revoked := make(map[string]*Revocation, len(rows))
 	orphans := 0
 	for _, row := range rows {
+		if len(row.Serial) > maxKey {
+			return nil, nil, 0, fmt.Errorf("reading revocations: a key of more than %d bytes", maxKey)
+		}
 		revoked[row.Serial] = readRevocation(row)
 		if _, issued := certs[row.Serial]; !issued {
 			orphans++

@@ -35,10 +35,15 @@ import (
 // Limits on what is taken from the database. step-ca stores a certificate's
 // DER and two small JSON documents; anything far beyond that is not one.
 const (
-	maxDER    = 64 << 10
-	maxJSON   = 16 << 10
-	maxRows   = 5_000_000
-	pgTimeout = 30 * time.Second
+	maxDER  = 64 << 10
+	maxJSON = 16 << 10
+	maxRows = 5_000_000
+	// maxMessage bounds one message from the server. The largest a
+	// handrail-ca query asks for is one row of Certificates: a key, a DER
+	// of at most maxDER and a document of at most maxJSON. Without it the
+	// driver takes messages up to 1 GiB from whoever answers.
+	maxMessage = 1 << 20
+	pgTimeout  = 30 * time.Second
 )
 
 // queryTimeout bounds one call from this side as well, the pool's check of
@@ -116,6 +121,7 @@ func openPostgres(connString string, caRoot RootFunc, adjust func(*pgxpool.Confi
 	cfg.ConnConfig.RuntimeParams["application_name"] = "handrail-ca"
 	cfg.ConnConfig.ConnectTimeout = 10 * time.Second
 	cfg.MaxConns, cfg.MinConns = 2, 0
+	cfg.ConnConfig.MaxProtocolMessageBodyLen = maxMessage
 	if caRoot != nil && wantsCARoot(&cfg.ConnConfig.Config) {
 		cfg.BeforeConnect = func(ctx context.Context, cc *pgx.ConnConfig) error {
 			root, err := caRoot(ctx)
@@ -332,7 +338,11 @@ func overdue(caller context.Context, err error) error {
 }
 
 func (p *Postgres) serials(ctx context.Context) ([]string, error) {
-	rows, err := p.pool.Query(ctx, `SELECT nkey FROM x509_certs`)
+	// A key longer than maxKey is not transferred; the read fails, naming
+	// the table, and the picture read before is kept.
+	rows, err := p.pool.Query(ctx, `
+		SELECT CASE WHEN octet_length(nkey) <= $1 THEN nkey END, octet_length(nkey) > $1
+		  FROM x509_certs`, maxKey)
 	if err != nil {
 		return nil, plain(err)
 	}
@@ -340,8 +350,12 @@ func (p *Postgres) serials(ctx context.Context) ([]string, error) {
 	var serials []string
 	for rows.Next() {
 		var key []byte
-		if err := rows.Scan(&key); err != nil {
+		var tooLong bool
+		if err := rows.Scan(&key, &tooLong); err != nil {
 			return nil, plain(err)
+		}
+		if tooLong {
+			return nil, errKeyTooLong("x509_certs")
 		}
 		if len(serials) >= maxRows {
 			return nil, fmt.Errorf("more than %d certificates in the database", maxRows)
@@ -402,8 +416,9 @@ func (p *Postgres) Revocations(ctx context.Context) ([]RawRevocation, error) {
 
 func (p *Postgres) revocations(ctx context.Context) ([]RawRevocation, error) {
 	rows, err := p.pool.Query(ctx, `
-		SELECT nkey, CASE WHEN octet_length(nvalue) <= $1 THEN nvalue END
-		  FROM revoked_x509_certs`, maxJSON)
+		SELECT CASE WHEN octet_length(nkey) <= $2 THEN nkey END, octet_length(nkey) > $2,
+		       CASE WHEN octet_length(nvalue) <= $1 THEN nvalue END
+		  FROM revoked_x509_certs`, maxJSON, maxKey)
 	if err != nil {
 		return nil, plain(err)
 	}
@@ -411,8 +426,12 @@ func (p *Postgres) revocations(ctx context.Context) ([]RawRevocation, error) {
 	var out []RawRevocation
 	for rows.Next() {
 		var key, value []byte
-		if err := rows.Scan(&key, &value); err != nil {
+		var tooLong bool
+		if err := rows.Scan(&key, &tooLong, &value); err != nil {
 			return nil, plain(err)
+		}
+		if tooLong {
+			return nil, errKeyTooLong("revoked_x509_certs")
 		}
 		if len(out) >= maxRows {
 			return nil, fmt.Errorf("more than %d revocations in the database", maxRows)
@@ -420,6 +439,12 @@ func (p *Postgres) revocations(ctx context.Context) ([]RawRevocation, error) {
 		out = append(out, RawRevocation{Serial: string(key), JSON: value})
 	}
 	return out, plain(rows.Err())
+}
+
+// errKeyTooLong is the error for a row whose key is longer than maxKey. It
+// does not repeat the key.
+func errKeyTooLong(table string) error {
+	return fmt.Errorf("a row of %s has a key of more than %d bytes", table, maxKey)
 }
 
 // plain turns a driver error into one that is safe to show and to log. The

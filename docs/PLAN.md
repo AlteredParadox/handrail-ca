@@ -419,6 +419,22 @@ Changed after the security review before the first release (2026-11-13):
   same fixed message as one that does not parse. This narrows what is
   accepted: names with characters outside letters, digits, `_`, `.`, `$`
   and `-`, and a URL that names no user, are refused.
+- A press of "Read again now" read the whole of both key tables every time,
+  and presses waiting their turn each read again, so a signed-in viewer
+  could keep the CA's database reading without pause (found by the second
+  pass of the review). Reads asked for from the page now begin at least
+  five seconds after the last one ended, and a press waits for that; the
+  presses waiting together are answered by one read, begun after each of
+  them was made, so a press still sees everything stored before it. The
+  reads after an issue or a revocation are not held back.
+- The size of a row's key was not bounded, and a key is kept in memory as
+  the row's identity. A key that is no serial number is still kept, and
+  its row shown as unreadable, up to 1 KiB; a longer one is not transferred
+  (the query sends a flag instead) nor taken in from any source: the read
+  fails, naming the table, and the picture read before is kept. The driver
+  takes no message from the server larger than 1 MiB; it had taken up to
+  1 GiB. Tried against the development CA's PostgreSQL, in a schema of the
+  test's own.
 
 Status is derived, most severe first: revoked, expired, not yet valid,
 expiring soon (configurable window), valid. If the revocation table could not
