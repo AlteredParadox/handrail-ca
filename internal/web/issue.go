@@ -615,28 +615,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 	after := s.opts.Inventory.Snapshot()
 
 	if sendErr == nil {
-		serial := issued.Certificate.SerialNumber.String()
-		differs := differences(req, issued.Certificate, template)
-		event.Serial, event.Subject = serial, issued.Certificate.Subject.CommonName
-		event.Outcome, event.Detail = store.OutcomeOK, asked+"; issued, valid until "+issued.Certificate.NotAfter.UTC().Format(stamp)
-		for _, d := range differs {
-			event.Detail += "; " + d
-		}
-		s.record(r, event)
-		// Remembered with the certificate itself, so that it can be handed
-		// over again if this answer does not reach the browser.
-		done.serial, done.how, done.issued, done.differs = serial, "now", issued, differs
-		if len(differs) > 0 {
-			done.how = "differs"
-		}
-		if after.Certificate(serial) == nil {
-			// Issued, and not in the inventory to be looked at: handed over
-			// here, since this answer is the only place it is.
-			data.Request, data.Unlisted = nil, newUnlistedView(issued, differs, readErr, now)
-			s.renderIssue(w, r, http.StatusOK, data)
-			return
-		}
-		http.Redirect(w, r, s.certificateURL(serial)+arrived, http.StatusSeeOther)
+		done = s.issuedNow(w, r, data, answered{req: req, issued: issued, template: template, event: event, asked: asked, after: after, readErr: readErr, at: now})
 		return
 	}
 
@@ -655,6 +634,53 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 	}
 	data.Failure = outcome.failure
 	s.renderIssue(w, r, http.StatusBadGateway, data)
+}
+
+// answered is a signing request that the CA answered with a certificate.
+type answered struct {
+	req      *ca.Request
+	issued   *ca.Issued
+	template templateState
+	// event is the history row as far as it is known before the answer:
+	// who asked, and for what. asked is what was asked for, in words.
+	event store.Event
+	asked string
+	// after is the inventory as read after the answer, and readErr why
+	// that reading failed, if it did.
+	after   *inventory.Snapshot
+	readErr error
+	at      time.Time
+}
+
+// issuedNow records a certificate the CA has just issued, answers the
+// browser with it or with the way to its page, and returns what is to be
+// remembered of the request.
+func (s *server) issuedNow(w http.ResponseWriter, r *http.Request, data issueData, a answered) issuedAt {
+	cert := a.issued.Certificate
+	serial := cert.SerialNumber.String()
+	differs := differences(a.req, cert, a.template)
+	event := a.event
+	event.Serial, event.Subject = serial, cert.Subject.CommonName
+	event.Outcome, event.Detail = store.OutcomeOK, a.asked+"; issued, valid until "+cert.NotAfter.UTC().Format(stamp)
+	for _, d := range differs {
+		event.Detail += "; " + d
+	}
+	s.record(r, event)
+	// Remembered with the certificate itself, so that it can be handed
+	// over again if this answer does not reach the browser.
+	done := issuedAt{serial: serial, how: "now", issued: a.issued, differs: differs, at: a.at}
+	if len(differs) > 0 {
+		done.how = "differs"
+	}
+	if a.after.Certificate(serial) == nil {
+		// Issued, and not in the inventory to be looked at: handed over
+		// here, since this answer is the only place it is.
+		data.Request, data.Unlisted = nil, newUnlistedView(a.issued, differs, a.readErr, a.at)
+		s.renderIssue(w, r, http.StatusOK, data)
+		return done
+	}
+	http.Redirect(w, r, s.certificateURL(serial)+arrived, http.StatusSeeOther)
+	return done
 }
 
 // settleEarlier accounts for an earlier attempt to sign this request
@@ -877,6 +903,25 @@ func (s *server) issueOutcome(ctx context.Context, sendErr, readErr error, befor
 		detail: notConfirmed + sendErr.Error() + "; the CA's database held no new certificate for the request's key when read just afterwards, which does not settle it"}
 }
 
+// newAround reports whether a listed certificate is one that was not
+// there before a request was sent and is dated around the moment it was.
+func newAround(c *inventory.Certificate, before *inventory.Snapshot, sentAt time.Time) bool {
+	if c.Problem != "" || before.Certificate(c.Serial) != nil {
+		return false
+	}
+	return !c.NotBefore.Before(sentAt.Add(-issuedWithin)) && !c.NotBefore.After(sentAt.Add(issuedWithin))
+}
+
+// readListed reads a listed certificate itself from the CA's database.
+func (s *server) readListed(ctx context.Context, serial string) (*x509.Certificate, bool) {
+	der, err := s.opts.Inventory.DER(ctx, serial)
+	if err != nil {
+		return nil, false
+	}
+	cert, err := x509.ParseCertificate(der)
+	return cert, err == nil
+}
+
 // issuedFor looks among the certificates that are new to the inventory
 // for the one this request was given, and returns its serial. New to the
 // inventory is not new: a stale inventory catching up shows certificates
@@ -895,22 +940,14 @@ func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapsho
 	const unread = "the certificates new to the CA's database could not all be read to look for it"
 	looked := 0
 	for _, c := range after.Certificates {
-		if c.Problem != "" || before.Certificate(c.Serial) != nil {
-			continue
-		}
-		if c.NotBefore.Before(sentAt.Add(-issuedWithin)) || c.NotBefore.After(sentAt.Add(issuedWithin)) {
+		if !newAround(c, before, sentAt) {
 			continue
 		}
 		if looked++; looked > maxNewToSearch {
 			return "", unread
 		}
-		der, err := s.opts.Inventory.DER(ctx, c.Serial)
-		if err != nil {
-			unsure = unread
-			continue
-		}
-		cert, err := x509.ParseCertificate(der)
-		if err != nil {
+		cert, ok := s.readListed(ctx, c.Serial)
+		if !ok {
 			unsure = unread
 			continue
 		}
