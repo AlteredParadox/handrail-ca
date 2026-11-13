@@ -665,5 +665,10 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 		view.URL = s.certificateURL(serial)
 	}
 	data.Generate, data.Generated = nil, view
+	// The page carries a private key. A reverse proxy that holds answers
+	// in a buffer writes one that does not fit to a temporary file on its
+	// own disk; nginx is told by this header to pass this answer straight
+	// through instead.
+	w.Header().Set("X-Accel-Buffering", "no")
 	s.renderIssue(w, r, http.StatusOK, data)
 }

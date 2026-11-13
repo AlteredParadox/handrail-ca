@@ -689,6 +689,39 @@ As built in milestone 1:
 - Sessions last twelve hours, or one hour unused. The cookie holds a random
   token; the store holds its SHA-256. Over HTTPS at the root of a host the
   cookie carries the `__Host-` prefix.
+- Changed after the security review before the first release
+  (2026-11-13). `SameSite=Strict` keeps the session cookie from requests
+  that another site starts, and not from those of another origin of the
+  same site: a sibling host name under one domain, another port of one
+  host. A page there could tell from handrail-ca's answers (a redirect or
+  none, a window that opens or does not) whether its visitor was signed
+  in, as viewer or operator, and whether a certificate was revoked. A
+  request that the browser marks as started by another origin
+  (`Sec-Fetch-Site` other than `same-origin` or `none`) is now answered as
+  one without a session, and every answer carries
+  `Cross-Origin-Opener-Policy` and `Cross-Origin-Resource-Policy:
+  same-origin` for a browser that sends no such mark. Driven in Chromium,
+  Firefox and WebKit: a link from another port of the same host landed on
+  the list, signed in, before the change and on the sign-in form after it,
+  with the session intact for the next request typed in; links within the
+  site, typed addresses, reloads and sign-out work as before. The cost: a
+  link to handrail-ca from a page on a sibling host name lands on the
+  sign-in page even when signed in, as one from another site always did.
+- From the same review: the list and the names in use are built from every
+  certificate in the inventory, and each build holds memory that grows
+  with it; nothing bounded how many ran at once, so one account with many
+  connections could make the process hold as much as it liked (400 MB over
+  the baseline with sixteen at once at 100,000 certificates, in the
+  review's measurement). Four are built at a time; thirty-two more wait up
+  to ten seconds each; past that the answer is 503 with `Retry-After`. A
+  slot is given back when the page is ready, before it is sent.
+- From the same review, two leads it could not settle offline, closed
+  without settling them: the page that hands over a generated key is sent
+  with `X-Accel-Buffering: no`, which tells nginx not to hold it in a
+  buffer that spills to a temporary file, and is marked `translate="no"`
+  (and `notranslate`), so that a browser set to translate pages has no
+  call to send the key to a translation service. Neither was observed
+  against nginx or a translating browser here.
 - The pages are sent with `Referrer-Policy: same-origin`, not
   `no-referrer`. Under `no-referrer` a browser sends `Origin: null` with
   every form it posts, its own site included, and the `Origin` check

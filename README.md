@@ -330,6 +330,11 @@ Accounts are kept in the store and managed from the command line on the
 host. The one thing an account does for itself in the browser is change
 its own password, on the page behind its name in the top bar.
 
+A link to handrail-ca from a page on another site, or on another host name
+or port of the same site, lands on the sign-in page even when you are
+signed in: requests that other pages start are answered as a stranger's.
+Your session is still there for an address you type or a bookmark.
+
 ```sh
 ./handrail-ca user add -role operator alice  # asks for a password, typed unseen
 ./handrail-ca user add -generate bob         # viewer; generates one, prints it once
@@ -512,6 +517,12 @@ About 720 bytes of memory go to each certificate, so a CA with a few
 thousand certificates needs a few megabytes for them. What then counts is
 the password check at sign-in, which takes 64 MB for a moment, two at a
 time at most.
+
+The figures above are for one request at a time. The list and the names
+page are built from every certificate, a few megabytes to a few tens of
+megabytes each at this size while they are being built; handrail-ca builds
+four at a time and makes the rest wait, so many requests at once cost
+time, not memory without limit.
 
 - **Two cores and 4 GB** is plenty, with room for a reverse proxy on the
   same machine, up to at least the 100,000 certificates measured.

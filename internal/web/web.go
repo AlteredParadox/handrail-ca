@@ -190,6 +190,9 @@ type server struct {
 	// that must not be taken twice are keyed with it, so that one from
 	// before a restart is not taken at all.
 	formKey []byte
+
+	// builds bounds the pages built from the whole inventory.
+	builds *buildGate
 }
 
 // Site is the handler for the whole site.
@@ -281,6 +284,7 @@ func build(opts Options) (*server, http.Handler, error) {
 		return nil, nil, err
 	}
 	s := &server{
+		builds:    newBuildGate(),
 		formKey:   formKey,
 		opts:      opts,
 		base:      strings.TrimRight(u.Path, "/"),
@@ -320,13 +324,13 @@ func build(opts Options) (*server, http.Handler, error) {
 	mux.HandleFunc("GET /status", s.signedIn(s.statusPage))
 	mux.HandleFunc("GET /account", s.signedIn(s.accountPage))
 	mux.HandleFunc("POST /account/password", s.signedIn(s.changePassword))
-	mux.HandleFunc("GET /{$}", s.signedIn(s.listPage))
+	mux.HandleFunc("GET /{$}", s.signedIn(s.wholeInventory(s.listPage)))
 	mux.HandleFunc("POST /refresh", s.signedIn(s.refreshInventory))
 	mux.HandleFunc("GET /issue", s.signedIn(s.issueForm))
 	mux.HandleFunc("POST /issue", s.signedInUpTo(maxIssueForm, s.issue))
 	mux.HandleFunc("GET /issue/generate", s.signedIn(s.generateForm))
 	mux.HandleFunc("POST /issue/generate", s.signedIn(s.generate))
-	mux.HandleFunc("GET /names", s.signedIn(s.namesPage))
+	mux.HandleFunc("GET /names", s.signedIn(s.wholeInventory(s.namesPage)))
 	mux.HandleFunc("GET /history", s.signedIn(s.historyPage))
 	mux.HandleFunc("GET /certificates/{serial}", s.signedIn(s.detailPage))
 	mux.HandleFunc("GET /certificates/{serial}/{form}", s.signedIn(s.certificateFile))
@@ -361,6 +365,10 @@ func text(body []byte) http.HandlerFunc {
 	}
 }
 
+// sameOrigin is the value of the three headers below that keep what
+// handrail-ca answers to its own pages.
+const sameOrigin = "same-origin"
+
 // securityHeaders sets the baseline every response carries. The UI is
 // same-origin only: no inline script or style, no framing, no third-party
 // loads.
@@ -370,12 +378,17 @@ func securityHeaders(next http.Handler) http.Handler {
 		h.Set("Content-Security-Policy", "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'")
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
+		// No page of another origin keeps a handle on a window of ours, or
+		// loads an answer of ours as part of itself: either lets it tell
+		// what a signed-in visitor's request was answered with.
+		h.Set("Cross-Origin-Opener-Policy", sameOrigin)
+		h.Set("Cross-Origin-Resource-Policy", sameOrigin)
 		// Not "no-referrer". Under that policy a browser sends "Origin:
 		// null" with every form it posts, even to the page's own site, and
 		// sameOriginWrites then refuses the form: nobody could sign in.
 		// "same-origin" still tells other sites nothing (a link out carries
 		// no referrer) and lets a form of ours say where it came from.
-		h.Set("Referrer-Policy", "same-origin")
+		h.Set("Referrer-Policy", sameOrigin)
 		next.ServeHTTP(w, r)
 	})
 }

@@ -662,6 +662,9 @@ type browser struct {
 	forwardedFor string
 	// ctx replaces the request's context, for a browser that goes away.
 	ctx context.Context
+	// fetchSite, when set, is sent as Sec-Fetch-Site: what a browser says
+	// about where the request was started.
+	fetchSite string
 }
 
 func (s *site) browser() *browser {
@@ -687,6 +690,9 @@ func (b *browser) do(method, path string, form url.Values) *httptest.ResponseRec
 	}
 	if b.forwardedFor != "" {
 		req.Header.Set("X-Forwarded-For", b.forwardedFor)
+	}
+	if b.fetchSite != "" {
+		req.Header.Set("Sec-Fetch-Site", b.fetchSite)
 	}
 	if method != http.MethodGet {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
@@ -864,6 +870,13 @@ func TestSecurityHeaders(t *testing.T) {
 		}
 		if h.Get("X-Content-Type-Options") != "nosniff" || h.Get("X-Frame-Options") != "DENY" || h.Get("Referrer-Policy") != "same-origin" {
 			t.Errorf("%s: headers = %v", path, h)
+		}
+		if h.Get("Cross-Origin-Opener-Policy") != "same-origin" || h.Get("Cross-Origin-Resource-Policy") != "same-origin" {
+			t.Errorf("%s: another origin may keep a window of ours or load this answer: %v", path, h)
+		}
+		// Only the page that hands a key over says anything to a proxy.
+		if got := h.Get("X-Accel-Buffering"); got != "" {
+			t.Errorf("%s: X-Accel-Buffering = %q", path, got)
 		}
 	}
 	// Nothing in the pages needs what the policy forbids.
