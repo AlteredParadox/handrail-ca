@@ -288,7 +288,12 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	checked, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"), who)
+	checked, err := s.checkPassword(r.Context(), username, r.PostForm.Get("password"), who, device.known())
+	if errors.Is(err, errBusy) {
+		w.Header().Set("Retry-After", retryWhenBusy)
+		s.renderSignIn(w, r, http.StatusServiceUnavailable, "", "handrail-ca is busy checking other sign-ins. Try again in a moment.")
+		return
+	}
 	if err != nil {
 		s.log.Error("checking a password", "err", err)
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not check the password. The log has the details.")
@@ -334,6 +339,10 @@ func (s *server) signIn(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, s.base+"/", http.StatusSeeOther)
 }
 
+// retryWhenBusy is the Retry-After, in seconds, of an answer that found
+// too many others waiting for a password to be checked.
+const retryWhenBusy = "5"
+
 func (s *server) tooManySignIns(w http.ResponseWriter, r *http.Request, wait time.Duration) {
 	w.Header().Set("Retry-After", strconv.Itoa(int(wait/time.Second)+1))
 	s.renderSignIn(w, r, http.StatusTooManyRequests, "", "Too many failed sign-ins. Wait a few minutes and try again.")
@@ -358,13 +367,14 @@ type passwordCheck struct {
 // run at once. The attempt is counted by the throttle (see attempt) after a
 // slot is held and before the password is looked at, so requests that
 // queued for a slot cannot outnumber the attempts the throttle allows.
-func (s *server) checkPassword(ctx context.Context, username, pw string, who attempt) (passwordCheck, error) {
-	select {
-	case s.hashSlots <- struct{}{}:
-		defer func() { <-s.hashSlots }()
-	case <-ctx.Done():
-		return passwordCheck{}, ctx.Err()
+// proven is for the hashing slot (see hashGate); the error is errBusy when
+// too many were waiting for one, and nothing is counted then.
+func (s *server) checkPassword(ctx context.Context, username, pw string, who attempt, proven bool) (passwordCheck, error) {
+	release, err := s.hashing.take(ctx, proven)
+	if err != nil {
+		return passwordCheck{}, err
 	}
+	defer release()
 	counted, wait := s.limiter.beginFor(s.opts.Now(), who)
 	if wait > 0 {
 		return passwordCheck{wait: wait}, nil
@@ -479,10 +489,20 @@ func (s *server) recordSignIn(r *http.Request, username string, ok bool, detail 
 	if ok {
 		e.Outcome = store.OutcomeOK
 	}
-	if username != "" {
-		// An account's own sign-ins, good and bad: always in the history.
-		// The throttle bounds how many of them there can be.
+	if ok {
 		s.record(r, e)
+		return
+	}
+	// A failed sign-in is logged now and its history row written after the
+	// answer (see recordLater), for an account and for a name that is none
+	// alike: a row written first would make the answer for a real account
+	// later than the answer for a made-up name by the time the store takes
+	// to commit, and whoever can time the page could tell the two apart.
+	if username != "" {
+		// An account's own failed sign-ins: always in the history. The
+		// throttle bounds how many of them there can be.
+		s.logEvent(r, &e)
+		s.recordLater(e)
 		return
 	}
 	// A failed sign-in for a name that is no account. Anyone who can reach
@@ -493,11 +513,10 @@ func (s *server) recordSignIn(r *http.Request, username string, ok bool, detail 
 	if unrecorded > 0 {
 		e.Detail += fmt.Sprintf("; %d more like it since the last one recorded here are in the log only", unrecorded)
 	}
-	if write {
-		s.record(r, e)
-		return
-	}
 	s.logEvent(r, &e)
+	if write {
+		s.recordLater(e)
+	}
 }
 
 // strangerRows failed sign-ins for names that are not accounts are written
@@ -551,7 +570,12 @@ func (s *server) record(r *http.Request, e store.Event) {
 	s.logEvent(r, &e)
 	// Not the request's context: the event is recorded even if the browser
 	// has already gone away.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
+	s.appendHistory(context.WithoutCancel(r.Context()), e)
+}
+
+// appendHistory writes an event that logEvent has stamped to the history.
+func (s *server) appendHistory(ctx context.Context, e store.Event) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := s.opts.Store.AppendHistory(ctx, e); err != nil {
 		s.historyBroken.Store(true)
@@ -559,6 +583,69 @@ func (s *server) record(r *http.Request, e store.Event) {
 		return
 	}
 	s.historyBroken.Store(false)
+}
+
+// maxLateRows bounds how many history rows may be waiting to be written
+// after their answers. The hashing slots let only a few failed sign-ins
+// through each second, so the line is short unless the store is slow; a
+// row that finds it full is written before its answer after all.
+const maxLateRows = 64
+
+// lateRows are history rows written after the answer they belong to has
+// gone out, in the order they were handed over, by one goroutine that runs
+// only while there are any.
+type lateRows struct {
+	mu      sync.Mutex
+	waiting []store.Event
+	writing bool
+	idle    *sync.Cond // on mu; signalled when writing ends
+}
+
+// recordLater writes an event that logEvent has already stamped and logged
+// to the history without making the request wait for it. It is for rows
+// whose writing must not show in how long the answer took (see
+// recordSignIn); everything else uses record. Site.Settle waits for these
+// rows when the process ends.
+func (s *server) recordLater(e store.Event) {
+	l := &s.late
+	l.mu.Lock()
+	if len(l.waiting) >= maxLateRows {
+		l.mu.Unlock()
+		s.appendHistory(context.Background(), e)
+		return
+	}
+	l.waiting = append(l.waiting, e)
+	if !l.writing {
+		l.writing = true
+		go s.writeLateRows()
+	}
+	l.mu.Unlock()
+}
+
+func (s *server) writeLateRows() {
+	l := &s.late
+	for {
+		l.mu.Lock()
+		if len(l.waiting) == 0 {
+			l.writing = false
+			l.idle.Broadcast()
+			l.mu.Unlock()
+			return
+		}
+		e := l.waiting[0]
+		l.waiting = l.waiting[1:]
+		l.mu.Unlock()
+		s.appendHistory(context.Background(), e)
+	}
+}
+
+// settle waits until no row is waiting or being written.
+func (l *lateRows) settle() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for l.writing {
+		l.idle.Wait()
+	}
 }
 
 // limiter slows password guessing: each user name, and each client address,
@@ -590,12 +677,37 @@ func (s *server) record(r *http.Request, e store.Event) {
 // Entries here exist only for devices the store knows, of which an account
 // keeps a bounded number; if the table is full all the same, a device is
 // counted as a stranger.
+//
+// A fourth counts each account's changes of password (see change).
 type limiter struct {
 	mu      sync.Mutex
 	names   map[string]*limiterEntry
 	addrs   map[string]*limiterEntry
 	devices map[string]*limiterEntry
+	changes map[string]*limiterEntry
 	maxLen  int
+}
+
+// change counts one change of an account's password, asked for with the
+// right current password, or returns how long to wait if there have been
+// limiterAttempts in this window. A change is two password hashes, done
+// ahead of strangers' sign-ins (see hashGate), and when it succeeds its
+// attempt is given back to the throttle: without a count of its own, one
+// account could change its password over and over and keep the hashing
+// slots to itself. A change refused here is not given back, so asking
+// again runs into the throttle's own limit. The keys are accounts' names,
+// of which there are few; were the table full all the same, a change goes
+// uncounted.
+func (l *limiter) change(now time.Time, name string) time.Duration {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if wait := left(l.changes[name], now); wait > 0 {
+		return wait
+	}
+	if e := l.live(l.changes, name, now); e != nil {
+		e.attempts++
+	}
+	return 0
 }
 
 // attempt is who a sign-in attempt is counted against: a known device, if
@@ -658,12 +770,16 @@ type limiterEntry struct {
 const (
 	limiterAttempts = 5
 	limiterWindow   = 5 * time.Minute
-	// limiterEntries bounds each of the two tables.
+	// limiterEntries bounds each of the tables.
 	limiterEntries = 10000
 )
 
 func newLimiter() *limiter {
-	return &limiter{names: map[string]*limiterEntry{}, addrs: map[string]*limiterEntry{}, devices: map[string]*limiterEntry{}, maxLen: limiterEntries}
+	return &limiter{
+		names: map[string]*limiterEntry{}, addrs: map[string]*limiterEntry{},
+		devices: map[string]*limiterEntry{}, changes: map[string]*limiterEntry{},
+		maxLen: limiterEntries,
+	}
 }
 
 // blocked returns how long an attempt for this name from this address must

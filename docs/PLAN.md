@@ -685,6 +685,40 @@ As built in milestone 1:
   disk it shares with the accounts was full.
 - At most two passwords are hashed at once (64 MiB each), and a missing
   account costs the same hash as a wrong password.
+- Changed after the security review before the first release (2026-11-13),
+  which found four ways for someone without an account to get in the way
+  of sign-in or to learn which names are accounts:
+  - A password longer than the 1,024 bytes allowed was refused without
+    being hashed. Such an attempt was counted and cost nothing, so the
+    table of names could be filled in two seconds and every name refused
+    to new browsers; and its answer came sooner for a made-up name than
+    for an account. It is now hashed like any other, cut to length, and
+    never right.
+  - The history row of a failed sign-in on a real account was written
+    before the answer, and a made-up name mostly has no row: the answers
+    differed by the time of one commit. Rows of failed sign-ins are now
+    written after the answer, in order, by one writer with a bounded line
+    (a row that finds it full is written first after all); the log line is
+    written at once as before, and the process waits for the rows when it
+    ends.
+  - Under an `http` public URL the peer's address was a throttle key. That
+    address is the machine's own for every browser (loopback, or the
+    Docker bridge's gateway), so five wrong sign-ins by any local program
+    refused everyone's. It is now nobody in particular, as an unlisted
+    peer already was under `https`: attempts are limited per user name and
+    per known device.
+  - Requests waited for a hashing slot first come, first served, without
+    limit. They now wait in two lines. Sign-ins from a known device and
+    changes of password are served first; anyone else waits behind at most
+    sixteen others for at most five seconds and is then answered 503 with
+    `Retry-After`, with nothing hashed or counted. Because that first line
+    can be used from inside, an account's password can be changed at most
+    five times in five minutes; a change refused for that reason is not
+    given back to the throttle.
+  Not done: a minimum time per counted attempt (the margin between what
+  two slots can hash in a window and the size of the table of names rests
+  on hash speed), and a request limit for the sign-in page in the proxy
+  example.
 - A session is created only if the account still has the password hash
   that was just checked, in one statement in the store: a password change
   that lands while a sign-in is in flight ends that sign-in too.

@@ -331,6 +331,17 @@ A viewer reads; an operator will also issue and revoke. Flags come before
 the user name. Sessions end after an hour unused or twelve hours in all.
 Each user name, and each visitor's address where it is known, gets five
 sign-in attempts in five minutes; a successful sign-in does not count.
+The address is known only behind a listed reverse proxy (`-trusted-proxy`).
+At the plain `http://127.0.0.1` address every browser arrives from the
+machine itself, so attempts there are limited per user name only.
+
+Passwords are checked two at a time. A sign-in from a browser the account
+has signed in from before, and a change of password, go first; a sign-in
+from any other browser waits behind at most sixteen others, for at most
+five seconds, and is then told to try again in a moment. Someone who can
+reach the sign-in page and keeps posting to it can therefore slow, or for
+a while stop, first sign-ins from new browsers, and nothing else. An
+account's password can be changed five times in five minutes.
 
 **A user name can be locked out by someone else, but not for a browser
 its owner has used.** The limit per name counts attempts on that name from

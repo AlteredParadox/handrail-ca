@@ -37,14 +37,19 @@ const maxForwardedHops = 16
 //     append to that header, so the right-hand end is what our own proxies
 //     saw, and anything a client put in the header itself sits to the left
 //     of it and is never reached.
-//   - A connection from anywhere else is the client itself, and whatever
-//     X-Forwarded-For it sent is ignored. The exception is an https public
-//     URL: handrail-ca does not speak TLS, so no browser reaches it
-//     directly there, and a peer that is not a listed proxy is most likely
-//     a proxy nobody told us about, or told us the wrong address for (in
-//     a container the proxy on the same machine arrives from the Docker
-//     bridge, not from 127.0.0.1). Its address is reported but not known,
-//     and the log says once what to add to -trusted-proxy.
+//   - A connection from anywhere else is reported under its own address,
+//     whatever X-Forwarded-For it sent, and that address is not known as
+//     one visitor. Under an https public URL handrail-ca does not speak
+//     TLS, so no browser reaches it directly: a peer that is not a listed
+//     proxy is most likely a proxy nobody told us about, or told us the
+//     wrong address for (in a container the proxy on the same machine
+//     arrives from the Docker bridge, not from 127.0.0.1), and the log
+//     says once what to add to -trusted-proxy. Under an http public URL
+//     the site answers only to a loopback name (see build), so every
+//     browser is on this machine or forwarded to it, and they all arrive
+//     from the same address: loopback, or the bridge's gateway in a
+//     container. Counted as one visitor, five wrong sign-ins by any
+//     program on the machine would refuse everybody else's.
 func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -58,9 +63,8 @@ func (s *server) clientAddr(r *http.Request) (addr string, known bool) {
 	if !s.trustedProxy(peer) {
 		if s.secure {
 			s.unlistedPeer(peer)
-			return peer.String(), false
 		}
-		return peer.String(), true
+		return peer.String(), false
 	}
 	hops := strings.Split(strings.Join(r.Header.Values("X-Forwarded-For"), ","), ",")
 	for i := len(hops) - 1; i >= 0 && i >= len(hops)-maxForwardedHops; i-- {

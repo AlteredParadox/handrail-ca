@@ -85,16 +85,24 @@ func Hash(pw string) (string, error) {
 
 // Verify reports whether pw is the password behind hash. A wrong password
 // is (false, nil); an error means the hash itself could not be used.
+//
+// A password over MaxLength is never right, since Check refuses to set
+// one, but it is hashed all the same, cut to MaxLength. Answered without
+// the work it would be a guess that costs its sender nothing: whoever
+// counts guesses by the hashing they take could be made to count thousands
+// in a second, and an answer that skips the hash arrives sooner than one
+// that does not, which tells accounts from names that are not.
 func Verify(hash, pw string) (bool, error) {
 	p, err := parse(hash)
 	if err != nil {
 		return false, err
 	}
-	if len(pw) > MaxLength {
-		return false, nil
+	tooLong := len(pw) > MaxLength
+	if tooLong {
+		pw = pw[:MaxLength]
 	}
 	key := argon2.IDKey([]byte(pw), p.salt, p.time, p.memory, p.threads, uint32(len(p.key)))
-	return subtle.ConstantTimeCompare(key, p.key) == 1, nil
+	return subtle.ConstantTimeCompare(key, p.key) == 1 && !tooLong, nil
 }
 
 type params struct {
