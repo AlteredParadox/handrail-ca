@@ -80,10 +80,33 @@ themselves over ACME. Each certificate it issues has to be replaced by hand
 before it expires, so the cap is the longest you are willing to go between
 those replacements.
 
-It is also the limit on a mistake. If the CA does not publish a revocation
-list (section 4), a certificate that should not have been issued stays
-trusted until it expires, and the cap is the longest that can be. 90 days is
-a reasonable starting point; shorter is safer and costs more renewals.
+It is also the limit on a mistake, with one condition. If the CA does not
+publish a revocation list (section 4), a certificate that should not have
+been issued stays trusted until it expires, and the cap is the longest that
+one certificate can last. 90 days is a reasonable starting point; shorter
+is safer and costs more renewals.
+
+The condition is renewal. Whoever holds a certificate and its key can ask
+the CA to renew it (`step ca renew`), with no password and without
+handrail-ca, and the renewed certificate is good for as long again from
+that moment. The cap bounds each certificate, not the line of them: tried
+on step-ca 0.30.2, a certificate issued for the full 2160 hours and
+renewed a few minutes later came back valid past the first one's end. Two
+things stop that line:
+
+- **Revoking the certificate.** The CA refuses to renew a revoked
+  certificate, whether or not it publishes a revocation list. This is the
+  answer for a certificate that should not have been issued, and it is why
+  revoking is worth doing even on a CA with no list.
+- **Not allowing renewal at all**, for everything this provisioner issues:
+  add `--disable-renewal` to the command above (tried: `step ca renew` is
+  then refused). Certificates from handrail-ca then end when they say
+  they do, and each replacement is a new certificate issued by an
+  operator. Choose this if nothing you issue here is meant to renew
+  itself.
+
+The CA does not renew an expired certificate unless a provisioner was set
+up with `--allow-renewal-after-expiry`, which is off by default.
 
 ## 2. A name policy on the CA
 

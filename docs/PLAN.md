@@ -608,7 +608,15 @@ why.
   written to the history and said on the certificate's page.
 
   The certificate is checked before it is believed: it must be for the
-  request's key and chain to the pinned root. Outcomes follow the
+  request's key and chain to the pinned root. The key is compared as a
+  key, not byte for byte as it is written: a request may write its key in
+  an unusual and still readable way, and step-ca 0.30.2 signs such a
+  request and writes the key into the certificate the standard way. The
+  byte comparison there was until the security review (2026-11-13) took
+  that certificate for another key's, left the request at an outcome that
+  is not known, and would have sent it again three minutes later; the
+  integration tests now sign such a request on the development CA, and
+  the same test fails with the old comparison. Outcomes follow the
   revocation's rules. With no certificate back and nothing to say the CA
   made none, the inventory is read again and the certificates new to it
   are searched for the one this request was given: the request's key, a
@@ -1149,7 +1157,14 @@ account management in the web UI; several CAs.
   does not limit what a provisioner can ask the CA to sign. Mitigations: a
   CA-wide name policy and a dedicated provisioner with a lifetime cap, both
   set on the CA, the key in memory only, short single-use tokens, roles, an audit
-  trail, and read-only mode for deployments that only need the view.
+  trail, and read-only mode for deployments that only need the view. The
+  cap bounds each certificate and not its renewals: on step-ca 0.30.2 the
+  holder of a certificate and its key renews it for as long again, without
+  handrail-ca, until it is revoked or unless the provisioner was created
+  with renewal disabled (tried on the development CA after the security
+  review, 2026-11-13; the setup guide, "Choosing the cap", had presented
+  the cap as the limit on a certificate that should not have been issued,
+  and now says what stops the renewals).
 
 ## 8. Prior art
 

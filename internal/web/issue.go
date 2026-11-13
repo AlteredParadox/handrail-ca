@@ -951,7 +951,7 @@ func (s *server) issuedFor(ctx context.Context, before, after *inventory.Snapsho
 			unsure = unread
 			continue
 		}
-		if !bytes.Equal(cert.RawSubjectPublicKeyInfo, req.CSR.RawSubjectPublicKeyInfo) {
+		if !ca.SameKey(cert, req.CSR) {
 			continue
 		}
 		if len(nameDifferences(req, cert)) == 0 {
