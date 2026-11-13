@@ -116,7 +116,7 @@ func ParseLabels(typed string) ([]string, error) {
 // note's text and author with another's labels.
 func (s *Store) Note(ctx context.Context, serial string) (Note, error) {
 	n := Note{Serial: serial}
-	rows, err := s.db.QueryContext(ctx, `
+	rows, err := s.read.QueryContext(ctx, `
 		SELECT n.note, n.updated_at, n.updated_by, l.label
 		  FROM cert_notes n
 		  LEFT JOIN cert_labels l ON l.serial = n.serial
@@ -180,5 +180,9 @@ func (s *Store) SetNote(ctx context.Context, n Note) error {
 			}
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.scrub(ctx)
+	return nil
 }

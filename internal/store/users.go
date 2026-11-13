@@ -136,7 +136,11 @@ func (s *Store) SetPassword(ctx context.Context, username, passwordHash string, 
 	if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE user_id = ?`, id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.scrub(ctx)
+	return nil
 }
 
 // ChangePassword replaces the password hash of the account that currently
@@ -170,7 +174,11 @@ func (s *Store) ChangePassword(ctx context.Context, userID int64, oldHash, newHa
 	if _, err := tx.ExecContext(ctx, `DELETE FROM devices WHERE user_id = ?`, userID); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	s.scrub(ctx)
+	return nil
 }
 
 // RemoveUser deletes an account and its sessions. Its history stays.
@@ -182,6 +190,7 @@ func (s *Store) RemoveUser(ctx context.Context, username string) error {
 	if n, _ := res.RowsAffected(); n == 0 {
 		return ErrNotFound
 	}
+	s.scrub(ctx)
 	return nil
 }
 
@@ -224,7 +233,7 @@ func (s *Store) Credentials(ctx context.Context, username string) (User, string,
 		role, hash       string
 		created, changed int64
 	)
-	err := s.db.QueryRowContext(ctx,
+	err := s.read.QueryRowContext(ctx,
 		`SELECT id, username, role, created_at, password_changed_at, password_hash FROM users WHERE username = ?`,
 		strings.ToLower(strings.TrimSpace(username))).Scan(&u.ID, &u.Username, &role, &created, &changed, &hash)
 	if errors.Is(err, sql.ErrNoRows) {

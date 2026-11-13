@@ -100,10 +100,11 @@ func (s *Store) History(ctx context.Context, q HistoryQuery) ([]Event, error) {
 	case limit > 1000:
 		limit = 1000
 	}
-	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, at, actor, action, outcome, serial, subject, detail, remote FROM history
-		  WHERE (?1 = '' OR serial = ?1) AND (?2 <= 0 OR id < ?2) AND (?4 = '' OR action = ?4)
-		  ORDER BY id DESC LIMIT ?3`, q.Serial, q.Before, limit, q.Action)
+	query, args := historyStatement(q, limit)
+	// A page of history is not worth more than a moment of the store.
+	ctx, cancel := context.WithTimeout(ctx, historyReadTimeout)
+	defer cancel()
+	rows, err := s.read.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -121,6 +122,41 @@ func (s *Store) History(ctx context.Context, q HistoryQuery) ([]Event, error) {
 		events = append(events, e)
 	}
 	return events, rows.Err()
+}
+
+// historyReadTimeout bounds one reading of the history.
+const historyReadTimeout = 2 * time.Second
+
+// historyStatement is the statement for a query: only the filters that
+// were asked for, each as a plain comparison, so that SQLite can answer
+// from an index. Written as one statement in which every filter is either
+// switched off by its own parameter or applied, no index can be used, and
+// each lookup reads the whole table, which only grows. The text is made of
+// fixed pieces; every value is a parameter.
+func historyStatement(q HistoryQuery, limit int) (string, []any) {
+	query := `SELECT id, at, actor, action, outcome, serial, subject, detail, remote FROM history WHERE 1 = 1`
+	var args []any
+	if q.Serial != "" {
+		// "serial <> ''" is the condition of the partial index
+		// history_serial, said here so that the planner sees it applies.
+		query += ` AND serial = ? AND serial <> ''`
+		args = append(args, q.Serial)
+	}
+	if q.Action != "" {
+		if q.Serial != "" {
+			// The unary plus keeps the planner off the index on action
+			// here: one certificate has few events, one action many.
+			query += ` AND +action = ?`
+		} else {
+			query += ` AND action = ?`
+		}
+		args = append(args, q.Action)
+	}
+	if q.Before > 0 {
+		query += ` AND id < ?`
+		args = append(args, q.Before)
+	}
+	return query + ` ORDER BY id DESC LIMIT ?`, append(args, limit)
 }
 
 // clip bounds a stored string, on a character boundary.
