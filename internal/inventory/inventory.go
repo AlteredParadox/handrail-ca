@@ -394,6 +394,10 @@ func (inv *Inventory) Refresh(ctx context.Context) error {
 // Ticket marks the moment it is called, for RefreshSince.
 func (inv *Inventory) Ticket() uint64 { return inv.begun.Load() }
 
+// Answered reports whether a read begun after the moment ticket marks has
+// finished, so that RefreshSince(ticket) would not read again.
+func (inv *Inventory) Answered(ticket uint64) bool { return inv.done.Load() > ticket }
+
 // RefreshSince is Refresh for whoever needs a picture read after the
 // moment ticket marks, and no more: a read begun after that moment that
 // has finished, by the time this one has its turn, answers it, and
@@ -414,7 +418,7 @@ func (inv *Inventory) refresh(ctx context.Context, shared bool, asked uint64) er
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if shared && inv.done.Load() > asked {
+	if shared && inv.Answered(asked) {
 		if problem := inv.Snapshot().State.Problem; problem != "" {
 			return errors.New(problem)
 		}

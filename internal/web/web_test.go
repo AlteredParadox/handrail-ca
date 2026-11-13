@@ -219,6 +219,10 @@ type fakeRows struct {
 	err         error
 	// listings counts the reads begun (the listings of serials).
 	listings int
+	// slow makes each listing take that long; starts and ends record
+	// when the listings began and ended.
+	slow         time.Duration
+	starts, ends []time.Time
 }
 
 func (f *fakeRows) Describe() string { return "a test database" }
@@ -231,7 +235,15 @@ func (f *fakeRows) fail(err error) {
 
 func (f *fakeRows) Serials(context.Context) ([]string, error) {
 	f.mu.Lock()
+	slow := f.slow
+	f.starts = append(f.starts, time.Now())
+	f.mu.Unlock()
+	if slow > 0 {
+		time.Sleep(slow)
+	}
+	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.ends = append(f.ends, time.Now())
 	f.listings++
 	if f.err != nil {
 		return nil, f.err

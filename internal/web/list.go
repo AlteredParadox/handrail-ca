@@ -23,7 +23,6 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"handrail-ca/internal/inventory"
@@ -413,20 +412,13 @@ func (s *server) refreshInventory(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), refreshTimeout)
 	defer cancel()
 	back := parseListQuery(r.PostForm).href(s.base)
-	// Taken before waiting: every press that waits out the same gap is
-	// answered by the one read that follows it, begun after each of them.
-	ticket := s.opts.Inventory.Ticket()
-	if wait := s.refreshes.wait(time.Now()); wait > 0 {
-		select {
-		case <-time.After(wait):
-		case <-ctx.Done():
-			http.Redirect(w, r, back, http.StatusSeeOther)
-			return
-		}
-	}
-	err := s.opts.Inventory.RefreshSince(ctx, ticket)
-	s.refreshes.ended(time.Now(), s.refreshGap)
-	if err != nil {
+	// Taken on arrival: a read begun after it answers this press, and
+	// every press waiting out the same gap is answered by one read.
+	inv := s.opts.Inventory
+	ticket := inv.Ticket()
+	if err := s.refreshes.read(ctx, s.refreshGap, func() bool { return inv.Answered(ticket) }, func() error {
+		return inv.RefreshSince(ctx, ticket)
+	}); err != nil {
 		s.log.Warn("the certificate inventory could not be read on request", "err", err)
 	}
 	http.Redirect(w, r, back, http.StatusSeeOther)
@@ -434,23 +426,35 @@ func (s *server) refreshInventory(w http.ResponseWriter, r *http.Request) {
 
 // pacedReads spaces the reads asked for from the page, in real time
 // whatever clock the server is given: it paces the load on the database.
+// Presses take turns (turn, made by build), and a press waits out the gap
+// after the last read with its turn, so a read still running when a press
+// arrives counts as well as one that has ended.
 type pacedReads struct {
-	mu   sync.Mutex
-	next time.Time
+	turn chan struct{}
+	next time.Time // guarded by holding turn
 }
 
-// wait is how long a read asked for at now waits before it may begin.
-func (p *pacedReads) wait(now time.Time) time.Duration {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return p.next.Sub(now)
-}
-
-// ended records that a read asked for from the page ended at now.
-func (p *pacedReads) ended(now time.Time, gap time.Duration) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if next := now.Add(gap); next.After(p.next) {
-		p.next = next
+// read runs refresh in its turn, gap after the last read that ran in a
+// turn, unless answered says a read has answered this press meanwhile.
+// It gives up, with ctx's error, if ctx ends first.
+func (p *pacedReads) read(ctx context.Context, gap time.Duration, answered func() bool, refresh func() error) error {
+	select {
+	case p.turn <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
 	}
+	defer func() { <-p.turn }()
+	if answered() {
+		return refresh() // reads nothing; says how that read went
+	}
+	if wait := time.Until(p.next); wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	err := refresh()
+	p.next = time.Now().Add(gap)
+	return err
 }

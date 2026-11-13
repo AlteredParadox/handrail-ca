@@ -79,3 +79,40 @@ func TestReadsAskedForFromThePageAreSpaced(t *testing.T) {
 	}
 	wantBody(t, b.get("/?view=all"), "late.internal.example")
 }
+
+// Codex's case: a read that takes longer than the gap, and presses that
+// keep arriving while it runs. The next read still begins a gap after the
+// one before it ended, not straight after it.
+func TestTheGapHoldsAfterASlowRead(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	const gap, slow = 200 * time.Millisecond, 300 * time.Millisecond
+	s.server.refreshGap = gap
+	b := signedIn(t, s)
+	token := tokenIn(t, b.get("/"))
+	s.rows.mu.Lock()
+	s.rows.slow = slow
+	from := len(s.rows.starts)
+	s.rows.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for i := range 6 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			time.Sleep(time.Duration(i) * 100 * time.Millisecond) // one every 100 ms
+			b.do(http.MethodPost, "/refresh", url.Values{"form_token": {token}})
+		}()
+	}
+	wg.Wait()
+	s.rows.mu.Lock()
+	starts, ends := s.rows.starts[from:], s.rows.ends[from:]
+	s.rows.mu.Unlock()
+	if len(starts) < 2 {
+		t.Fatalf("%d reads for presses over half a second of reads taking %s", len(starts), slow)
+	}
+	for i := 1; i < len(starts); i++ {
+		if rest := starts[i].Sub(ends[i-1]); rest < gap-20*time.Millisecond {
+			t.Errorf("read %d began %s after read %d ended, want at least %s", i, rest, i-1, gap)
+		}
+	}
+}

@@ -102,6 +102,7 @@ type Inventory interface {
 	Snapshot() *inventory.Snapshot
 	Refresh(ctx context.Context) error
 	Ticket() uint64
+	Answered(ticket uint64) bool
 	RefreshSince(ctx context.Context, ticket uint64) error
 	DER(ctx context.Context, serial string) ([]byte, error)
 }
@@ -247,6 +248,7 @@ func build(opts Options) (*server, http.Handler, error) {
 		return nil, nil, err
 	}
 	s.refreshGap = refreshGap
+	s.refreshes.turn = make(chan struct{}, 1)
 	mux := http.NewServeMux()
 	// Open to everyone: the probe, the legal pages, the style sheet, and
 	// signing in.
