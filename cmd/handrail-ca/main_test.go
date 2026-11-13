@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"handrail-ca/internal/store"
+	"handrail-ca/internal/web"
 )
 
 func listenLoopback(t *testing.T) net.Listener {
@@ -463,7 +464,7 @@ func TestSweepSessionsStopsWithTheContext(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
-		sweepSessions(ctx, st, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		sweepSessions(ctx, st, func(context.Context) error { return nil }, slog.New(slog.NewTextHandler(io.Discard, nil)))
 		close(done)
 	}()
 	cancel()
@@ -471,6 +472,51 @@ func TestSweepSessionsStopsWithTheContext(t *testing.T) {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("the sweep did not stop")
+	}
+}
+
+// Idle sessions are swept by the store's record of their last use, so not
+// before the uses handrail-ca could not write down when they happened
+// have been: a sweep then would end sessions that are in use.
+func TestSweepWaitsForTheUsesOfSessionsToBeSaved(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	t0 := time.Date(2026, 11, 13, 12, 0, 0, 0, time.UTC)
+	user, err := st.AddUser(ctx, "alice", "hash", store.RoleViewer, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := store.HashToken([]byte("a session"))
+	if err := st.CreateSession(ctx, user.ID, "hash", token, t0, t0.Add(12*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	now := t0.Add(2 * web.SessionIdle) // idle by the store's record
+	var logged bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&logged, nil))
+
+	sweepOnce(ctx, st, func(context.Context) error { return errors.New("database or disk is full") }, now, log)
+	if _, err := st.Session(ctx, token, now); err != nil {
+		t.Fatalf("swept while the uses could not be saved: %v", err)
+	}
+	if !strings.Contains(logged.String(), "not sweeping idle sessions") {
+		t.Errorf("the log does not say why: %s", logged.String())
+	}
+
+	// Saved: the use the store had not recorded is in it, and the
+	// session is not idle.
+	sweepOnce(ctx, st, func(ctx context.Context) error { return st.TouchSession(ctx, token, now) }, now, log)
+	if _, err := st.Session(ctx, token, now); err != nil {
+		t.Fatalf("a session whose use was saved was swept: %v", err)
+	}
+	// Idle by any account: swept.
+	later := now.Add(2 * web.SessionIdle)
+	sweepOnce(ctx, st, func(context.Context) error { return nil }, later, log)
+	if _, err := st.Session(ctx, token, later); !errors.Is(err, store.ErrNotFound) {
+		t.Errorf("an idle session was not swept: %v", err)
 	}
 }
 

@@ -89,17 +89,26 @@ func (s *Store) Session(ctx context.Context, token TokenHash, now time.Time) (Se
 	return sess, nil
 }
 
-// TouchSession records that a session was used at now.
+// TouchSession records that a session was used at now. It never moves
+// the record back: a use written late (web.Site.SaveSessionUses) must not
+// overwrite a later one written meanwhile, or a sweep would take the
+// session for idle.
 func (s *Store) TouchSession(ctx context.Context, token TokenHash, now time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?`, now.Unix(), token[:])
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE token_hash = ? AND last_seen_at < ?`,
+		now.Unix(), token[:], now.Unix())
 	return err
 }
 
-// DeleteSession ends a session. Ending one that does not exist is not an
-// error: signing out twice is still signed out.
-func (s *Store) DeleteSession(ctx context.Context, token TokenHash) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, token[:])
-	return err
+// DeleteSession ends a session, and reports whether there was one to end.
+// Ending one that does not exist is not an error: signing out twice is
+// still signed out.
+func (s *Store) DeleteSession(ctx context.Context, token TokenHash) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, token[:])
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // DeleteExpiredSessions removes sessions that expired at or before now, or

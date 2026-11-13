@@ -306,6 +306,10 @@ func (s *server) saveNote(w http.ResponseWriter, r *http.Request) {
 		labels, err = store.ParseLabels(typedLabels)
 	}
 	if err == nil {
+		if save, _ := s.noteSaves.admit(u.user.Username, s.opts.Now(), noteSaves); !save {
+			s.errorPage(w, r, http.StatusTooManyRequests, "This account has saved notes and labels very many times in the last hour, so this one was not saved. Wait a while and save it again.")
+			return
+		}
 		err = s.opts.Store.SetNote(r.Context(), store.Note{Serial: serial, Text: text, Labels: labels, UpdatedAt: s.opts.Now(), UpdatedBy: u.user.Username})
 	}
 	if errors.Is(err, store.ErrInvalidNote) {

@@ -33,6 +33,9 @@ const (
 	ActionUserAdd    = "user-add"
 	ActionUserPasswd = "user-passwd"
 	ActionUserRemove = "user-remove"
+	// ActionHistoryGap is written by handrail-ca when history rows could
+	// not be written, once it can write again, to say how many are missing.
+	ActionHistoryGap = "history-gap"
 
 	// OutcomeAttempt is written before an issue or revoke is sent to the
 	// CA, so that an action whose result was never learned still shows.
@@ -47,6 +50,9 @@ const (
 // ActorCommandLine is the actor recorded for the `handrail-ca user`
 // subcommands, which run as whoever has a shell on the host.
 const ActorCommandLine = "(command line)"
+
+// ActorHandrail is the actor of the rows handrail-ca writes about itself.
+const ActorHandrail = "(handrail-ca)"
 
 // Event is one row of the history.
 type Event struct {

@@ -42,6 +42,7 @@ var historyActions = []struct{ action, label string }{
 	{store.ActionUserAdd, "Accounts added"},
 	{store.ActionUserPasswd, "Passwords set"},
 	{store.ActionUserRemove, "Accounts removed"},
+	{store.ActionHistoryGap, "Gaps in the history"},
 }
 
 // actionWords says an action as the history shows it. An action this
@@ -55,6 +56,7 @@ var actionWords = map[string]string{
 	store.ActionUserAdd:    "Account added",
 	store.ActionUserPasswd: "Password set",
 	store.ActionUserRemove: "Account removed",
+	store.ActionHistoryGap: "Rows missing",
 }
 
 // outcomeLook is how each outcome is shown.

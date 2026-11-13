@@ -86,7 +86,7 @@ type Store interface {
 	ChangePassword(ctx context.Context, userID int64, oldHash, newHash string, now time.Time) error
 	Session(ctx context.Context, token store.TokenHash, now time.Time) (store.Session, error)
 	TouchSession(ctx context.Context, token store.TokenHash, now time.Time) error
-	DeleteSession(ctx context.Context, token store.TokenHash) error
+	DeleteSession(ctx context.Context, token store.TokenHash) (bool, error)
 	DeviceUser(ctx context.Context, token store.TokenHash, now time.Time) (string, error)
 	RememberDevice(ctx context.Context, userID int64, passwordHash string, token store.TokenHash, now time.Time) error
 	TouchDevice(ctx context.Context, token store.TokenHash, now time.Time) error
@@ -154,7 +154,14 @@ type server struct {
 	// hash makes the stored form of a new password (password.Hash).
 	hash      func(pw string) (string, error)
 	status    *statusCache
-	strangers strangerBudget
+	strangers rowBudget
+	// routine bounds each account's sign-in and sign-out rows, noteSaves
+	// its saves of notes (see accountBudgets).
+	routine, noteSaves accountBudgets
+	// touches remembers uses of sessions the store could not record.
+	touches touches
+	// missing counts history rows that could not be written.
+	missing missingRows
 	// late holds history rows that are written after their answer has
 	// gone out (see recordLater).
 	late lateRows
@@ -182,6 +189,24 @@ type server struct {
 type Site struct {
 	http.Handler
 	server *server
+}
+
+// SaveSessionUses writes to the store the uses of sessions it could not
+// record when they happened (see touches), and forgets those it wrote. A
+// sweep of idle sessions goes by the store's record of their last use, so
+// it is to run only after this has worked: otherwise, once a store that
+// could not be written to can be again, a sweep would end sessions that
+// are in use. Ending a session and its expiry are not affected: a session
+// that is no longer in the store is not written back.
+func (h *Site) SaveSessionUses(ctx context.Context) error {
+	s := h.server
+	for hash, at := range s.touches.remembered() {
+		if err := s.opts.Store.TouchSession(ctx, hash, at); err != nil {
+			return err
+		}
+		s.touches.forgetIf(hash, at)
+	}
+	return nil
 }
 
 // Settle waits, for no longer than limit, until the history rows that are
