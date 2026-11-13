@@ -296,11 +296,25 @@ else. A database on another machine has to be reached with
 checked, since the password and the list both cross that connection; on
 the same machine any mode is accepted. That takes one certificate, for
 PostgreSQL, from your own CA: handrail-ca checks it against the CA root it
-already has, with nothing more to configure.
-[docs/ca-setup.md](docs/ca-setup.md), section 3, has the steps.
+already has, with nothing more to configure. Since your CA will issue a
+certificate for that name to whoever may ask it, handrail-ca also requires
+such a database to sign it in with SCRAM-SHA-256 bound to that certificate
+(PostgreSQL 11 or later, the role's password stored as SCRAM, which is the
+default since 14).
+[docs/ca-setup.md](docs/ca-setup.md), section 3, has the steps, and what
+this does and does not protect against.
+
+In the `postgres://` form, percent-encode every character of the password
+that is not a letter, a digit, `-`, `.`, `_` or `~`. A string that parses
+into something other than was meant (a password with a `/` or an `@` in it
+does) is refused at start with a fixed message, so that no part of the
+password ends up on the status page or in the log.
 
 It starts whether or not the CA and its database are up; the CA status
-page says which, and how old its picture of the certificates is.
+page says which, and how old its picture of the certificates is. A read
+that gets no answer is given up after forty seconds and counted as failed,
+and a picture that has not been read again for two minutes is marked out
+of date on every page that shows it, whatever the reason.
 
 ### Accounts
 

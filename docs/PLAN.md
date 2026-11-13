@@ -388,6 +388,38 @@ unreadable, not skipped. If the database cannot be reached, the last
 inventory stays on screen with its age, and issuing and revoking still work,
 since they go through the CA's API.
 
+Changed after the security review before the first release (2026-11-13):
+
+- A certificate from the CA for the database's name is not the database:
+  the CA issues certificates, to handrail-ca's own operators among others,
+  and a peer holding one passed the TLS check, was sent the role's
+  password when it asked for it in clear, and had its rows taken as the
+  certificate list. For a database on another machine handrail-ca now
+  requires SCRAM-SHA-256 bound to the certificate it saw (`require_auth`,
+  `channel_binding=require`), unless the connection string says otherwise
+  (owner's decision, 2026-11-13). `channel_binding=disable` opts out, and
+  the status page then says so. Tried against the development CA's
+  PostgreSQL 17, whose certificate the CA issued. Not closed by this: a
+  peer that offers SCRAM is sent a proof it can test password guesses
+  against, so the guide asks for a long random password; and not tried
+  with a pooler in between or an Ed25519 server certificate.
+- A read that hung reported nothing, so the picture read before it stayed
+  "up to date" for as long as the hang lasted, hiding every revocation made
+  meanwhile. Each call to the database now has a deadline on this side
+  (forty seconds, ten more than the server's own `statement_timeout`) and
+  is a failed read past it; and every page that shows the picture calls it
+  out of date once the last complete read is four refresh intervals old,
+  whatever the last attempt said.
+- A connection string written wrongly can still parse, with the password
+  or a part of it as the host, the database or the user, which are shown
+  on the status page and logged (an unencoded `/` or `@` in the password
+  of a URL; a missing space in the keyword form). What the driver made of
+  the string is now checked for being a plausible host, database and user
+  before any of it is used, and a string that fails is refused with the
+  same fixed message as one that does not parse. This narrows what is
+  accepted: names with characters outside letters, digits, `_`, `.`, `$`
+  and `-`, and a URL that names no user, are refused.
+
 Status is derived, most severe first: revoked, expired, not yet valid,
 expiring soon (configurable window), valid. If the revocation table could not
 be read, status is shown as unknown rather than valid. As built, "expiring"

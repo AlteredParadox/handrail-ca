@@ -198,6 +198,12 @@ func TestIntegrationDatabaseOverVerifiedTLS(t *testing.T) {
 	if n := len(inv.Snapshot().Certificates); n < 16 {
 		t.Errorf("%d certificates read over TLS", n)
 	}
+	// The sign-in was SCRAM bound to the server's certificate: the reader
+	// requires that of a database on another machine, so the read above
+	// would have failed without it.
+	if c := p.pool.Config().ConnConfig; c.ChannelBinding != "require" || c.RequireAuth != "scram-sha-256" {
+		t.Errorf("channel_binding=%q require_auth=%q on a connection to another machine", c.ChannelBinding, c.RequireAuth)
+	}
 	// It really is TLS, and the session is still read-only.
 	var ssl bool
 	var readOnly string

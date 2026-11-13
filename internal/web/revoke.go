@@ -210,7 +210,7 @@ func (s *server) newRevokeData(r *http.Request, snap *inventory.Snapshot, c *inv
 		Subject: c.Subject, Names: row.Names, SerialHex: groupedBy(c.SerialHex, 4),
 		Expires: expiry(c.NotAfter, now), ExpiresDay: c.NotAfter.UTC().Format("2006-01-02"), Expired: !c.NotAfter.After(now),
 		Provisioner: c.Provisioner.Name, ProvisionerType: c.Provisioner.Type, ACME: c.Provisioner.Type == acmeType,
-		Stale: snap.State.Problem,
+		Stale: staleReason(snap.State, now),
 		Note:  note, MaxNote: maxRevokeNote,
 	}
 	if data.Title == "" {

@@ -91,6 +91,65 @@ func TestOpenPostgresAcceptsOnlySafeTransport(t *testing.T) {
 	}
 }
 
+// A connection string that is written wrongly can still parse, with the
+// password, or a part of it, where the host, the database or the user
+// belongs. Those are shown on the status page and written to the log, so
+// such a string is refused like one that does not parse, and nothing of
+// it is repeated.
+func TestOpenPostgresRefusesAStringThatParsesAsSomethingElse(t *testing.T) {
+	clearPGEnv(t)
+	const tail = "@db.internal.example:5432/stepca?sslmode=verify-full"
+	for name, conn := range map[string]string{
+		"a password that begins with a slash":          "postgres://handrail:/" + testPassword + tail,
+		"a password of digits, a slash and more":       "postgres://handrail:2026/" + testPassword + tail,
+		"a password with an at sign in it":             "postgres://handrail:Dummy@" + testPassword + tail,
+		"no space before password=":                    "host=db.internal.examplepassword=" + testPassword + " user=handrail dbname=stepca sslmode=verify-full",
+		"no space before password=, and no sslmode":    "host=db.internal.examplepassword=" + testPassword + " user=handrail dbname=stepca",
+		"no space before password=, after a socket":    "host=/var/run/postgresqlpassword=" + testPassword + " user=handrail dbname=stepca",
+		"no space before password=, after the user":    "host=127.0.0.1 user=handrailpassword=" + testPassword + " dbname=stepca",
+		"no space before password=, after the dbname":  "host=127.0.0.1 user=handrail dbname=stepcapassword=" + testPassword,
+		"a URL that names no user":                     "postgres://db.internal.example:5432/stepca?sslmode=verify-full",
+		"a second host that is part of the password":   "postgres://handrail:x@127.0.0.1," + testPassword + "@db.internal.example/stepca?sslmode=verify-full",
+		"the other spelling of the scheme, same fault": "postgresql://handrail:/" + testPassword + tail,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := OpenPostgres(conn, nil)
+			if err == nil {
+				defer p.Close()
+				t.Fatalf("accepted, as %s", strings.ReplaceAll(p.Describe(), testPassword, "<THE PASSWORD>"))
+			}
+			if !errors.Is(err, errNotUnderstood) {
+				t.Errorf("refused with %q, want the fixed message", strings.ReplaceAll(err.Error(), testPassword, "<THE PASSWORD>"))
+			}
+			if strings.Contains(err.Error(), testPassword) {
+				t.Error("the error repeats the password")
+			}
+		})
+	}
+	// What is written rightly is still taken, awkward passwords included.
+	for name, conn := range map[string]string{
+		"a password with a colon":          "postgres://handrail:Dummy:" + testPassword + tail,
+		"an encoded slash and at sign":     "postgres://handrail:%2F" + testPassword + "%40x" + tail,
+		"a quoted password with a space":   "host=db.internal.example user=handrail password='a b " + testPassword + "' dbname=stepca sslmode=verify-full",
+		"an address and a socket":          "host=/var/run/postgresql user=handrail password=" + testPassword + " dbname=stepca",
+		"IPv6":                             "postgres://handrail:" + testPassword + "@[::1]:5432/stepca?sslmode=disable",
+		"a role and database with marks":   "postgres://handrail_ro:" + testPassword + "@127.0.0.1/step-ca.db?sslmode=disable",
+		"two hosts":                        "postgres://handrail:" + testPassword + "@db1.internal.example,db2.internal.example/stepca?sslmode=verify-full",
+		"the other spelling of the scheme": "postgresql://handrail:" + testPassword + tail,
+	} {
+		t.Run(name, func(t *testing.T) {
+			p, err := OpenPostgres(conn, nil)
+			if err != nil {
+				t.Fatalf("refused: %v", err)
+			}
+			defer p.Close()
+			if strings.Contains(p.Describe(), testPassword) {
+				t.Errorf("Describe carries the password: %q", p.Describe())
+			}
+		})
+	}
+}
+
 func TestOpenPostgresDoesNotEchoWhatItCannotParse(t *testing.T) {
 	for _, conn := range []string{
 		"postgres://handrail:" + testPassword + "@127.0.0.1:notaport/stepca",
