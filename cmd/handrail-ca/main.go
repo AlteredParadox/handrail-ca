@@ -100,11 +100,6 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return 1
 		}
 		acting = &ca.ProvisionerConfig{Name: cfg.provisioner, Password: pw}
-		if strings.EqualFold(strings.TrimSpace(cfg.provisioner), adminProvisioner) {
-			log.Warn("the provisioner handrail-ca is to act through has the name step-ca gives the one its administrators sign in with. "+
-				"Every operator here would be issuing through the administrators' provisioner. "+
-				"Give handrail-ca a provisioner of its own (docs/ca-setup.md, section 1)", "provisioner", cfg.provisioner)
-		}
 	}
 	client, err := ca.New(ca.Config{URL: cfg.caURL, Fingerprint: cfg.caFingerprint, UserAgent: "handrail-ca/" + version, Provisioner: acting})
 	if err != nil {
@@ -337,6 +332,13 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 		missing = append(missing, "-provisioner (HANDRAIL_PROVISIONER)")
 	case cfg.provisionerPasswordFile == "":
 		missing = append(missing, "-provisioner-password-file (HANDRAIL_PROVISIONER_PASSWORD_FILE)")
+	case strings.EqualFold(strings.TrimSpace(cfg.provisioner), adminProvisioner):
+		// Every operator would be issuing through the provisioner the
+		// CA's administrators authenticate with, and the list leaves what
+		// is issued through it out as the CA's own (security review N-06).
+		fmt.Fprintf(stderr, "handrail-ca: -provisioner (HANDRAIL_PROVISIONER) is %q, the name step-ca gives the provisioner its administrators sign in with. "+
+			"handrail-ca does not act through it: give handrail-ca a provisioner of its own (docs/ca-setup.md, section 1).\n", cfg.provisioner)
+		return cfg, 2
 	}
 	if len(missing) > 0 {
 		fmt.Fprintf(stderr, "handrail-ca: not configured: %s. Run with -h for what each one is.\n", strings.Join(missing, ", "))

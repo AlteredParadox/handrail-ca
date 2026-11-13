@@ -45,8 +45,10 @@ admin provisioner is named `Admin JWK`.
 
 Do not give handrail-ca that provisioner, or any other that the CA's
 administrators are registered under. Its operators would then be issuing
-through the administrators' own provisioner; handrail-ca warns at start
-when the provisioner it is given has that name. What a certificate from
+through the administrators' own provisioner. handrail-ca refuses to start
+when the provisioner it is given is named `Admin JWK` (in any case), but
+it cannot tell which other provisioners have admins registered under them,
+so that part is yours to keep to. What a certificate from
 it would let its holder do at the CA's admin interface was not tried
 here.
 

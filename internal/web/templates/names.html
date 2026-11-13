@@ -42,7 +42,8 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 {{end}}
 
 <section class="card">
-<p>Every name in {{if .All}}every certificate the CA has issued, ended or not{{else}}the certificates that are in date and not revoked{{end}}: {{.Certificates}} certificate{{if ne .Certificates 1}}s{{end}}. step-ca has no such list.</p>
+<p>Every name handrail-ca can read in {{if .All}}every certificate the CA has issued, ended or not{{else}}the certificates that are in date and not revoked{{end}}: {{.Certificates}} certificate{{if ne .Certificates 1}}s{{end}}. step-ca has no such list.</p>
+<p class="muted">Names of other kinds (other names such as a user principal name, directory names, registered IDs) and all but the last common name of a subject are not here; a certificate's own page says when it holds any.</p>
 <p class="muted">It is what a name policy on the CA has to allow. The policy applies to every provisioner, and a name it leaves out stops being issued and renewed. Once a policy allows anything, a kind of name with no rule at all is refused, so each kind below needs at least one rule.</p>
 <nav class="views" aria-label="Which certificates">
 <a href="{{.ActiveURL}}"{{if not .All}} aria-current="true"{{end}}>In date and not revoked</a>

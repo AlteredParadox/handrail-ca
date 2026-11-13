@@ -58,6 +58,10 @@ type detailData struct {
 	CommonName string
 	Subject    string // the whole subject
 	Names      []nameGroup
+	// UnshownNames and CommonNames are what the certificate holds that
+	// Go's parser does not hand over (unshown.go).
+	UnshownNames []string
+	CommonNames  []string
 
 	NotBefore, NotAfter string
 	Lifetime            string
@@ -356,6 +360,7 @@ func fillCertificate(data *detailData, cert *x509.Certificate, now time.Time) {
 		data.Issuer = cert.Issuer.String()
 	}
 	data.Names = nameGroups(cert)
+	data.UnshownNames, data.CommonNames = unshownNames(cert), commonNames(cert)
 
 	data.NotBefore, data.NotAfter = cert.NotBefore.UTC().Format(stamp), cert.NotAfter.UTC().Format(stamp)
 	total := cert.NotAfter.Sub(cert.NotBefore)

@@ -552,8 +552,9 @@ Measured with 100,000 certificates in the CA's database, on two cores of a
 | Pages | 0.06 to 0.26 seconds |
 | Disk | A 20 MB binary, and its store (`handrail.db` in the data directory): accounts, history, notes |
 
-About 720 bytes of memory go to each certificate, so a CA with a few
-thousand certificates needs a few megabytes for them. What then counts is
+The summary itself is about 720 bytes a certificate, and the running
+process grows by about 1.5 KB for each, so a CA with a few thousand
+certificates needs a few megabytes for them. What then counts is
 the password check at sign-in, which takes 64 MB for a moment, two at a
 time at most.
 
@@ -581,6 +582,59 @@ Three things matter more than size:
   refuses what it asks. Keep both on NTP.
 - Its only state is the data directory. Losing it loses accounts, history
   and notes, and nothing about the certificates.
+
+### Known limits
+
+The security reviews before the first release (2026-11-13) left these as
+they are, by the owner's decision: each is outside what handrail-ca is
+meant to defend against, or costs more to close than it is worth for a
+tool run by the people who run the CA. Read them against your own
+installation.
+
+- **Plain HTTP shares its cookies with the machine.** On a plain-HTTP
+  loopback address the session cookie goes to every web service on that
+  host name, and the cookie alone is the session ("Serving plain HTTP"
+  above). handrail-ca starts that way only with `-plain-http`, and the
+  session is not bound to anything else. Use a host name of its own behind
+  TLS wherever another service on the machine is less trusted than an
+  operator.
+- **The reverse proxy is known by its address alone.** Whatever connects
+  from a `-trusted-proxy` address is believed about who the visitor is;
+  there is no shared secret with the proxy. Such a process can write false
+  addresses into the history for what it does and hold off one visitor's
+  sign-ins from a new browser, five minutes at a time; it gains no session
+  and cannot issue or revoke. Run the proxy where nothing else can connect
+  from its address.
+- **The CA's name policy is what bounds the names page.** The page shows
+  at most 100 groups of 200 names of each kind, each name cut to 256
+  characters, but its overall size is set by the names in the CA's
+  certificates, which their requesters chose. A review measured 34 MB, and
+  114 MB with names full of characters that need escaping, for one request
+  on certificates made outside a CA. A CA-wide name policy in place before
+  anything was issued keeps the page to what that policy allows.
+- **Everything the CA has issued is read into memory.** Each read takes
+  every row of the two tables, step-ca never prunes them, and past
+  5,000,000 rows in either, or past the memory of the host, handrail-ca can
+  no longer list certificates or revoke them; a restart does not bring that
+  back (revoke with the step CLI then). Ordinary certificates cost about
+  1.5 KB each in a running process, about 0.65 million to a gigabyte; one
+  with thousands of names (up to 256 KiB is read) costs far more. Watch
+  the size of `x509_certs` and `revoked_x509_certs` against the figures
+  above.
+- **A slow reader holds a finished page.** A page that is being sent is
+  kept in memory until it is sent, for at most the 60 seconds a response
+  may take. Only a signed-in user can do that, one page per request.
+- **Names Go does not parse are not listed.** Subject alternative names of
+  kinds other than DNS names, IP addresses, email addresses and URIs (a
+  user principal name, a directory name), and all but the last common name
+  of a subject, are on no list and found by no search. A certificate's page
+  says when it holds any, and how many of each kind; the downloaded
+  certificate has them all.
+- **Only the name `Admin JWK` is refused as the provisioner.** handrail-ca
+  will not start acting through the provisioner step-ca gives its
+  administrators, but it cannot see which other provisioners have
+  administrators registered under them. Give it one of its own
+  ([docs/ca-setup.md](docs/ca-setup.md), section 1).
 
 ## Development
 

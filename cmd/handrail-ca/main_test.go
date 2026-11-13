@@ -773,6 +773,29 @@ func TestAMisspeltSwitchStopsTheStart(t *testing.T) {
 	}
 }
 
+// handrail-ca does not act through the provisioner step-ca's administrators
+// sign in with (security review N-06), whatever its case or spacing; a
+// name that only contains it is another provisioner.
+func TestTheAdministratorsProvisionerStopsTheStart(t *testing.T) {
+	clearEnv(t)
+	args := func(t *testing.T, name string) []string {
+		return []string{"-data", t.TempDir(), "-ca-url", "https://ca.invalid", "-ca-fingerprint", testFingerprint,
+			"-db-url-file", dbURLFile(t), "-provisioner", name, "-provisioner-password-file", dbURLFile(t)}
+	}
+	for _, name := range []string{"Admin JWK", "admin jwk", " Admin JWK "} {
+		var errOut bytes.Buffer
+		if _, code := parseConfig(args(t, name), &errOut); code != 2 || !strings.Contains(errOut.String(), "a provisioner of its own") {
+			t.Errorf("-provisioner %q: code %d, %q", name, code, errOut.String())
+		}
+	}
+	for _, name := range []string{"handrail", "Admin JWK 2"} {
+		var errOut bytes.Buffer
+		if cfg, code := parseConfig(args(t, name), &errOut); code != 0 || cfg.provisioner != name {
+			t.Errorf("-provisioner %q: code %d, %q", name, code, errOut.String())
+		}
+	}
+}
+
 // A password file keeps what a password may contain and loses only what
 // follows it.
 func TestReadPasswordFile(t *testing.T) {
