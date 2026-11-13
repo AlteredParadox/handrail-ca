@@ -143,7 +143,35 @@ func currentUser(r *http.Request) *signedInUser {
 
 // session returns the signed-in user for a request, or nil if there is no
 // valid session. An error means the store could not be asked.
+//
+// A request that the browser says a page of another origin started has no
+// session, whoever is signed in: it is answered as it would be for a
+// stranger. Otherwise such a page could tell from the answers (a redirect
+// or none, a window that opens or does not) whether its visitor is signed
+// in, as what, and what state a certificate is in.
 func (s *server) session(r *http.Request) (*signedInUser, error) {
+	if fromAnotherOrigin(r) {
+		return nil, nil
+	}
+	return s.sessionOf(r)
+}
+
+// fromAnotherOrigin reports whether the browser says a request was started
+// by a page of another origin: another site, or another origin of this
+// site (a sibling host name, another port). SameSite=Strict keeps the
+// cookies from the first and not from the second. Sec-Fetch-Site is the
+// browser's own word, which a page's script cannot set or change; a client
+// that sends none is not judged by it.
+func fromAnotherOrigin(r *http.Request) bool {
+	switch r.Header.Get("Sec-Fetch-Site") {
+	case "", "same-origin", "none":
+		return false
+	}
+	return true
+}
+
+// sessionOf is the signed-in user the request's session cookie stands for.
+func (s *server) sessionOf(r *http.Request) (*signedInUser, error) {
 	token := s.cookieToken(r, sessionCookie)
 	if token == nil {
 		return nil, nil

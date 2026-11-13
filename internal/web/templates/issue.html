@@ -52,7 +52,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 
 {{if .Generated}}
 {{with .Generated}}
-<section class="card">
+<section class="card notranslate" translate="no">
 <div class="card-head"><h2>The certificate and its private key</h2><span class="badge ok">Issued</span></div>
 <p class="callout warn"><strong>Save the {{if .PFX}}PFX file{{else}}private key{{end}}{{if .MadePassword}} and its password{{end}} now. This page is the only place {{if .MadePassword}}they are{{else}}it is{{end}}.</strong> handrail-ca made {{if .PFX}}the key in it{{else}}it{{end}} for this one answer and has not kept it: not in its store, not in its log. Leave or reload this page and it is gone, and the certificate with it is of no use. Reloading does not make another.</p>
 {{with .PFXProblem}}<p class="problem" role="alert">The PFX file that was asked for could not be made ({{.}}). The key is handed over below as PEM instead, encrypted with the same password.</p>{{end}}

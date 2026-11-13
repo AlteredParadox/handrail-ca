@@ -98,6 +98,12 @@ func TestGenerate(t *testing.T) {
 	if got := rec.Header().Get("Cache-Control"); got != "no-store" {
 		t.Errorf("the page with the key may be kept by the browser: Cache-Control %q", got)
 	}
+	// Nor is it to be held in a proxy's buffer, which spills to a file, or
+	// handed to a browser's translation service.
+	if got := rec.Header().Get("X-Accel-Buffering"); got != "no" {
+		t.Errorf("the page with the key may be buffered by the proxy: X-Accel-Buffering %q", got)
+	}
+	wantBody(t, rec, `<section class="card notranslate" translate="no">`)
 	wantBody(t, rec, "The certificate and its private key", "Save the private key now. This page is the only place it is.",
 		"<dt>Subject</dt><dd>CN=git.internal.example</dd>", "<dt>Key</dt><dd>ECDSA P-256, not encrypted</dd>", `href="/certificates/5001"`)
 	for _, absent := range []string{"Generate key and sign", `name="once"`, "Not as asked"} {
