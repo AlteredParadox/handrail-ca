@@ -317,6 +317,8 @@ type brokenStore struct {
 	readHistoryErr atomic.Pointer[error]
 	// deviceErr fails looking a device up, rememberErr recording one.
 	deviceErr, rememberErr atomic.Pointer[error]
+	// appendGate, when set, holds every history write until it is closed.
+	appendGate atomic.Pointer[chan struct{}]
 	// beforeCreate runs between the password check and the session being
 	// created, where a concurrent `user passwd` could land. beforeChange
 	// runs at the same point of a change of password.
@@ -366,6 +368,9 @@ func (b *brokenStore) History(ctx context.Context, q store.HistoryQuery) ([]stor
 }
 
 func (b *brokenStore) AppendHistory(ctx context.Context, e store.Event) error {
+	if gate := b.appendGate.Load(); gate != nil {
+		<-*gate
+	}
 	if err := b.historyErr.Load(); err != nil {
 		return *err
 	}
@@ -573,6 +578,8 @@ func (w *syncWriter) Write(p []byte) (int, error) {
 
 func (s *site) history() []store.Event {
 	s.t.Helper()
+	// Rows of failed sign-ins are written after their answers.
+	s.server.late.settle()
 	events, err := s.store.Store.History(context.Background(), store.HistoryQuery{})
 	if err != nil {
 		s.t.Fatal(err)
@@ -978,47 +985,54 @@ func TestOversizedFormIsRefused(t *testing.T) {
 	wantStatus(t, b.get("/status"), http.StatusOK)
 }
 
+// The throttle counts by user name and by the visitor's address, where the
+// address is known: here, behind a proxy that says who it speaks for.
 func TestSignInIsThrottled(t *testing.T) {
-	s := newSite(t, "http://127.0.0.1:8080")
+	s := newSite(t, "https://handrail.internal.example", "10.20.0.5")
+	visitor := func() *browser {
+		b := s.browser()
+		b.forwardedFor = "203.0.113.7"
+		return b
+	}
 	for range limiterAttempts {
-		wantStatus(t, s.browser().signIn("alice", "a wrong password"), http.StatusUnauthorized)
+		wantStatus(t, visitor().signIn("alice", "a wrong password"), http.StatusUnauthorized)
 	}
 	// Now even the right password is refused, without being checked.
-	rec := s.browser().signIn("alice", alicePassword)
+	rec := visitor().signIn("alice", alicePassword)
 	wantStatus(t, rec, http.StatusTooManyRequests)
 	wantBody(t, rec, "Too many failed sign-ins")
 	if rec.Header().Get("Retry-After") == "" {
 		t.Error("no Retry-After")
 	}
 	// The same address is throttled for other names too.
-	wantStatus(t, s.browser().signIn("bob", bobPassword), http.StatusTooManyRequests)
+	wantStatus(t, visitor().signIn("bob", bobPassword), http.StatusTooManyRequests)
 
 	s.clock.advance(limiterWindow)
-	wantRedirect(t, s.browser().signIn("alice", alicePassword), "/")
+	wantRedirect(t, visitor().signIn("alice", alicePassword), "/")
 
 	// A success clears the name's count: four more failures do not lock it.
 	s.server.limiter = newLimiter()
 	for range limiterAttempts - 1 {
-		s.browser().signIn("bob", "wrong")
+		visitor().signIn("bob", "wrong")
 	}
-	wantRedirect(t, s.browser().signIn("bob", bobPassword), "/")
+	wantRedirect(t, visitor().signIn("bob", bobPassword), "/")
 	if e := s.server.limiter.names["bob"]; e != nil {
 		t.Errorf("bob's failures were kept after a success: %+v", e)
 	}
 	// The address keeps its four failures, and gets the successful attempt
 	// back: one more wrong guess is checked, the one after is not.
-	if e := s.server.limiter.addrs["10.20.0.5"]; e == nil || e.attempts != limiterAttempts-1 {
+	if e := s.server.limiter.addrs["203.0.113.7"]; e == nil || e.attempts != limiterAttempts-1 {
 		t.Errorf("the address's count after a success: %+v", e)
 	}
-	wantStatus(t, s.browser().signIn("alice", "wrong"), http.StatusUnauthorized)
-	wantStatus(t, s.browser().signIn("alice", alicePassword), http.StatusTooManyRequests)
+	wantStatus(t, visitor().signIn("alice", "wrong"), http.StatusUnauthorized)
+	wantStatus(t, visitor().signIn("alice", alicePassword), http.StatusTooManyRequests)
 
 	// Names that cannot be accounts count against the address as well.
 	s.server.limiter = newLimiter()
 	for range limiterAttempts {
-		wantStatus(t, s.browser().signIn("not a name", "x"), http.StatusUnauthorized)
+		wantStatus(t, visitor().signIn("not a name", "x"), http.StatusUnauthorized)
 	}
-	wantStatus(t, s.browser().signIn("not a name", "x"), http.StatusTooManyRequests)
+	wantStatus(t, visitor().signIn("not a name", "x"), http.StatusTooManyRequests)
 }
 
 // Guesses sent all at once queue for a hashing slot; the throttle must hold
@@ -1048,7 +1062,9 @@ func TestThrottleHoldsUnderConcurrency(t *testing.T) {
 		switch code {
 		case http.StatusUnauthorized:
 			checked++
-		case http.StatusTooManyRequests:
+		case http.StatusTooManyRequests, http.StatusServiceUnavailable:
+			// Refused by the throttle, or turned away because the line
+			// for a hashing slot was full: unchecked either way.
 			refused++
 		default:
 			t.Errorf("unexpected status %d", code)
@@ -1741,6 +1757,32 @@ func TestOneVisitorCannotLockEveryoneOutBehindAProxy(t *testing.T) {
 	}
 }
 
+// Under an http public URL every browser arrives from this machine's own
+// address. Counted as one visitor, five wrong sign-ins by any program on
+// the machine would refuse everyone's.
+func TestOneLocalClientCannotLockEveryoneOutOnLoopback(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	local := func() *browser {
+		b := s.browser()
+		b.remote = "127.0.0.1:40000"
+		return b
+	}
+	for range limiterAttempts + 3 {
+		local().signIn("not a name", "wrong")
+		local().signIn("nobody", "wrong")
+	}
+	wantRedirect(t, local().signIn("bob", bobPassword), "/")
+	// The limit per user name still holds.
+	for range limiterAttempts {
+		wantStatus(t, local().signIn("alice", "wrong"), http.StatusUnauthorized)
+	}
+	wantStatus(t, local().signIn("alice", alicePassword), http.StatusTooManyRequests)
+	wantRedirect(t, local().signIn("bob", bobPassword), "/")
+	if last := s.history()[0]; last.Remote != "127.0.0.1" {
+		t.Errorf("history has %q as the address, want the connection's", last.Remote)
+	}
+}
+
 // Without a trusted proxy in the path the header is the visitor's own
 // words, and is not believed.
 func TestForwardedHeaderIsIgnoredFromAnUntrustedPeer(t *testing.T) {
@@ -1754,9 +1796,15 @@ func TestForwardedHeaderIsIgnoredFromAnUntrustedPeer(t *testing.T) {
 				b.forwardedFor = fmt.Sprintf("203.0.113.%d", i)
 				wantStatus(t, b.signIn("nobody", "wrong"), http.StatusUnauthorized)
 			}
+			// Nothing was counted under the addresses the header named, and
+			// the connection's own address is nobody in particular (see
+			// clientAddr), so it is not counted either.
+			if n := len(s.server.limiter.addrs); n != 0 {
+				t.Errorf("%d addresses are being counted: %v", n, s.server.limiter.addrs)
+			}
 			b := s.browser()
 			b.forwardedFor = "203.0.113.99"
-			wantStatus(t, b.signIn("bob", bobPassword), http.StatusTooManyRequests)
+			wantRedirect(t, b.signIn("bob", bobPassword), "/")
 			if last := s.history()[0]; last.Remote != "10.20.0.5" {
 				t.Errorf("history has %q as the address, want the connection's", last.Remote)
 			}
@@ -1778,11 +1826,13 @@ func TestClientAddr(t *testing.T) {
 		addr         string
 		known        bool
 	}{
-		{"direct", direct, "192.0.2.4:5000", nil, "192.0.2.4", true},
-		{"direct, header ignored", direct, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", true},
-		{"direct IPv6", direct, "[2001:db8::4]:5000", nil, "2001:db8::4", true},
-		{"direct, IPv4 written as IPv6", direct, "[::ffff:192.0.2.4]:5000", nil, "192.0.2.4", true},
-		{"no port", direct, "192.0.2.4", nil, "192.0.2.4", true},
+		// Under an http public URL every browser arrives from the machine's
+		// own address, which is therefore nobody in particular.
+		{"direct", direct, "192.0.2.4:5000", nil, "192.0.2.4", false},
+		{"direct, header ignored", direct, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", false},
+		{"direct IPv6", direct, "[2001:db8::4]:5000", nil, "2001:db8::4", false},
+		{"direct, IPv4 written as IPv6", direct, "[::ffff:192.0.2.4]:5000", nil, "192.0.2.4", false},
+		{"no port", direct, "192.0.2.4", nil, "192.0.2.4", false},
 		{"not an address", direct, "@", nil, "@", false},
 		{"undeclared proxy", undeclared, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", false},
 		{"through the proxy", behind, "10.20.0.5:5000", []string{"203.0.113.7"}, "203.0.113.7", true},
@@ -1806,7 +1856,7 @@ func TestClientAddr(t *testing.T) {
 		{"a visitor's gateway listed as a proxy", gatewayListed, "10.20.0.5:5000", []string{"203.0.113.99, 172.17.0.1"}, "203.0.113.99", true},
 		{"the same, with only the proxy listed", behind, "10.20.0.5:5000", []string{"203.0.113.99, 172.17.0.1"}, "172.17.0.1", true},
 		{"https, not from a listed proxy", behind, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", false},
-		{"http, not from a listed proxy", directWithProxies, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", true},
+		{"http, not from a listed proxy", directWithProxies, "192.0.2.4:5000", []string{"203.0.113.7"}, "192.0.2.4", false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

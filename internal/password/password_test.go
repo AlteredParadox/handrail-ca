@@ -18,9 +18,37 @@ package password
 
 import (
 	"errors"
+	"runtime"
 	"strings"
 	"testing"
 )
+
+// A password over MaxLength is never the right one, and is answered with
+// the same work as any other: without it, the answer would come sooner and
+// cost its sender nothing.
+func TestVerifyHashesAPasswordThatIsTooLong(t *testing.T) {
+	longest := strings.Repeat("x", MaxLength)
+	hash, err := Hash(longest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := Verify(hash, longest); err != nil || !ok {
+		t.Fatalf("Verify(the longest password allowed) = %v, %v", ok, err)
+	}
+	// What is hashed of this one is the password itself.
+	tooLong := longest + "x"
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	ok, err := Verify(hash, tooLong)
+	runtime.ReadMemStats(&after)
+	if err != nil || ok {
+		t.Errorf("Verify(a password one byte too long) = %v, %v; want false, nil", ok, err)
+	}
+	// argon2id works in hashMemory KiB of its own.
+	if used := after.TotalAlloc - before.TotalAlloc; used < hashMemory*1024/2 {
+		t.Errorf("answered after allocating %d bytes: the password was not hashed", used)
+	}
+}
 
 func TestHashAndVerify(t *testing.T) {
 	const pw = "correct horse battery"

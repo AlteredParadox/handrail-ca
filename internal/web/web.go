@@ -34,6 +34,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -148,12 +149,15 @@ type server struct {
 	log    *slog.Logger
 
 	limiter   *limiter
-	hashSlots chan struct{} // bounds concurrent password hashing
-	dummyHash string        // checked when the user does not exist
+	hashing   *hashGate // bounds concurrent password hashing
+	dummyHash string    // checked when the user does not exist
 	// hash makes the stored form of a new password (password.Hash).
 	hash      func(pw string) (string, error)
 	status    *statusCache
 	strangers strangerBudget
+	// late holds history rows that are written after their answer has
+	// gone out (see recordLater).
+	late lateRows
 
 	// Things already warned about once: peers that are not listed
 	// proxies (see clientAddr), and host names requests were refused for.
@@ -174,10 +178,34 @@ type server struct {
 	formKey []byte
 }
 
+// Site is the handler for the whole site.
+type Site struct {
+	http.Handler
+	server *server
+}
+
+// Settle waits, for no longer than limit, until the history rows that are
+// written after their answer (see recordLater) have been written. It is
+// for the end of the process, once no request is being served any more.
+func (h *Site) Settle(limit time.Duration) {
+	done := make(chan struct{})
+	go func() {
+		h.server.late.settle()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(limit):
+	}
+}
+
 // New returns the handler for the whole site.
-func New(opts Options) (http.Handler, error) {
-	_, handler, err := build(opts)
-	return handler, err
+func New(opts Options) (*Site, error) {
+	s, handler, err := build(opts)
+	if err != nil {
+		return nil, err
+	}
+	return &Site{Handler: handler, server: s}, nil
 }
 
 // build is New, also returning the state behind the handler for the tests.
@@ -230,11 +258,12 @@ func build(opts Options) (*server, http.Handler, error) {
 		pages:     pages,
 		log:       opts.Log,
 		limiter:   newLimiter(),
-		hashSlots: make(chan struct{}, maxConcurrentHashes),
+		hashing:   newHashGate(maxConcurrentHashes),
 		dummyHash: dummy,
 		hash:      password.Hash,
 		status:    &statusCache{},
 	}
+	s.late.idle = sync.NewCond(&s.late.mu)
 
 	static, err := fs.Sub(staticFS, "static")
 	if err != nil {

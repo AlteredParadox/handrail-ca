@@ -89,7 +89,13 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 		tooMany()
 		return
 	}
-	checked, err := s.checkPassword(r.Context(), username, current, who)
+	// A change of password comes with a session, so it does not wait
+	// behind strangers' sign-ins for its hashing (see hashGate).
+	checked, err := s.checkPassword(r.Context(), username, current, who, true)
+	if errors.Is(err, errBusy) {
+		s.busyAccount(w, r)
+		return
+	}
 	if err != nil {
 		s.log.Error("checking a password", "err", err)
 		s.errorPage(w, r, http.StatusInternalServerError, "handrail-ca could not check the password. The log has the details.")
@@ -105,7 +111,21 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The current password was right. That attempt is given back to the
+	// throttle only when the change is made, which it is not past this
+	// point more than a few times in a window (see limiter.change).
+	if s.limiter.change(s.opts.Now(), username) > 0 {
+		s.renderAccount(w, r, http.StatusTooManyRequests, false, "This account's password has been changed several times in the last few minutes. Wait a few minutes and try again.")
+		return
+	}
+
 	newHash, err := s.hashPassword(r.Context(), next)
+	if errors.Is(err, errBusy) {
+		// The current password was right, and its attempt is given back.
+		s.limiter.succeedFor(checked.counted)
+		s.busyAccount(w, r)
+		return
+	}
 	now := s.opts.Now()
 	if err == nil {
 		// Only if the account still has the hash that was just checked: a
@@ -147,14 +167,20 @@ func (s *server) changePassword(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, s.base+"/account?changed=1", http.StatusSeeOther)
 }
 
+// busyAccount answers a change of password that found too many others
+// waiting for their hashing. Nothing was changed.
+func (s *server) busyAccount(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Retry-After", retryWhenBusy)
+	s.renderAccount(w, r, http.StatusServiceUnavailable, false, "handrail-ca is busy checking other passwords, and nothing was changed. Try again in a moment.")
+}
+
 // hashPassword hashes a new password, taking one of the hashing slots like
-// every password check does.
+// every password check does. Its caller holds a session (see hashGate).
 func (s *server) hashPassword(ctx context.Context, pw string) (string, error) {
-	select {
-	case s.hashSlots <- struct{}{}:
-		defer func() { <-s.hashSlots }()
-	case <-ctx.Done():
-		return "", ctx.Err()
+	release, err := s.hashing.take(ctx, true)
+	if err != nil {
+		return "", err
 	}
+	defer release()
 	return s.hash(pw)
 }

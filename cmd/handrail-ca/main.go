@@ -184,6 +184,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	}
 
 	log.Info("handrail-ca listening", "addr", ln.Addr().String(), "url", publicURL.String(), "ca", client.URL(), "version", version)
+	// Rows of failed sign-ins are written after their answers; when serving
+	// ends the last of them may still be on their way to the store.
+	defer handler.Settle(5 * time.Second)
 	return serve(ctx, ln, handler, log)
 }
 
