@@ -1270,7 +1270,10 @@ account management in the web UI; several CAs.
   documented backup.
 - **Table growth.** Short-lived certificates and no pruning mean the tables
   only grow. Measured at 100,000 rows (section 6, M2): fine there, with
-  the cost of each read growing with the tables.
+  the cost of each read growing with the tables. Past the row cap or the
+  host's memory, handrail-ca can no longer list or revoke (security review
+  N-18); accepted and documented, with the other limits the reviews left,
+  in the README's "Known limits" (owner, 2026-11-13).
 - **Revocation is weaker than the word suggests.** Without a CRL a revoked
   certificate keeps working until it expires. The UI states this on the
   revoke page instead of leaving the operator to assume otherwise.
