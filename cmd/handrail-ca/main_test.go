@@ -173,6 +173,38 @@ func TestRunWarnsAboutAnUndeclaredProxy(t *testing.T) {
 	}
 }
 
+// A plain-HTTP public URL shares its cookies with every other service on
+// the same loopback name; handrail-ca says so at start, and not under an
+// https one.
+func TestRunWarnsAboutPlainHTTP(t *testing.T) {
+	const warning = "the public URL is plain http"
+	for name, tt := range map[string]struct {
+		more []string
+		want bool
+	}{
+		"the default": {nil, true},
+		"https":       {[]string{"-public-url", "https://handrail.example", "-trusted-proxy", "127.0.0.1"}, false},
+	} {
+		t.Run(name, func(t *testing.T) {
+			addr := freeAddr(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			var errOut syncBuffer
+			done := make(chan int, 1)
+			args := serverArgs(t, addr, tt.more...)
+			go func() { done <- run(ctx, args, nil, io.Discard, &errOut) }()
+			waitForHealth(t, addr, &errOut)
+			cancel()
+			if code := <-done; code != 0 {
+				t.Fatalf("exit code = %d: %s", code, errOut.String())
+			}
+			if got := strings.Contains(errOut.String(), warning); got != tt.want {
+				t.Errorf("warning present = %v, want %v: %s", got, tt.want, errOut.String())
+			}
+		})
+	}
+}
+
 // waitForHealth returns once the server at addr answers its health probe.
 func waitForHealth(t *testing.T, addr string, log *syncBuffer) {
 	t.Helper()

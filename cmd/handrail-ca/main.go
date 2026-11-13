@@ -174,6 +174,13 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		log.Error("starting", "err", err)
 		return 1
 	}
+	if publicURL.Scheme == "http" {
+		// Browsers keep cookies for a host name, not for a port.
+		log.Warn("the public URL is plain http on a loopback name: a browser sends this site's cookies, the session " +
+			"cookie included, to every other web service on that name, whatever its port, and that cookie alone is the " +
+			"session. Use it only where all of them are trusted as much as an operator; otherwise put a reverse proxy " +
+			"with TLS and a host name of its own in front (README, \"Serving plain HTTP\")")
+	}
 	if publicURL.Scheme == "https" && len(cfg.trustedProxies) == 0 {
 		// handrail-ca does not speak TLS, so an https address means a
 		// proxy is in front, and every visitor arrives from its address.

@@ -72,7 +72,7 @@ export HANDRAIL_PROVISIONER_PASSWORD_FILE=/etc/handrail-ca/provisioner_password
 | `-read-only` | `HANDRAIL_READ_ONLY=1` | View only: no provisioner is used, and nothing can be issued or revoked. One of this and the two settings above is required; giving both is refused. |
 | `-no-key-generation` | `HANDRAIL_NO_KEY_GENERATION=1` | Do not offer to generate private keys. Certificates are then issued for pasted certificate signing requests only. |
 | `-listen` | `HANDRAIL_LISTEN` | Listen address; `127.0.0.1:8080` unless set. |
-| `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`. |
+| `-public-url` | `HANDRAIL_PUBLIC_URL` | The address browsers use, `https://host[:port][/path]`. Required when listening beyond loopback. `http://` is accepted only for `localhost`, `127.0.0.1` and `::1`, and then every other web service on that name gets handrail-ca's cookies (see [Serving](#serving-plain-http-and-other-services-on-the-machine) below). |
 | `-trusted-proxy` | `HANDRAIL_TRUSTED_PROXIES` | Addresses or CIDR ranges of the reverse proxies in front, comma-separated. Set it whenever there is one. |
 
 The two switches read `1`, `true`, `yes` or `on` as on, and `0`, `false`,
@@ -234,6 +234,24 @@ forms are accepted from, cookies are marked `Secure` for it, and a path in
 it (`https://tools.example/handrail`) serves everything under that path.
 Listening beyond loopback with no account is refused.
 
+#### Serving plain HTTP, and other services on the machine
+
+On `http://127.0.0.1`, `http://localhost` or `http://[::1]` (the default),
+handrail-ca's cookies are not its own. A browser keeps cookies for a host
+name, not for a port, so every other web service on that name that the
+same browser visits is sent the session cookie, and that cookie alone is
+the session: an operator's means issuing and revoking for up to twelve
+hours. That includes another user's program on the machine, another
+container published on its loopback address, and the services of a
+workstation that reaches handrail-ca through a forwarded port. Use the
+plain-HTTP address only where every one of those is trusted as much as an
+operator, or keep a browser profile for handrail-ca alone; otherwise give
+it a host name of its own behind a reverse proxy with TLS, where the
+cookies are `Secure` and `__Host-` and go to that name only. Sign out when
+you are done: that ends the session on the server, wherever its cookie has
+gone. handrail-ca says this in its log when it starts on a plain-HTTP
+address.
+
 The proxy has to do two things besides TLS: pass the visitor's `Host`
 header through unchanged, and set `X-Forwarded-For`. handrail-ca answers
 only requests addressed to the name in `-public-url`; nginx by default
@@ -272,6 +290,15 @@ who the visitor is, so never list a visitor's own address, a gateway or NAT
 that visitors arrive through, or a whole network: anyone arriving from
 there could then put any address they like in the header, in the history
 and past the limit per address.
+
+That holds for everything that can connect from the address, not only the
+proxy. `127.0.0.1` is every process on the proxy's machine, and a Docker
+bridge's gateway every process on the host. Any of them can write the
+address it likes into the history for what it does, and can use up the
+sign-in attempts of a visitor's address it chooses, so that visitor cannot
+sign in from a new browser for five minutes at a time (the limit per user
+name still holds, and nothing else is gained). Run the proxy where nothing
+else that can connect from its address is less trusted than it is.
 
 The address to list is the one handrail-ca sees, which is not always the
 one you would guess:
@@ -449,7 +476,8 @@ docker run -d -p 127.0.0.1:8080:8080 \
 
 The image runs as an unprivileged user, keeps its store in `/data`, and
 works with a read-only root filesystem. That example is for use on the one
-machine. Behind a reverse proxy, `HANDRAIL_PUBLIC_URL` is the proxy's
+machine, by people who trust everything else served on its loopback
+address (see [Serving plain HTTP](#serving-plain-http-and-other-services-on-the-machine)). Behind a reverse proxy, `HANDRAIL_PUBLIC_URL` is the proxy's
 `https://` address and `HANDRAIL_TRUSTED_PROXIES` the address the proxy
 reaches the container from (see above).
 
