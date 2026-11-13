@@ -292,7 +292,9 @@ const scrubTimeout = 5 * time.Second
 
 // whileScrubbing runs while the writer's busy timeout is set aside. It
 // does nothing; a test puts in its place what may happen at that moment.
-var whileScrubbing = func() {}
+var whileScrubbing = func() {
+	// Nothing happens here outside tests.
+}
 
 // Ping reports whether the store can be read.
 func (s *Store) Ping(ctx context.Context) error {
