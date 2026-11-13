@@ -969,14 +969,35 @@ re-issuing an existing certificate from its page.
   database account and the certificate for PostgreSQL; the README has the
   reverse proxy and container examples, what revocation means, and backing
   up the store, each tried before it was written down.
-- A security review of the whole tree before the tag. The owner runs it,
-  on a machine set up for that, outside this repository; it is not done
-  by the changes here and nothing here records its outcome. `scan` is
-  already a required check.
+- A security review of the whole tree before the tag. The owner ran it,
+  on a machine set up for that, outside this repository (2026-11-13, on
+  the tree as it was before the changes below). It found no way for
+  someone without an account, or a viewer, to issue, revoke, read a key or
+  take over a session, and rated nothing above low. What it did find is
+  fixed in the changes that followed, each noted in this document where
+  it applies as "security review" with what was tried; the report itself
+  is the owner's and is not kept here. Left open by those changes, and
+  said so where they are described: what else may share the machine, the
+  loopback address and the browser's origin with handrail-ca, and whether
+  a certificate from the CA's own admin provisioner opens its admin
+  interface. A second pass, by another tool, was still running when this
+  was written. `scan` is already a required check.
 - Done: pictures in the README, of the development CA.
 - Done: the release workflow was run once without a tag (a manual run
   builds both binaries and the image and publishes nothing), so that the
   tag is not the first thing ever to run it.
+- Changed after that review: `make build` took the version stamp from the
+  nearest git tag and pasted it into the recipe, where the shell would run
+  what a tag named `v1.0-$(...)` holds (tags arrive with any remote that
+  is fetched; no workflow was exposed). The stamp now reaches the recipe
+  through the environment and is refused if it has characters a version
+  does not. The release workflow now builds its binaries and its image
+  without caches saved by other jobs, and refuses a tag whose commit is
+  not on `main`; the commands of that last check were tried in a clone,
+  the step itself runs for the first time at the first tag.
+  `HANDRAIL_READ_ONLY` and `HANDRAIL_NO_KEY_GENERATION` set to something
+  that is neither a yes nor a no used to be read as off, and now stop the
+  start.
 - At the tag: the workflow makes the release with its binaries, their
   checksums and notes from the merged pull requests, and pushes the image
   to GHCR. A package on GHCR starts out private: making it public is a

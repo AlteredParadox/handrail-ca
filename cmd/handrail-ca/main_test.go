@@ -637,10 +637,53 @@ func TestRunReadOnly(t *testing.T) {
 }
 
 func TestEnvBool(t *testing.T) {
-	for value, want := range map[string]bool{"1": true, "true": true, "TRUE": true, " yes ": true, "on": true, "": false, "0": false, "false": false, "no": false, "maybe": false} {
+	for value, want := range map[string]bool{"1": true, "true": true, "TRUE": true, " yes ": true, "on": true, "": false, "0": false, "false": false, "no": false, " Off ": false} {
 		t.Setenv("HANDRAIL_TEST_ENVBOOL", value)
-		if got := envBool("HANDRAIL_TEST_ENVBOOL"); got != want {
-			t.Errorf("envBool(%q) = %v, want %v", value, got, want)
+		if got, err := envBool("HANDRAIL_TEST_ENVBOOL"); got != want || err != nil {
+			t.Errorf("envBool(%q) = %v, %v; want %v", value, got, err, want)
+		}
+	}
+	// Neither a yes nor a no: an error, and never a quiet "no".
+	for _, value := range []string{"maybe", "enabled", "y", "t", `"1"`, "1 # view only", "2", strings.Repeat("x", 500)} {
+		t.Setenv("HANDRAIL_TEST_ENVBOOL", value)
+		got, err := envBool("HANDRAIL_TEST_ENVBOOL")
+		if err == nil || got {
+			t.Errorf("envBool(%q) = %v, %v; want an error", value, got, err)
+			continue
+		}
+		if !strings.Contains(err.Error(), "HANDRAIL_TEST_ENVBOOL") || len(err.Error()) > 300 {
+			t.Errorf("envBool(%q): the error is %q", value, err)
+		}
+	}
+}
+
+// The two switches that take something away stop the start when their
+// value is not understood. Read as "off", a misspelt switch would leave
+// operators able to do what its writer meant to forbid, without a word.
+func TestAMisspeltSwitchStopsTheStart(t *testing.T) {
+	for _, name := range []string{"HANDRAIL_READ_ONLY", "HANDRAIL_NO_KEY_GENERATION"} {
+		for _, value := range []string{"enabled", "y", `"1"`, "1 # view only"} {
+			t.Run(name+"="+value, func(t *testing.T) {
+				t.Setenv(name, value)
+				var errOut bytes.Buffer
+				_, code := parseConfig([]string{"-data", t.TempDir()}, &errOut)
+				if code != 2 {
+					t.Errorf("parseConfig returned %d, want 2: %s", code, errOut.String())
+				}
+				if !strings.Contains(errOut.String(), name) || !strings.Contains(errOut.String(), "not understood") {
+					t.Errorf("the message does not name the setting: %q", errOut.String())
+				}
+			})
+		}
+	}
+	// Written as documented, and written as "no", they start as before.
+	for value, want := range map[string]bool{"1": true, "0": false, "": false} {
+		t.Setenv("HANDRAIL_NO_KEY_GENERATION", value)
+		t.Setenv("HANDRAIL_READ_ONLY", value)
+		var errOut bytes.Buffer
+		cfg, _ := parseConfig([]string{"-data", t.TempDir()}, &errOut)
+		if cfg.noKeyGeneration != want || cfg.readOnly != want || strings.Contains(errOut.String(), "not understood") {
+			t.Errorf("with %q: read-only %v, no key generation %v: %s", value, cfg.readOnly, cfg.noKeyGeneration, errOut.String())
 		}
 	}
 }

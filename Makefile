@@ -2,6 +2,11 @@ BINARY := handrail-ca
 # Stamped into the binary as main.version. The release workflow overrides
 # this with the tag; local builds report the git description, or "dev".
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# The stamp reaches the recipe through the environment, never as text of
+# the command line. A tag's name is whatever its author wrote, tags arrive
+# with any remote that is fetched, and the shell would run what a name such
+# as v1.0-$(...) holds if make pasted it into the recipe.
+export HANDRAIL_VERSION := $(VERSION)
 
 .PHONY: build run test vet jscheck notices notices-check license-headers license-check dev-up dev-verify dev-test dev-measure dev-down clean
 
@@ -10,7 +15,8 @@ VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 # is actually linked in — no separate step to forget after a dependency bump.
 # The committed copy exists only so a bare `go build` still works.
 build: notices
-	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$(VERSION)" -o $(BINARY) ./cmd/$(BINARY)
+	@case "$$HANDRAIL_VERSION" in ''|*[!A-Za-z0-9._+-]*) echo "build: the version stamp has characters a version does not: refusing it (set VERSION=... to choose one)" >&2; exit 1;; esac
+	CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=$$HANDRAIL_VERSION" -o $(BINARY) ./cmd/$(BINARY)
 
 run:
 	go run ./cmd/$(BINARY)

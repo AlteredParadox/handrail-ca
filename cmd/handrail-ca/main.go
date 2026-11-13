@@ -100,6 +100,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return 1
 		}
 		acting = &ca.ProvisionerConfig{Name: cfg.provisioner, Password: pw}
+		if strings.EqualFold(strings.TrimSpace(cfg.provisioner), adminProvisioner) {
+			log.Warn("the provisioner handrail-ca is to act through has the name step-ca gives the one its administrators sign in with. "+
+				"Every operator here would be issuing through the administrators' provisioner. "+
+				"Give handrail-ca a provisioner of its own (docs/ca-setup.md, section 1)", "provisioner", cfg.provisioner)
+		}
 	}
 	client, err := ca.New(ca.Config{URL: cfg.caURL, Fingerprint: cfg.caFingerprint, UserAgent: "handrail-ca/" + version, Provisioner: acting})
 	if err != nil {
@@ -187,6 +192,11 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 	return serve(ctx, ln, handler, log)
 }
 
+// adminProvisioner is the name `step ca init` gives the JWK provisioner
+// that the CA's administrators authenticate through when remote management
+// is on.
+const adminProvisioner = "Admin JWK"
+
 // provisionerRetry is how long to wait before trying again to open the
 // provisioner's key.
 const provisionerRetry = 30 * time.Second
@@ -259,8 +269,17 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 	fs.StringVar(&cfg.publicURL, "public-url", os.Getenv("HANDRAIL_PUBLIC_URL"), "the address browsers use, http(s)://host[:port][/path]; needed unless listening on loopback (or set HANDRAIL_PUBLIC_URL)")
 	fs.StringVar(&cfg.provisioner, "provisioner", os.Getenv("HANDRAIL_PROVISIONER"), "name of the JWK provisioner on the CA that handrail-ca revokes through (or set HANDRAIL_PROVISIONER)")
 	fs.StringVar(&cfg.provisionerPasswordFile, "provisioner-password-file", os.Getenv("HANDRAIL_PROVISIONER_PASSWORD_FILE"), "file holding that provisioner's password (or set HANDRAIL_PROVISIONER_PASSWORD_FILE)")
-	fs.BoolVar(&cfg.readOnly, "read-only", envBool("HANDRAIL_READ_ONLY"), "view only: no provisioner is used and nothing can be issued or revoked (or set HANDRAIL_READ_ONLY=1)")
-	fs.BoolVar(&cfg.noKeyGeneration, "no-key-generation", envBool("HANDRAIL_NO_KEY_GENERATION"), "do not offer to generate private keys: certificates are issued for pasted certificate signing requests only (or set HANDRAIL_NO_KEY_GENERATION=1)")
+	// Both switches take something away, so a value that is not understood
+	// stops the start: read as "off" it would leave in place what its
+	// writer meant to remove, without a word.
+	readOnly, readOnlyErr := envBool("HANDRAIL_READ_ONLY")
+	noKeyGeneration, noKeysErr := envBool("HANDRAIL_NO_KEY_GENERATION")
+	if err := errors.Join(readOnlyErr, noKeysErr); err != nil {
+		fmt.Fprintf(stderr, "handrail-ca: %v\n", err)
+		return cfg, 2
+	}
+	fs.BoolVar(&cfg.readOnly, "read-only", readOnly, "view only: no provisioner is used and nothing can be issued or revoked (or set HANDRAIL_READ_ONLY=1)")
+	fs.BoolVar(&cfg.noKeyGeneration, "no-key-generation", noKeyGeneration, "do not offer to generate private keys: certificates are issued for pasted certificate signing requests only (or set HANDRAIL_NO_KEY_GENERATION=1)")
 	proxies := fs.String("trusted-proxy", os.Getenv("HANDRAIL_TRUSTED_PROXIES"), "addresses or CIDR ranges of the reverse proxies in front, comma-separated; only they are believed about who a visitor is (or set HANDRAIL_TRUSTED_PROXIES)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, 2
@@ -494,14 +513,28 @@ func probeHost(listenHost string) string {
 	return listenHost
 }
 
-// envBool reads a yes-or-no setting from the environment. Anything but a
-// plain yes is no; an unrecognised value is not guessed at.
-func envBool(key string) bool {
-	switch strings.ToLower(strings.TrimSpace(os.Getenv(key))) {
+// envBool reads a yes-or-no setting from the environment. Unset or empty is
+// no. A value that is neither a plain yes nor a plain no is an error and
+// not a guess: the settings read this way switch something off, and one
+// that was misspelt must not be taken for "leave it on".
+func envBool(key string) (bool, error) {
+	raw := os.Getenv(key)
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "", "0", "false", "no", "off":
+		return false, nil
 	case "1", "true", "yes", "on":
-		return true
+		return true, nil
 	}
-	return false
+	return false, fmt.Errorf("%s is set to %q, which is not understood: write 1 to switch it on, or leave it unset", key, clipSetting(raw))
+}
+
+// clipSetting bounds a setting's value for an error message.
+func clipSetting(value string) string {
+	const limit = 40
+	if r := []rune(value); len(r) > limit {
+		return string(r[:limit]) + "…"
+	}
+	return value
 }
 
 func envOr(key, def string) string {
