@@ -647,7 +647,7 @@ func (s *server) generate(w http.ResponseWriter, r *http.Request) {
 
 	cert := issued.Certificate
 	serial := cert.SerialNumber.String()
-	differs := differences(req, cert, provisioner.HasTemplate())
+	differs := differences(req, cert, templateOf(provisioner, data.Limits.Problem))
 	event.Serial, event.Subject = serial, cert.Subject.CommonName
 	event.Outcome, event.Detail = store.OutcomeOK, asked+"; issued, valid until "+cert.NotAfter.UTC().Format(stamp)
 	for _, d := range differs {

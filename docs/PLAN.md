@@ -530,6 +530,49 @@ database that is down does not stand between an operator and a
 revocation. Only a certificate in that picture can be revoked from here:
 step-ca would accept any serial number.
 
+That picture is in memory only, which limits the promise above (security
+review, 2026-11-13): after a start while the database cannot be read there
+is no picture, and a certificate issued after the last read that worked is
+not in it. The revoke form used to answer both with "no certificate with
+that serial number"; it now answers 503, says that it cannot tell, and
+names `step ca revoke` on the CA's host. The certificate's own page needs
+the database and was the only link to the form; the error shown in its
+place while the database is out of reach now carries that link. Not done,
+and the owner's to decide, since it reshapes a deliberate gate: keeping
+the summaries in the store across restarts, or allowing a revocation by
+serial number alone for a certificate the history recorded at issue.
+
+Changed with it, from the same review:
+
+- A certificate whose subject shows nothing (empty, a space, a zero-width
+  character) had a list row whose only link had no text. The row now shows
+  the serial number in the subject's place, and the serial column of every
+  row is a link too, so the way to a certificate never depends on text its
+  requester chose.
+- A subject with two spaces in a row is shown with one, so typing what
+  the page shows did not confirm a revocation. Such a subject is now
+  confirmed by the end of the serial number, like any other that cannot be
+  typed.
+- The revoke page said that revoking an expired certificate "only adds
+  the record". On step-ca 0.30.2 a provisioner with
+  `allowRenewalAfterExpiry` renews an expired certificate, and a
+  revocation stops that (tried on the development CA: renewed when the
+  claim is set, refused when it is not, refused once revoked). The page
+  now says so.
+- When the provisioner could not be read from the CA, the issue page said
+  as fact that the default template drops everything of the request's
+  subject but the common name. It now says that this is not known, shows
+  the request's subject, and does not make the statement. A certificate
+  whose subject is more than the common name asked for is reported as a
+  difference unless the provisioner is known to have a template of its
+  own; before, only a different common name was.
+- The notice that a certificate does not carry what was asked for was
+  missing where the certificate is handed over on the answer page itself
+  (the list has no page for it yet) and was replaced by "already signed"
+  when the form was sent again. The sentences are now kept with what is
+  remembered of the request and shown on each of those pages, and the
+  certificate's page states them in the notice itself.
+
 A token is dated by handrail-ca's clock and checked by the CA's, with a
 minute's leeway. When the CA refuses a request and the `Date` of its
 answer is more than fifty seconds from handrail-ca's clock, the error

@@ -483,6 +483,9 @@ type site struct {
 	// the serial number of the next one.
 	signer     issuer
 	nextSerial int64
+	// subjectOf, when set, is the subject the fake CA gives a certificate:
+	// what a provisioner's own template might make of the request.
+	subjectOf func(*ca.Request) pkix.Name
 }
 
 // newSite builds a site at publicURL, with the given addresses or ranges
@@ -556,8 +559,12 @@ func (s *site) caSigns(r *ca.Request, validity time.Duration) *ca.Issued {
 	s.nextSerial++
 	serial := 5000 + s.nextSerial
 	s.rows.mu.Unlock()
+	subject := pkix.Name{CommonName: r.CommonName}
+	if s.subjectOf != nil {
+		subject = s.subjectOf(r)
+	}
 	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(serial), Subject: pkix.Name{CommonName: r.CommonName},
+		SerialNumber: big.NewInt(serial), Subject: subject,
 		DNSNames: r.DNSNames, EmailAddresses: r.EmailAddresses,
 		NotBefore: s.clock.Now().Add(-time.Minute), NotAfter: s.clock.Now().Add(validity),
 		KeyUsage: x509.KeyUsageDigitalSignature, ExtKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth, x509.ExtKeyUsageClientAuth},
@@ -2370,7 +2377,8 @@ func TestListPage(t *testing.T) {
 		"web1.internal.example", `<span class="badge ok">Valid</span>`, "2027-02-09 12:00", "in 3 months",
 		"handrail <span class=\"sub\">JWK</span>",
 		// The serial 101, in hexadecimal.
-		`title="65">65</td>`,
+		// The serial 101, in hexadecimal, and a second way to its page.
+		`title="65"><a href="/certificates/101">65</a></td>`,
 		`aria-current="true">Active <span>1</span>`, `>Expired <span>1</span>`, `>Revoked <span>1</span>`, `>Unreadable <span>1</span>`, `>All <span>4</span>`,
 		`<option value="handrail">handrail (JWK)</option>`,
 		"1 to 1 of 1",

@@ -94,7 +94,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <p class="callout warn"><strong>This certificate was issued over ACME.</strong> An ACME client does not renew the certificate it has: it orders a new one each time, and the CA will fill that order. Revoking does not stop the machine from getting another certificate for these names. That has to be stopped on the machine itself.</p>
 {{end}}
 {{if .Expired}}
-<p class="callout info">This certificate has already expired, so nothing that checks dates accepts it any more. Revoking it only adds the record.</p>
+<p class="callout info">This certificate has already expired, so nothing that checks dates accepts it any more. Revoking it adds the record. It also stops the CA renewing the certificate, which the CA does for an expired one only through a provisioner set to allow renewal after expiry; that is off unless the CA's administrator turned it on.</p>
 {{else if not .CRLKnown}}
 <p class="callout warn"><strong>Whether this CA publishes a revocation list could not be determined.</strong> If it does not, systems that already trust this certificate have no way to learn it was revoked and will keep accepting it until it expires on {{.ExpiresDay}}. If the key is compromised, also remove or replace the certificate where it is installed.</p>
 {{else if .CRLPublished}}

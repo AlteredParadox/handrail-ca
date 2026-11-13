@@ -337,7 +337,11 @@ psql -c "SELECT pg_reload_conf()"
 
 If the certificate lapses, handrail-ca stops being able to read the list
 and says so on the CA status page, with the age of the picture it still
-has; issuing, revoking and the CA itself are not affected.
+has. The CA itself is not affected, and issuing and revoking still go to
+it, with one limit: handrail-ca revokes only certificates in the list as
+it last read it, so one issued after that, or any at all once handrail-ca
+has been restarted without the database, has to be revoked with
+`step ca revoke` on the CA's host until the list can be read again.
 
 ## 4. Revocation lists (optional)
 
