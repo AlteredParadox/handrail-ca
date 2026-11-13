@@ -354,13 +354,14 @@ func (p *Postgres) serials(ctx context.Context) ([]string, error) {
 		if err := rows.Scan(&key, &tooLong); err != nil {
 			return nil, plain(err)
 		}
-		if tooLong {
-			return nil, errKeyTooLong("x509_certs")
+		serial, err := keyFrom("x509_certs", key, tooLong)
+		if err != nil {
+			return nil, err
 		}
 		if len(serials) >= maxRows {
 			return nil, fmt.Errorf("more than %d certificates in the database", maxRows)
 		}
-		serials = append(serials, string(key))
+		serials = append(serials, serial)
 	}
 	return serials, plain(rows.Err())
 }
@@ -430,21 +431,26 @@ func (p *Postgres) revocations(ctx context.Context) ([]RawRevocation, error) {
 		if err := rows.Scan(&key, &tooLong, &value); err != nil {
 			return nil, plain(err)
 		}
-		if tooLong {
-			return nil, errKeyTooLong("revoked_x509_certs")
+		serial, err := keyFrom("revoked_x509_certs", key, tooLong)
+		if err != nil {
+			return nil, err
 		}
 		if len(out) >= maxRows {
 			return nil, fmt.Errorf("more than %d revocations in the database", maxRows)
 		}
-		out = append(out, RawRevocation{Serial: string(key), JSON: value})
+		out = append(out, RawRevocation{Serial: serial, JSON: value})
 	}
 	return out, plain(rows.Err())
 }
 
-// errKeyTooLong is the error for a row whose key is longer than maxKey. It
-// does not repeat the key.
-func errKeyTooLong(table string) error {
-	return fmt.Errorf("a row of %s has a key of more than %d bytes", table, maxKey)
+// keyFrom is the key of a row of table as the queries return it: the key,
+// or nothing and tooLong for one longer than maxKey, which fails the read.
+// The error does not repeat the key.
+func keyFrom(table string, key []byte, tooLong bool) (string, error) {
+	if tooLong || len(key) > maxKey {
+		return "", fmt.Errorf("a row of %s has a key of more than %d bytes", table, maxKey)
+	}
+	return string(key), nil
 }
 
 // plain turns a driver error into one that is safe to show and to log. The

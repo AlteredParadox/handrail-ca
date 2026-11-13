@@ -17,8 +17,10 @@
 package web
 
 import (
+	"context"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -114,5 +116,36 @@ func TestTheGapHoldsAfterASlowRead(t *testing.T) {
 		if rest := starts[i].Sub(ends[i-1]); rest < gap-20*time.Millisecond {
 			t.Errorf("read %d began %s after read %d ended, want at least %s", i, rest, i-1, gap)
 		}
+	}
+}
+
+// A press whose browser goes away while it waits, for its turn or for the
+// gap, reads nothing and goes back to the list.
+func TestAPressThatIsGivenUpReadsNothing(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := signedIn(t, s)
+	token := tokenIn(t, b.get("/"))
+	press := func() {
+		t.Helper()
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		b.ctx = ctx
+		defer func() { b.ctx = nil }()
+		wantRedirect(t, b.do(http.MethodPost, "/refresh", url.Values{"form_token": {token}}), "/")
+	}
+	before := s.rows.reads()
+
+	// Someone else's press has the turn.
+	s.server.refreshes.turn <- struct{}{}
+	press()
+	<-s.server.refreshes.turn
+	// The gap after the last read has a long way to go.
+	s.server.refreshes.next = time.Now().Add(time.Hour)
+	press()
+	if n := s.rows.reads() - before; n != 0 {
+		t.Errorf("presses given up while waiting made %d reads", n)
+	}
+	if !strings.Contains(s.log.String(), "could not be read on request") {
+		t.Error("the presses given up are not in the log")
 	}
 }

@@ -155,3 +155,21 @@ func TestRefreshesAskedForTogetherAreOneRead(t *testing.T) {
 		t.Errorf("two presses during a read made %d more reads, want 1", n)
 	}
 }
+
+func TestKeyFrom(t *testing.T) {
+	if got, err := keyFrom("x509_certs", []byte("1234"), false); got != "1234" || err != nil {
+		t.Errorf("a serial: %q, %v", got, err)
+	}
+	for name, tc := range map[string]struct {
+		key     []byte
+		tooLong bool
+	}{
+		"flagged by the query":  {nil, true},
+		"longer than the bound": {[]byte(strings.Repeat("9", maxKey+1)), false},
+	} {
+		got, err := keyFrom("revoked_x509_certs", tc.key, tc.tooLong)
+		if got != "" || err == nil || !strings.Contains(err.Error(), "revoked_x509_certs has a key of more than") || strings.Contains(err.Error(), "999") {
+			t.Errorf("%s: %q, %v", name, got, err)
+		}
+	}
+}
