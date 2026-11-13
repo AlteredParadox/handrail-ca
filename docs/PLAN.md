@@ -843,6 +843,35 @@ command, which the README gives ("Backing up"): tried against a running
 handrail-ca, a plain copy of the file lacked an account added a moment
 before, and the backup command's copy had it and started a server.
 
+Changed after the security review before the first release (2026-11-13):
+
+- The file is open twice: one connection that everything is written
+  through, and four that can only read (`query_only`), for what every
+  request asks: whose session this is, what the history says. Before,
+  reads and writes shared one connection, so page loads stood in line in
+  front of a history row with a five-second deadline, and a viewer loading
+  the history often enough could delay everyone's sign-in and, by the
+  source, lose the record of a completed revocation. SQLite in WAL mode
+  lets the readers read beside the writer; a test holds all four in the
+  middle of a read and writes a history row, a session and a new password
+  past them.
+- A history lookup narrowed to one certificate or one kind of event read
+  the whole table: its one statement switched each filter on or off by a
+  parameter, which no index can serve, and the table only grows. The
+  statement now holds just the filters asked for, there is an index on the
+  kind of event (the fourth schema step), and a test reads SQLite's own
+  plan for every form. A reading of the history gives up after two
+  seconds.
+- SQLite left what it freed as it was: the password hash of a removed
+  account or a replaced password, and the text of a removed note, stayed
+  in the file, and so in every backup of it, until the space was used
+  again. The store now opens with `secure_delete`, which overwrites what
+  is freed, and after such a change folds the write-ahead log into the
+  file and empties it, since the log holds the pages as they were. A test
+  looks for the removed text in every file of the data directory, with the
+  store open and closed, and fails without either half. Not done: a store
+  written before this is not rewritten (`VACUUM`); none was ever released.
+
 **Audit.** Every sign-in, issue and revoke, attempted and completed, is
 written to the store's history and as one structured log line: who, what,
 serial, subject, outcome. No secrets. If the history row cannot be written

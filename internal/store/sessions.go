@@ -71,7 +71,7 @@ func (s *Store) Session(ctx context.Context, token TokenHash, now time.Time) (Se
 		role                                      string
 		created, lastSeen, expires, uCreated, uPw int64
 	)
-	err := s.db.QueryRowContext(ctx,
+	err := s.read.QueryRowContext(ctx,
 		`SELECT s.created_at, s.last_seen_at, s.expires_at,
 		        u.id, u.username, u.role, u.created_at, u.password_changed_at
 		   FROM sessions s JOIN users u ON u.id = s.user_id

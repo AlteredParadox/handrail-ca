@@ -76,7 +76,7 @@ func (s *Store) RememberDevice(ctx context.Context, userID int64, passwordHash s
 // DeviceLifetime before now.
 func (s *Store) DeviceUser(ctx context.Context, token TokenHash, now time.Time) (string, error) {
 	var username string
-	err := s.db.QueryRowContext(ctx,
+	err := s.read.QueryRowContext(ctx,
 		`SELECT u.username FROM devices d JOIN users u ON u.id = d.user_id
 		  WHERE d.token_hash = ? AND d.last_used_at > ?`,
 		token[:], now.Add(-DeviceLifetime).Unix()).Scan(&username)

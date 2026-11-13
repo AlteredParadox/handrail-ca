@@ -477,6 +477,13 @@ alone from the moment it is created; without it SQLite makes a file
 anyone on the machine can read. Keep the directory it goes into private
 as well.
 
+What is removed from the store (an account, a password that was
+replaced, a note) is overwritten in the file, so a backup made afterwards
+does not carry it. A backup made before does, and restoring one brings
+back what it holds: accounts removed since, old passwords, and sessions
+that had not yet ended. Change passwords and remove accounts again after
+restoring an old one.
+
 To restore, stop handrail-ca, put the backup in the data directory as
 `handrail.db` (owned by the user handrail-ca runs as, mode `600`, with no
 `handrail.db-wal` or `handrail.db-shm` left beside it from before), and

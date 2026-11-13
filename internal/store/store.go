@@ -24,6 +24,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"errors"
 	"fmt"
 	"net/url"
@@ -118,12 +119,27 @@ CREATE TABLE devices (
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX devices_user ON devices (user_id);
 `,
+	// 4: the history narrowed to one kind of event without reading all of it.
+	`
+CREATE INDEX history_action ON history (action);
+`,
 }
 
 // Store is an open store. It is safe for concurrent use.
+//
+// It holds the file open twice. db is the one connection everything is
+// written through. read is a few connections that can only read, for what
+// every request asks (whose session is this, what does the history say):
+// SQLite in WAL mode lets them read beside the writer, so that page loads,
+// however many, do not stand in line in front of a history row or a new
+// session, and a write does not wait for them.
 type Store struct {
-	db *sql.DB
+	db   *sql.DB
+	read *sql.DB
 }
+
+// readConns is how many connections read the store at once.
+const readConns = 4
 
 // Open opens the store in dataDir, creating the directory and the file if
 // they are missing (owner-only), and brings the schema up to date. A file
@@ -148,11 +164,18 @@ func Open(ctx context.Context, dataDir string) (*Store, error) {
 
 	// synchronous=FULL: a history row that was reported written survives a
 	// power cut. The write volume is a handful of rows per action.
+	// secure_delete: SQLite overwrites what a DELETE or an UPDATE frees, so
+	// that the password hash of a removed account, a replaced password or a
+	// removed note does not stay in the file, and in every backup of it,
+	// until the space happens to be used again.
 	// The path is percent-encoded: SQLite reads this as a URI, where "?",
 	// "#" and "%" in a directory name would otherwise end or alter it.
-	dsn := "file:" + (&url.URL{Path: filepath.ToSlash(path)}).EscapedPath() +
-		fmt.Sprintf("?_pragma=busy_timeout(%d)", busyTimeout.Milliseconds()) +
-		"&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_txlock=immediate"
+	file := "file:" + (&url.URL{Path: filepath.ToSlash(path)}).EscapedPath() +
+		fmt.Sprintf("?_pragma=busy_timeout(%d)", busyTimeout.Milliseconds())
+	dsn := dsns{
+		write: file + "&_pragma=foreign_keys(1)&_pragma=journal_mode(WAL)&_pragma=synchronous(FULL)&_pragma=secure_delete(1)&_txlock=immediate",
+		read:  file + "&_pragma=query_only(1)",
+	}
 	// Two processes opening a new store at the same moment (the server
 	// starting while a `user` command runs, or two commands) collide on
 	// the file's first-time set-up: switching it to WAL needs the file to
@@ -188,9 +211,12 @@ var (
 	openRetryFor = 15 * time.Second
 )
 
+// dsns are the two ways the store's file is opened (see Store).
+type dsns struct{ write, read string }
+
 // openOnce connects and brings the schema up to date, once.
-func openOnce(ctx context.Context, dsn string) (*Store, error) {
-	db, err := sql.Open("sqlite", dsn)
+func openOnce(ctx context.Context, dsn dsns) (*Store, error) {
+	db, err := sql.Open("sqlite", dsn.write)
 	if err != nil {
 		return nil, err
 	}
@@ -203,6 +229,14 @@ func openOnce(ctx context.Context, dsn string) (*Store, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	// The readers come after the schema: they could not bring the file to
+	// WAL mode or create it.
+	s.read, err = sql.Open("sqlite", dsn.read)
+	if err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	s.read.SetMaxOpenConns(readConns)
 	return s, nil
 }
 
@@ -215,7 +249,52 @@ func isBusy(err error) bool {
 }
 
 // Close releases the file.
-func (s *Store) Close() error { return s.db.Close() }
+func (s *Store) Close() error {
+	return errors.Join(s.read.Close(), s.db.Close())
+}
+
+// scrub empties the write-ahead log into the file, after a change that
+// removed something which should not be found again: secure_delete clears
+// what is freed in the file, but the log beside it still holds the pages
+// as they were until it is next folded in. It is tried once and not waited
+// for: a reader in the middle of something makes it fail, and the log is
+// folded in sooner or later anyway.
+//
+// "Not waited for" is the writer's own busy timeout set to nothing for the
+// one statement, and it has to be set back whatever happens: this is the
+// only connection there is for writing, and left without its timeout every
+// later write would fail at once whenever another process (a `user`
+// command) holds the lock, where it should wait. So none of this runs
+// under the caller's context, which a browser going away would end between
+// the two settings; and a connection that could not be given its timeout
+// back is thrown away, for the next one to be opened as every connection
+// is, with the timeout in place.
+func (s *Store) scrub(ctx context.Context) {
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scrubTimeout)
+	defer cancel()
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(ctx, "PRAGMA busy_timeout = 0"); err != nil {
+		return
+	}
+	_, _ = conn.ExecContext(ctx, "PRAGMA wal_checkpoint(TRUNCATE)")
+	whileScrubbing()
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf("PRAGMA busy_timeout = %d", busyTimeout.Milliseconds())); err != nil {
+		_ = conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+}
+
+// scrubTimeout bounds scrub as a whole.
+const scrubTimeout = 5 * time.Second
+
+// whileScrubbing runs while the writer's busy timeout is set aside. It
+// does nothing; a test puts in its place what may happen at that moment.
+var whileScrubbing = func() {
+	// Nothing happens here outside tests.
+}
 
 // Ping reports whether the store can be read.
 func (s *Store) Ping(ctx context.Context) error {
