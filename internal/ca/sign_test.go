@@ -609,3 +609,103 @@ func TestNewRequest(t *testing.T) {
 		}
 	}
 }
+
+// oddlyWritten rewrites a request so that its public key is written in a
+// way that is not the standard one and can still be read: the key's
+// SEQUENCE carries a NULL after the key. The request is signed again with
+// its own key, so it is a good request in every other way. step-ca signs
+// such a request, and writes the key into the certificate the standard
+// way (seen on step-ca 0.30.2).
+func oddlyWritten(t *testing.T, csrText string, key crypto.Signer) string {
+	t.Helper()
+	block, _ := pem.Decode([]byte(csrText))
+	parsed, err := x509.ParseCertificateRequest(block.Bytes)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outer struct {
+		Info      asn1.RawValue
+		Algorithm asn1.RawValue
+		Signature asn1.BitString
+	}
+	if _, err := asn1.Unmarshal(block.Bytes, &outer); err != nil {
+		t.Fatal(err)
+	}
+	var spki asn1.RawValue
+	if _, err := asn1.Unmarshal(parsed.RawSubjectPublicKeyInfo, &spki); err != nil {
+		t.Fatal(err)
+	}
+	sequence := func(content []byte) []byte {
+		der, err := asn1.Marshal(asn1.RawValue{Class: asn1.ClassUniversal, Tag: asn1.TagSequence, IsCompound: true, Bytes: content})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return der
+	}
+	odd := sequence(append(append([]byte{}, spki.Bytes...), 0x05, 0x00))
+	if n := strings.Count(string(outer.Info.Bytes), string(parsed.RawSubjectPublicKeyInfo)); n != 1 {
+		t.Fatalf("the request holds its key %d times", n)
+	}
+	info := sequence([]byte(strings.Replace(string(outer.Info.Bytes), string(parsed.RawSubjectPublicKeyInfo), string(odd), 1)))
+	digest := sha256.Sum256(info)
+	signature, err := key.Sign(rand.Reader, digest[:], crypto.SHA256)
+	if err != nil {
+		t.Fatal(err)
+	}
+	der, err := asn1.Marshal(struct {
+		Info      asn1.RawValue
+		Algorithm asn1.RawValue
+		Signature asn1.BitString
+	}{asn1.RawValue{FullBytes: info}, asn1.RawValue{FullBytes: outer.Algorithm.FullBytes}, asn1.BitString{Bytes: signature, BitLength: 8 * len(signature)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE REQUEST", Bytes: der}))
+}
+
+// A certificate is for a request's key when the keys are the same, however
+// each was written down.
+func TestSignTakesACertificateForTheSameKeyWrittenAnotherWay(t *testing.T) {
+	f := newFakeCA(t)
+	p := newTestProvisioner(t, "P-256", "ES256")
+	f.lists(p.entry())
+	f.signs(t, p)
+	c := f.acting(t, testPassword, func() time.Time { return time.Date(2026, 11, 12, 9, 30, 0, 0, time.UTC) })
+
+	text, key := csrPEM(t, "P-256", &x509.CertificateRequest{Subject: pkix.Name{CommonName: "git.internal.example"}, DNSNames: []string{"git.internal.example"}})
+	plain, err := ReadRequest(text)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := ReadRequest(oddlyWritten(t, text, key))
+	if err != nil {
+		t.Fatalf("the request with its key written another way is not read: %v", err)
+	}
+	if string(req.CSR.RawSubjectPublicKeyInfo) == string(plain.CSR.RawSubjectPublicKeyInfo) || !reflect.DeepEqual(req.CSR.PublicKey, plain.CSR.PublicKey) {
+		t.Fatal("the fixture is not the same key written another way: this test would prove nothing")
+	}
+	issued, err := c.Sign(context.Background(), req, 0)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	// The CA wrote the key the standard way; it is the request's key.
+	if string(issued.Certificate.RawSubjectPublicKeyInfo) == string(req.CSR.RawSubjectPublicKeyInfo) {
+		t.Fatal("the certificate's key is written as the request's was: this test would prove nothing")
+	}
+	if !SameKey(issued.Certificate, req.CSR) || !SameKey(issued.Certificate, plain.CSR) {
+		t.Error("SameKey does not know the certificate's key for the request's")
+	}
+	// Another key is still another key.
+	other, _ := csrPEM(t, "P-256", &x509.CertificateRequest{Subject: pkix.Name{CommonName: "git.internal.example"}})
+	otherReq, err := ReadRequest(other)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if SameKey(issued.Certificate, otherReq.CSR) {
+		t.Error("SameKey takes another key for the same")
+	}
+	rsaText, _ := csrPEM(t, "RSA", &x509.CertificateRequest{Subject: pkix.Name{CommonName: "git.internal.example"}})
+	if rsaReq, err := ReadRequest(rsaText); err == nil && SameKey(issued.Certificate, rsaReq.CSR) {
+		t.Error("SameKey takes a key of another kind for the same")
+	}
+}

@@ -17,7 +17,6 @@
 package ca
 
 import (
-	"bytes"
 	"context"
 	"crypto"
 	"crypto/ecdsa"
@@ -332,7 +331,7 @@ func (c *Client) Sign(ctx context.Context, r *Request, validity time.Duration) (
 	if err != nil {
 		return nil, err
 	}
-	if !bytes.Equal(issued.Certificate.RawSubjectPublicKeyInfo, r.CSR.RawSubjectPublicKeyInfo) {
+	if !SameKey(issued.Certificate, r.CSR) {
 		return nil, errors.New("sign: the CA answered with a certificate for another key than the request's")
 	}
 	root, err := c.Root(ctx)
@@ -420,4 +419,18 @@ func readSigned(answer []byte) (*Issued, error) {
 		certs = append(certs, cert)
 	}
 	return &Issued{Certificate: certs[0], Intermediates: certs[1:]}, nil
+}
+
+// SameKey reports whether a certificate is for the public key of a
+// request. The keys are compared as keys, not as they are written down. A
+// request may write its key in a way that is unusual and still readable,
+// and step-ca writes the key into the certificate in the standard way
+// whatever the request's was (seen on step-ca 0.30.2); compared byte for
+// byte, such a certificate would be taken for another key's, the request
+// left at an outcome that is not known, and sent again later.
+func SameKey(cert *x509.Certificate, csr *x509.CertificateRequest) bool {
+	key, ok := cert.PublicKey.(interface {
+		Equal(crypto.PublicKey) bool
+	})
+	return ok && csr.PublicKey != nil && key.Equal(csr.PublicKey)
 }

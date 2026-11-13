@@ -494,3 +494,32 @@ func TestIntegrationSignCommonNamesUnderThePolicy(t *testing.T) {
 		t.Errorf("a common name that is no name: %v, want a 500 that gives no reason", err)
 	}
 }
+
+// A request whose public key is written in an unusual way, against a real
+// step-ca: it signs the request and writes the key into the certificate
+// the standard way, so the certificate's key is not, byte for byte, the
+// request's. Sign has to know it for the request's key all the same;
+// taking it for another's left such a request at an outcome that is not
+// known, to be sent again later.
+func TestIntegrationSignsARequestWhoseKeyIsWrittenAnotherWay(t *testing.T) {
+	caURL, fingerprint := devCA(t)
+	c, err := New(Config{URL: caURL, Fingerprint: fingerprint, Provisioner: devProvisioner(t)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, key := csrPEM(t, "P-256", &x509.CertificateRequest{Subject: pkix.Name{CommonName: "oddkey.handrail.test"}, DNSNames: []string{"oddkey.handrail.test"}})
+	req, err := ReadRequest(oddlyWritten(t, text, key))
+	if err != nil {
+		t.Fatal(err)
+	}
+	issued, err := c.Sign(devContext(t), req, 0)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if string(issued.Certificate.RawSubjectPublicKeyInfo) == string(req.CSR.RawSubjectPublicKeyInfo) {
+		t.Log("this step-ca wrote the key as the request did; the comparison by key was not needed here")
+	}
+	if !SameKey(issued.Certificate, req.CSR) {
+		t.Error("the certificate is not for the request's key")
+	}
+}
