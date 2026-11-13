@@ -265,6 +265,10 @@ type config struct {
 	readOnly bool
 	// noKeyGeneration switches off issuing with a key handrail-ca makes.
 	noKeyGeneration bool
+	// plainHTTP allows a public URL that is plain http on a loopback
+	// name, where the session cookie goes to every web service on that
+	// name (README, "Serving plain HTTP"). It has to be asked for.
+	plainHTTP bool
 }
 
 func parseConfig(args []string, stderr io.Writer) (config, int) {
@@ -282,14 +286,18 @@ func parseConfig(args []string, stderr io.Writer) (config, int) {
 	// Both switches take something away, so a value that is not understood
 	// stops the start: read as "off" it would leave in place what its
 	// writer meant to remove, without a word.
+	// The plain-HTTP switch gives something, and is read as strictly: a
+	// value that is not understood is not taken for either.
 	readOnly, readOnlyErr := envBool("HANDRAIL_READ_ONLY")
 	noKeyGeneration, noKeysErr := envBool("HANDRAIL_NO_KEY_GENERATION")
-	if err := errors.Join(readOnlyErr, noKeysErr); err != nil {
+	plainHTTP, plainErr := envBool("HANDRAIL_PLAIN_HTTP")
+	if err := errors.Join(readOnlyErr, noKeysErr, plainErr); err != nil {
 		fmt.Fprintf(stderr, "handrail-ca: %v\n", err)
 		return cfg, 2
 	}
 	fs.BoolVar(&cfg.readOnly, "read-only", readOnly, "view only: no provisioner is used and nothing can be issued or revoked (or set HANDRAIL_READ_ONLY=1)")
 	fs.BoolVar(&cfg.noKeyGeneration, "no-key-generation", noKeyGeneration, "do not offer to generate private keys: certificates are issued for pasted certificate signing requests only (or set HANDRAIL_NO_KEY_GENERATION=1)")
+	fs.BoolVar(&cfg.plainHTTP, "plain-http", plainHTTP, "allow a plain http:// public URL on a loopback name (the default when listening on loopback), where browsers send the session cookie to every web service on that name; see the README (or set HANDRAIL_PLAIN_HTTP=1)")
 	proxies := fs.String("trusted-proxy", os.Getenv("HANDRAIL_TRUSTED_PROXIES"), "addresses or CIDR ranges of the reverse proxies in front, comma-separated; only they are believed about who a visitor is (or set HANDRAIL_TRUSTED_PROXIES)")
 	if err := fs.Parse(args); err != nil {
 		return cfg, 2
@@ -356,7 +364,26 @@ func (c config) resolvePublicURL(listening net.Addr) (*url.URL, error) {
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
 		return nil, errors.New("-public-url: want http(s)://host[:port][/path]")
 	}
+	// An http address beyond loopback is refused whatever the switch says
+	// (web.New), with its own message.
+	if u.Scheme == "http" && !c.plainHTTP && loopbackHost(u.Hostname()) {
+		// Browsers keep cookies for a host name, not for a port.
+		return nil, fmt.Errorf("the public URL %s is plain http: browsers would send handrail-ca's session cookie to every other web service on %s, "+
+			"whatever its port, and that cookie alone is the session. Set -plain-http (HANDRAIL_PLAIN_HTTP=1) to run this way where every one of them "+
+			"is trusted as much as an operator, or put a reverse proxy with TLS in front and set -public-url to its https:// address "+
+			"(README, \"Serving plain HTTP\")", u.Redacted(), u.Hostname())
+	}
 	return u, nil
+}
+
+// loopbackHost is the test web.New applies to a plain-HTTP public URL's
+// host: localhost, or a loopback address.
+func loopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func isLoopback(addr net.Addr) bool {
