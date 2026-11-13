@@ -208,7 +208,7 @@ func (s *server) listPage(w http.ResponseWriter, r *http.Request) {
 
 	data := listData{
 		Read:         !st.LoadedAt.IsZero(),
-		Problem:      st.Problem,
+		Problem:      staleReason(st, now),
 		Search:       q.Search,
 		Provisioner:  q.Provisioner,
 		IncludeAdmin: q.IncludeAdmin,

@@ -239,7 +239,7 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	data := detailData{
 		Serial: summary.Serial, Title: summary.Subject, Badge: look.badge, StatusLabel: look.label,
 		Provisioner: summary.Provisioner.Name, ProvisionerType: summary.Provisioner.Type,
-		RevocationsKnown: snap.State.RevocationsKnown, Stale: snap.State.Problem,
+		RevocationsKnown: snap.State.RevocationsKnown, Stale: staleReason(snap.State, now),
 	}
 	if !snap.State.LoadedAt.IsZero() {
 		data.LastRead = span(now.Sub(snap.State.LoadedAt)) + " ago"

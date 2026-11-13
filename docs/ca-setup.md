@@ -176,6 +176,7 @@ handrail-ca reads the certificate list from the CA's PostgreSQL database. It
 needs to read three tables and nothing else:
 
 ```sql
+SHOW password_encryption;             -- scram-sha-256 (the default since PostgreSQL 14)
 CREATE ROLE handrail LOGIN PASSWORD '...';
 GRANT CONNECT ON DATABASE stepca TO handrail;
 GRANT USAGE ON SCHEMA public TO handrail;
@@ -186,6 +187,14 @@ ALTER ROLE handrail SET default_transaction_read_only = on;
 Adjust the database name and schema to yours. Do not grant it the other
 tables: they hold ACME accounts, used tokens, provisioners and admins, none
 of which handrail-ca uses.
+
+Make the password long and random, thirty characters or more from a
+generator: nobody types it, and see below for what it has to withstand
+when the database is on another machine. Letters and digits alone are the
+least trouble. In the `postgres://` form of the connection string, any
+other character of the password has to be percent-encoded (`@` as `%40`,
+`/` as `%2F`, `:` as `%3A`, and so on); handrail-ca refuses a string that
+does not make sense as written, without repeating any of it.
 
 Check it, as the new role:
 
@@ -264,6 +273,18 @@ fingerprint.
    hostssl  stepca  handrail  10.20.0.25/32  scram-sha-256
    ```
 
+   The method has to be `scram-sha-256`, and the role's password has to be
+   stored that way, which it is if it was set with `password_encryption`
+   at `scram-sha-256`:
+
+   ```sql
+   SELECT left(rolpassword, 14) FROM pg_authid WHERE rolname = 'handrail';   -- SCRAM-SHA-256$
+   ```
+
+   If that shows `md5`, set `password_encryption` to `scram-sha-256` and
+   set the role's password again. This concerns the `handrail` role only;
+   step-ca's own role and its line in `pg_hba.conf` stay as they are.
+
 6. **Give handrail-ca the connection string** (section 5), with the same
    host name as on the certificate and `sslmode=verify-full`:
 
@@ -274,6 +295,33 @@ fingerprint.
    If the database's certificate comes from some other CA, add
    `&sslrootcert=/path/to/that/root.pem`; handrail-ca then checks against
    that file instead of its own CA's root.
+
+**What the certificate proves, and what handrail-ca asks for besides.** A
+certificate from your CA for the database's name shows only that its
+holder was given one, and the CA gives certificates to whoever may ask it:
+a handrail-ca operator can issue one for that very name. Someone holding
+such a certificate, and able to get handrail-ca's connection sent to their
+machine, would pass the TLS check. So for a database on another machine
+handrail-ca also requires the sign-in itself to be SCRAM-SHA-256 bound to
+the certificate it was shown (libpq's `require_auth=scram-sha-256` and
+`channel_binding=require`, applied without being written). A peer that
+asks for the password in clear is refused before anything is sent, and one
+that does not know the role's stored password cannot finish the exchange
+or pass it on to the real database. PostgreSQL does this from version 11,
+over a direct connection; tried here against PostgreSQL 17 with a
+certificate from a step-ca. Two limits:
+
+- A peer that offers SCRAM is sent a proof computed from the password
+  before it has proved anything itself, enough to test guesses of the
+  password against at leisure. That is why the password should be long and
+  random. To rule this out altogether, give PostgreSQL a certificate from
+  a CA your operators cannot issue under, and name its root with
+  `sslrootcert`.
+- A connection pooler between handrail-ca and PostgreSQL may not be able
+  to do the binding, and this was not tried with one, nor with a server
+  certificate signed with Ed25519. `channel_binding=disable` in the
+  connection string switches the requirement off; the CA status page then
+  says so beside the database's name.
 
 **Renewing it.** The certificate above is good for ninety days. Renew it
 well before that with the certificate's own key, install the new files the

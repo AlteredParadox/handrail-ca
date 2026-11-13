@@ -1600,6 +1600,51 @@ func TestStatusPageInventoryStates(t *testing.T) {
 	wantBody(t, b.get("/status"), "4 in all: 2 expired, 1 revoked, 1 unreadable")
 }
 
+// A read that has not come back says nothing, so a picture judged by the
+// last error alone would look current for as long as that lasts. Past a
+// few refresh intervals it is out of date whatever the last attempt said.
+func TestAPictureNotReadAgainGoesStale(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	const reason = "no read of the CA&#39;s database has finished since then"
+	pages := []string{"/status", "/", "/names", "/certificates/101", "/certificates/101/revoke"}
+
+	s.clock.advance(staleAfter - time.Second)
+	for _, path := range pages {
+		page := b.get(path)
+		wantStatus(t, page, http.StatusOK)
+		if strings.Contains(page.Body.String(), reason) {
+			t.Errorf("%s calls a picture just under the limit out of date", path)
+		}
+	}
+	wantBody(t, b.get("/status"), "Up to date")
+
+	// Nothing failed; nothing came back either.
+	s.clock.advance(time.Second)
+	for _, path := range pages {
+		page := b.get(path)
+		wantStatus(t, page, http.StatusOK)
+		wantBody(t, page, reason, "2 minutes ago")
+	}
+	status := b.get("/status")
+	wantBody(t, status, "Out of date")
+	if strings.Contains(status.Body.String(), "Up to date") {
+		t.Error("a picture two minutes old with no read since is called up to date")
+	}
+	wantBody(t, b.get("/certificates/101"), "Not revoked 2 minutes ago")
+
+	// A read that finishes makes it current again.
+	if err := s.inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	status = b.get("/status")
+	wantBody(t, status, "Up to date")
+	if strings.Contains(status.Body.String(), reason) {
+		t.Error("the picture is still called out of date after a read")
+	}
+}
+
 func TestStatusPageVariants(t *testing.T) {
 	s := newSite(t, "http://127.0.0.1:8080")
 	b := s.browser()

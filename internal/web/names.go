@@ -94,7 +94,7 @@ func (s *server) namesPage(w http.ResponseWriter, r *http.Request) {
 		view = inventory.ViewAll
 	}
 	data := namesData{
-		Read: !st.LoadedAt.IsZero(), Problem: st.Problem, All: view == inventory.ViewAll,
+		Read: !st.LoadedAt.IsZero(), Problem: staleReason(st, now), All: view == inventory.ViewAll,
 		ActiveURL: s.base + "/names", AllURL: s.base + "/names?view=all",
 	}
 	if !data.Read {

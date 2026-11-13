@@ -230,15 +230,32 @@ type inventoryView struct {
 	Orphans int
 }
 
+// staleAfter is how old the last complete read of the CA's database may be
+// before the picture is called out of date whatever the last attempt said.
+// A read that has not come back says nothing at all, and a picture judged
+// by the last error alone would then look current for as long as that
+// lasts, with every revocation made meanwhile hidden.
+const staleAfter = 4 * InventoryRefresh
+
+// staleReason is why the inventory's picture is not current, empty if it
+// is: the last attempt's failure or, with none recorded, the picture's age.
+func staleReason(st inventory.State, now time.Time) string {
+	if st.Problem != "" || st.LoadedAt.IsZero() || now.Sub(st.LoadedAt) < staleAfter {
+		return st.Problem
+	}
+	return "no read of the CA's database has finished since then; one may still be waiting for the database to answer"
+}
+
 func newInventoryView(snap *inventory.Snapshot, now time.Time) inventoryView {
 	st := snap.State
+	stale := staleReason(st, now)
 	v := inventoryView{
 		Source:  st.Source,
 		Read:    !st.LoadedAt.IsZero(),
-		Current: !st.LoadedAt.IsZero() && st.Problem == "",
+		Current: !st.LoadedAt.IsZero() && stale == "",
 		Every:   span(InventoryRefresh),
 		Total:   len(snap.Certificates),
-		Problem: st.Problem,
+		Problem: stale,
 		Orphans: st.OrphanRevocations,
 	}
 	if v.Read {

@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"regexp"
 	"strings"
 	"time"
 
@@ -39,6 +40,14 @@ const (
 	maxRows   = 5_000_000
 	pgTimeout = 30 * time.Second
 )
+
+// queryTimeout bounds one call from this side as well, the pool's check of
+// an idle connection included. statement_timeout is kept by the server,
+// which is no help when the server, or the path to it, has stopped
+// answering: a read that hangs would otherwise report nothing, and the
+// picture read before it would go on looking current. A variable for the
+// tests, which cannot wait that long.
+var queryTimeout = pgTimeout + 10*time.Second
 
 // Postgres reads the three tables step-ca keeps in PostgreSQL (docs/PLAN.md,
 // section 3): x509_certs, x509_certs_data and revoked_x509_certs, each with a
@@ -69,6 +78,11 @@ type RootFunc func(ctx context.Context) (*x509.Certificate, error)
 // be configured here. The root is asked for when a connection is made, not
 // now. caRoot may be nil; then only sslrootcert, or failing that the
 // system's roots, apply.
+//
+// A certificate from that CA for the database's name is not proof of being
+// the database: the CA issues certificates, to handrail-ca's own operators
+// among others. So a database on another machine must also sign in with
+// SCRAM bound to the certificate this client saw (see requireBoundSCRAM).
 func OpenPostgres(connString string, caRoot RootFunc) (*Postgres, error) {
 	return openPostgres(connString, caRoot, nil)
 }
@@ -77,15 +91,24 @@ func OpenPostgres(connString string, caRoot RootFunc) (*Postgres, error) {
 // the tests that have to reach a database under a name the machine they
 // run on cannot resolve.
 func openPostgres(connString string, caRoot RootFunc, adjust func(*pgxpool.Config)) (*Postgres, error) {
-	cfg, err := pgxpool.ParseConfig(strings.TrimSpace(connString))
+	connString = strings.TrimSpace(connString)
+	cfg, err := pgxpool.ParseConfig(connString)
 	if err != nil {
 		// Not wrapped: the text of a parse error can repeat the string it
 		// could not parse, password included.
-		return nil, errors.New("the database connection string could not be understood (want postgres://user:password@host:port/database?sslmode=verify-full, or libpq's keyword=value form)")
+		return nil, errNotUnderstood
+	}
+	if !plausible(&cfg.ConnConfig.Config, connString) {
+		// As for a string that does not parse: nothing from it is repeated.
+		// A string written wrongly can parse all the same, with the
+		// password, or a part of it, as the host, the database or the user,
+		// all of which are shown and logged.
+		return nil, errNotUnderstood
 	}
 	if err := checkTransport(&cfg.ConnConfig.Config); err != nil {
 		return nil, err
 	}
+	unbound := requireBoundSCRAM(&cfg.ConnConfig.Config)
 	// Every session is read-only whatever the account's own default is,
 	// and no query runs for ever.
 	cfg.ConnConfig.RuntimeParams["default_transaction_read_only"] = "on"
@@ -113,10 +136,104 @@ func openPostgres(connString string, caRoot RootFunc, adjust func(*pgxpool.Confi
 		return nil, errors.New("the database connection could not be set up")
 	}
 	c := cfg.ConnConfig
-	return &Postgres{
-		pool:     pool,
-		describe: fmt.Sprintf("PostgreSQL database %q at %s, as %q, read-only", clip(c.Database), clip(net.JoinHostPort(c.Host, fmt.Sprint(c.Port))), clip(c.User)),
-	}, nil
+	describe := fmt.Sprintf("PostgreSQL database %q at %s, as %q, read-only", clip(c.Database), clip(net.JoinHostPort(c.Host, fmt.Sprint(c.Port))), clip(c.User))
+	if unbound {
+		describe += "; channel binding is switched off in the connection string, so any holder of a certificate from the CA for that name could stand in for the database"
+	}
+	return &Postgres{pool: pool, describe: describe}, nil
+}
+
+var errNotUnderstood = errors.New("the database connection string could not be understood (want postgres://user:password@host:port/database?sslmode=verify-full, or libpq's keyword=value form; " +
+	"in a URL, percent-encode every character of the password that is not a letter, a digit, '-', '.', '_' or '~')")
+
+var (
+	plainHost   = regexp.MustCompile(`^[A-Za-z0-9]([A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+	plainSocket = regexp.MustCompile(`^/[A-Za-z0-9._/-]{0,254}$`)
+	plainName   = regexp.MustCompile(`^[A-Za-z0-9_][A-Za-z0-9_.$-]{0,62}$`)
+)
+
+// plausible reports whether what the driver made of the connection string
+// can be what was meant, and so can be shown and logged: every host an IP
+// address, a host name or a socket directory, the database and the user
+// plain names, and, in a URL, a user named in the URL itself.
+//
+// The driver is forgiving. A password that begins with a slash ends the
+// part of a URL it looks for the user and password in, and the rest becomes
+// the database's name; an unencoded "@" in a password moves its tail into
+// the host; in the keyword form a missing space joins the next keyword to
+// the host. Each of those parses.
+func plausible(c *pgconn.Config, connString string) bool {
+	hosts := []string{c.Host}
+	for _, f := range c.Fallbacks {
+		hosts = append(hosts, f.Host)
+	}
+	for _, h := range hosts {
+		if net.ParseIP(h) == nil && !plainHost.MatchString(h) && !plainSocket.MatchString(h) {
+			return false
+		}
+	}
+	if !plainName.MatchString(c.Database) || !plainName.MatchString(c.User) {
+		return false
+	}
+	// The driver, like libpq, takes what precedes an "@" as the user and
+	// password only if no "/" comes first. A URL in which it found neither
+	// would be used with the name of the account the process runs as, which
+	// is never what was meant here.
+	for _, scheme := range []string{"postgres://", "postgresql://"} {
+		if rest, ok := strings.CutPrefix(connString, scheme); ok {
+			if i := strings.IndexAny(rest, "@/"); i < 0 || rest[i] != '@' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// requireBoundSCRAM makes a database on another machine prove more than a
+// certificate from the CA for its name, which the CA will issue to whoever
+// may ask it for one. Unless the connection string says otherwise:
+//
+//   - the only way of signing in that is accepted is SCRAM-SHA-256
+//     (require_auth), so a peer that asks for the password in clear, or
+//     hashed the old way, is refused before anything is sent to it; and
+//   - the exchange is bound to the server certificate this client saw
+//     (channel_binding=require), so a peer holding another certificate can
+//     neither complete it nor pass it on to the real server and back.
+//
+// PostgreSQL has both since version 11, and stores passwords this way by
+// default since 14. channel_binding=disable in the connection string opts
+// out, for a server or a pooler in front of it that cannot do it;
+// unbound reports that, and the description of the source then says so.
+// What this does not close: a peer that offers SCRAM is sent a proof made
+// from the password before it has proved anything itself, enough to test
+// guesses of the password against. The role's password should be long and
+// random (docs/ca-setup.md).
+func requireBoundSCRAM(c *pgconn.Config) (unbound bool) {
+	if !anyRemote(c) {
+		return false
+	}
+	if c.RequireAuth == "" {
+		c.RequireAuth = "scram-sha-256"
+	}
+	if c.ChannelBinding == "disable" {
+		return true
+	}
+	c.ChannelBinding = "require"
+	return false
+}
+
+// anyRemote reports whether any host the driver might try is another
+// machine.
+func anyRemote(c *pgconn.Config) bool {
+	if !localHost(c.Host) {
+		return true
+	}
+	for _, f := range c.Fallbacks {
+		if !localHost(f.Host) {
+			return true
+		}
+	}
+	return false
 }
 
 // checkTransport refuses a configuration that would talk to another
@@ -198,6 +315,23 @@ func (p *Postgres) Describe() string { return p.describe }
 
 // Serials lists the key of every issued certificate.
 func (p *Postgres) Serials(ctx context.Context) ([]string, error) {
+	bounded, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	serials, err := p.serials(bounded)
+	return serials, overdue(ctx, err)
+}
+
+// overdue says in plain words that a call ran into queryTimeout, which
+// from the driver is the same "context deadline exceeded" as any other.
+// A deadline of the caller's own is left as it is.
+func overdue(caller context.Context, err error) error {
+	if errors.Is(err, context.DeadlineExceeded) && caller.Err() == nil {
+		return fmt.Errorf("the database did not answer within %s", queryTimeout)
+	}
+	return err
+}
+
+func (p *Postgres) serials(ctx context.Context) ([]string, error) {
 	rows, err := p.pool.Query(ctx, `SELECT nkey FROM x509_certs`)
 	if err != nil {
 		return nil, plain(err)
@@ -221,6 +355,13 @@ func (p *Postgres) Serials(ctx context.Context) ([]string, error) {
 // record stored under the same key. A value larger than a certificate can
 // be is not transferred: the row comes back marked TooLarge.
 func (p *Postgres) Certificates(ctx context.Context, serials []string) ([]RawCertificate, error) {
+	bounded, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	out, err := p.certificates(bounded, serials)
+	return out, overdue(ctx, err)
+}
+
+func (p *Postgres) certificates(ctx context.Context, serials []string) ([]RawCertificate, error) {
 	keys := make([][]byte, len(serials))
 	for i, s := range serials {
 		keys[i] = []byte(s)
@@ -253,6 +394,13 @@ func (p *Postgres) Certificates(ctx context.Context, serials []string) ([]RawCer
 
 // Revocations returns every revocation the CA has recorded.
 func (p *Postgres) Revocations(ctx context.Context) ([]RawRevocation, error) {
+	bounded, cancel := context.WithTimeout(ctx, queryTimeout)
+	defer cancel()
+	out, err := p.revocations(bounded)
+	return out, overdue(ctx, err)
+}
+
+func (p *Postgres) revocations(ctx context.Context) ([]RawRevocation, error) {
 	rows, err := p.pool.Query(ctx, `
 		SELECT nkey, CASE WHEN octet_length(nvalue) <= $1 THEN nvalue END
 		  FROM revoked_x509_certs`, maxJSON)
