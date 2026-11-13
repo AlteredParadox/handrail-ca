@@ -35,7 +35,12 @@ import (
 // Limits on what is taken from the database. step-ca stores a certificate's
 // DER and two small JSON documents; anything far beyond that is not one.
 const (
-	maxDER  = 64 << 10
+	// maxDER is a certificate's DER. step-ca puts in as many names as a
+	// client of the provisioner asks for: one with 3,200 is about 70 KiB,
+	// and 64 KiB, the cap until the security review (N-19), made it a row
+	// that is not a certificate, which handrail-ca could not revoke. At
+	// 256 KiB a batch of fetchBatch such rows is 128 MiB at the most.
+	maxDER  = 256 << 10
 	maxJSON = 16 << 10
 	maxRows = 5_000_000
 	// maxMessage bounds one message from the server. The largest a

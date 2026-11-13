@@ -440,6 +440,13 @@ Changed after the security review before the first release (2026-11-13):
   presses waiting together are answered by one read, begun after each of
   them was made, so a press still sees everything stored before it. The
   reads after an issue or a revocation are not held back.
+- A certificate's DER was taken up to 64 KiB, and step-ca puts in as many
+  names as a client of the provisioner asks for: one with 3,200 names,
+  about 70 KiB, issued on the development CA, was a row that is not a
+  certificate, which handrail-ca could not revoke (N-19). The cap is now
+  256 KiB; handrail-ca itself still asks for 100 names at most. A batch of
+  500 rows that large would be 128 MiB while it is read, against 32 MiB
+  before. The development CA's tests issue such a certificate and read it.
 - The size of a row's key was not bounded, and a key is kept in memory as
   the row's identity. A key that is no serial number is still kept, and
   its row shown as unreadable, up to 1 KiB; a longer one is not transferred
