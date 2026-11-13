@@ -343,6 +343,14 @@ reach the sign-in page and keeps posting to it can therefore slow, or for
 a while stop, first sign-ins from new browsers, and nothing else. An
 account's password can be changed five times in five minutes.
 
+The history is never trimmed, so what each account adds to it is bounded:
+the first sixty sign-ins and sign-outs in an hour are written to it, and
+the rest only to the log, with the next row saying how many were passed
+over. An account can save notes six hundred times an hour. Issuing and
+revoking are never held back. If the history cannot be written (a full
+disk), every page says so, and once it can be written again a row says
+how many rows are missing and since when; the log has them all.
+
 **A user name can be locked out by someone else, but not for a browser
 its owner has used.** The limit per name counts attempts on that name from
 strangers anywhere. After five wrong passwords for `alice`, every sign-in

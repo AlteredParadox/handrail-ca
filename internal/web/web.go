@@ -86,7 +86,7 @@ type Store interface {
 	ChangePassword(ctx context.Context, userID int64, oldHash, newHash string, now time.Time) error
 	Session(ctx context.Context, token store.TokenHash, now time.Time) (store.Session, error)
 	TouchSession(ctx context.Context, token store.TokenHash, now time.Time) error
-	DeleteSession(ctx context.Context, token store.TokenHash) error
+	DeleteSession(ctx context.Context, token store.TokenHash) (bool, error)
 	DeviceUser(ctx context.Context, token store.TokenHash, now time.Time) (string, error)
 	RememberDevice(ctx context.Context, userID int64, passwordHash string, token store.TokenHash, now time.Time) error
 	TouchDevice(ctx context.Context, token store.TokenHash, now time.Time) error
@@ -154,7 +154,14 @@ type server struct {
 	// hash makes the stored form of a new password (password.Hash).
 	hash      func(pw string) (string, error)
 	status    *statusCache
-	strangers strangerBudget
+	strangers rowBudget
+	// routine bounds each account's sign-in and sign-out rows, noteSaves
+	// its saves of notes (see accountBudgets).
+	routine, noteSaves accountBudgets
+	// touches remembers uses of sessions the store could not record.
+	touches touches
+	// missing counts history rows that could not be written.
+	missing missingRows
 	// late holds history rows that are written after their answer has
 	// gone out (see recordLater).
 	late lateRows

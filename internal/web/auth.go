@@ -157,15 +157,23 @@ func (s *server) session(r *http.Request) (*signedInUser, error) {
 	if err != nil {
 		return nil, err
 	}
-	if now.Sub(sess.LastSeenAt) >= sessionIdle {
+	lastSeen := s.touches.lastUse(hash, sess.LastSeenAt)
+	if now.Sub(lastSeen) >= sessionIdle {
 		// Best effort: an idle session is refused whether or not the row
 		// could be removed just now.
-		_ = s.opts.Store.DeleteSession(r.Context(), hash)
+		_, _ = s.opts.Store.DeleteSession(r.Context(), hash)
+		s.touches.forget(hash)
 		return nil, nil
 	}
-	if now.Sub(sess.LastSeenAt) >= sessionTouchEvery {
+	if now.Sub(lastSeen) >= sessionTouchEvery {
 		if err := s.opts.Store.TouchSession(r.Context(), hash, now); err != nil {
+			// The use is remembered here instead, so that a store that
+			// cannot be written to (a full disk) does not end, an hour
+			// later, a session that is being used.
+			s.touches.remember(hash, now)
 			s.log.Warn("could not record session use", "err", err)
+		} else {
+			s.touches.forget(hash)
 		}
 	}
 	return &signedInUser{user: sess.User, token: token}, nil
@@ -472,13 +480,20 @@ func dummyPasswordHash() (string, error) {
 
 func (s *server) signOut(w http.ResponseWriter, r *http.Request) {
 	u := currentUser(r)
-	if err := s.opts.Store.DeleteSession(r.Context(), store.HashToken(u.token)); err != nil {
+	hash := store.HashToken(u.token)
+	ended, err := s.opts.Store.DeleteSession(r.Context(), hash)
+	if err != nil {
 		// The cookie is still cleared; the session then ends by itself
 		// when it goes idle.
 		s.log.Error("ending a session", "err", err)
 	}
+	s.touches.forget(hash)
 	s.setCookie(w, sessionCookie, "", 0)
-	s.record(r, store.Event{Actor: u.user.Username, Action: store.ActionSignOut, Outcome: store.OutcomeOK})
+	// Only the request that ended the session writes the row: the same
+	// session signed out of by several requests at once is one sign-out.
+	if ended {
+		s.recordRoutine(r, store.Event{Actor: u.user.Username, Action: store.ActionSignOut, Outcome: store.OutcomeOK})
+	}
 	http.Redirect(w, r, s.base+"/sign-in", http.StatusSeeOther)
 }
 
@@ -490,7 +505,7 @@ func (s *server) recordSignIn(r *http.Request, username string, ok bool, detail 
 		e.Outcome = store.OutcomeOK
 	}
 	if ok {
-		s.record(r, e)
+		s.recordRoutine(r, e)
 		return
 	}
 	// A failed sign-in is logged now and its history row written after the
@@ -509,7 +524,7 @@ func (s *server) recordSignIn(r *http.Request, username string, ok bool, detail 
 	// the page can produce these without limit, and history rows are never
 	// deleted, so only so many per hour become rows; all of them are logged.
 	e.Actor = unknownActor
-	write, unrecorded := s.strangers.admit(s.opts.Now())
+	write, unrecorded := s.strangers.admit(s.opts.Now(), strangerRows, strangerWindow)
 	if unrecorded > 0 {
 		e.Detail += fmt.Sprintf("; %d more like it since the last one recorded here are in the log only", unrecorded)
 	}
@@ -526,32 +541,124 @@ const (
 	strangerWindow = time.Hour
 )
 
-// strangerBudget keeps sign-in attempts by nobody in particular from
-// filling the history, which is append-only and sits on the same disk as
-// the accounts.
-type strangerBudget struct {
+// rowBudget keeps a kind of event from filling the history, which is
+// append-only and sits on the same disk as the accounts: so many rows per
+// window, and the rest counted. The strangers' failed sign-ins have one
+// between them, and each account one for its routine rows (recordRoutine).
+type rowBudget struct {
 	mu         sync.Mutex
 	start      time.Time
 	written    int
 	unrecorded int
 }
 
-// admit says whether the attempt happening now gets a history row. With a
-// yes it also returns how many attempts were passed over since the last
-// row, for that row to mention.
-func (b *strangerBudget) admit(now time.Time) (write bool, unrecorded int) {
+// admit says whether the event happening now gets a history row, if limit
+// rows are allowed per window. With a yes it also returns how many events
+// were passed over since the last row, for that row to mention.
+func (b *rowBudget) admit(now time.Time, limit int, window time.Duration) (write bool, unrecorded int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if now.Sub(b.start) >= strangerWindow {
+	if now.Sub(b.start) >= window {
 		b.start, b.written = now, 0
 	}
-	if b.written >= strangerRows {
+	if b.written >= limit {
 		b.unrecorded++
 		return false, 0
 	}
 	b.written++
 	unrecorded, b.unrecorded = b.unrecorded, 0
 	return true, unrecorded
+}
+
+// What one account may add to the history in an hour by doing routine
+// things: signing in and out (routineRows; past that they are logged and
+// counted, not written), and saving notes (noteSaves; past that a save is
+// refused, since a note changed without its row would be a change nobody
+// can trace). Issuing and revoking are never held back. Failed sign-ins and
+// changes of password are bounded by the throttle already.
+const (
+	routineRows   = 60
+	noteSaves     = 600
+	accountWindow = time.Hour
+)
+
+// accountBudgets holds one rowBudget per user name. Only names that have
+// signed in reach it, so it grows with the accounts and no further.
+type accountBudgets struct {
+	mu     sync.Mutex
+	byName map[string]*rowBudget
+}
+
+func (a *accountBudgets) admit(name string, now time.Time, limit int) (write bool, unrecorded int) {
+	a.mu.Lock()
+	b := a.byName[name]
+	if b == nil {
+		if a.byName == nil {
+			a.byName = map[string]*rowBudget{}
+		}
+		b = &rowBudget{}
+		a.byName[name] = b
+	}
+	a.mu.Unlock()
+	return b.admit(now, limit, accountWindow)
+}
+
+// recordRoutine is record for the rows a signed-in account can make as
+// often as it likes: its sign-ins and sign-outs. Every one is logged; the
+// account's first routineRows an hour are written to the history, and the
+// first row after a gap says how many were passed over.
+func (s *server) recordRoutine(r *http.Request, e store.Event) {
+	write, unrecorded := s.routine.admit(e.Actor, s.opts.Now(), routineRows)
+	if unrecorded > 0 {
+		if e.Detail != "" {
+			e.Detail += "; "
+		}
+		e.Detail += fmt.Sprintf("%d more sign-ins and sign-outs by this account since the last one recorded here are in the log only", unrecorded)
+	}
+	if write {
+		s.record(r, e)
+		return
+	}
+	s.logEvent(r, &e)
+}
+
+// touches remembers when sessions were last used, for the sessions whose
+// use could not be written to the store. It is bounded: past maxTouches a
+// session's use is not remembered, and it ends when idle by the store's
+// account, as it did before.
+type touches struct {
+	mu sync.Mutex
+	at map[store.TokenHash]time.Time
+}
+
+const maxTouches = 4096
+
+func (t *touches) remember(h store.TokenHash, now time.Time) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.at == nil {
+		t.at = map[store.TokenHash]time.Time{}
+	}
+	if _, ok := t.at[h]; ok || len(t.at) < maxTouches {
+		t.at[h] = now
+	}
+}
+
+func (t *touches) forget(h store.TokenHash) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.at, h)
+}
+
+// lastUse is the later of stored, from the store, and the use remembered
+// here.
+func (t *touches) lastUse(h store.TokenHash, stored time.Time) time.Time {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if at, ok := t.at[h]; ok && at.After(stored) {
+		return at
+	}
+	return stored
 }
 
 // logEvent stamps an event with the time and the client's address and
@@ -574,15 +681,67 @@ func (s *server) record(r *http.Request, e store.Event) {
 }
 
 // appendHistory writes an event that logEvent has stamped to the history.
+// A row that could not be written is counted; the pages' alarm stays up
+// until a row saying how many are missing, and since when, is in the
+// history, so that a later write that works does not hide the gap.
 func (s *server) appendHistory(ctx context.Context, e store.Event) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	if err := s.opts.Store.AppendHistory(ctx, e); err != nil {
+		s.missing.add(e.At)
 		s.historyBroken.Store(true)
 		s.log.Error("history is NOT being recorded", "err", err)
 		return
 	}
-	s.historyBroken.Store(false)
+	n, since := s.missing.count()
+	if n == 0 {
+		s.historyBroken.Store(false)
+		return
+	}
+	gap := store.Event{
+		At: s.opts.Now(), Actor: store.ActorHandrail, Action: store.ActionHistoryGap, Outcome: store.OutcomeFailed,
+		Detail: fmt.Sprintf("%d history rows could not be written since %s; the log has them", n, since.UTC().Format(time.RFC3339)),
+	}
+	if err := s.opts.Store.AppendHistory(ctx, gap); err != nil {
+		s.log.Error("history is NOT being recorded", "err", err)
+		return
+	}
+	s.log.Warn("audit", "actor", gap.Actor, "action", gap.Action, "outcome", gap.Outcome, "detail", gap.Detail)
+	if s.missing.settle(n) {
+		s.historyBroken.Store(false)
+	}
+}
+
+// missingRows counts the history rows that could not be written and have
+// not yet been accounted for by a gap row.
+type missingRows struct {
+	mu    sync.Mutex
+	n     int
+	since time.Time
+}
+
+func (m *missingRows) add(at time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.n == 0 {
+		m.since = at
+	}
+	m.n++
+}
+
+func (m *missingRows) count() (int, time.Time) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.n, m.since
+}
+
+// settle takes away the n rows a gap row has accounted for, and reports
+// whether none is left: rows lost meanwhile wait for the next gap row.
+func (m *missingRows) settle(n int) bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.n -= n
+	return m.n == 0
 }
 
 // maxLateRows bounds how many history rows may be waiting to be written

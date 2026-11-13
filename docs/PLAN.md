@@ -683,6 +683,18 @@ As built in milestone 1:
   other, and the next row says how many were passed over. Without this,
   anyone able to reach the sign-in page could grow the store until the
   disk it shares with the accounts was full.
+  The same holds for what a signed-in account can add as often as it
+  likes (changed after the security review, 2026-11-13): its sign-ins and
+  sign-outs become rows sixty times an hour at most, counted and logged
+  past that like the strangers'; its note saves are refused past six
+  hundred an hour, since a note changed without its row could not be
+  traced. Issuing and revoking are never held back. A sign-out writes a row
+  only if it ended a session. A use of a session the store could not
+  record (a full disk) is remembered in memory, so the session is not
+  ended an hour later while it is in use. And a history row that could not
+  be written is no longer forgotten by the next one that is: the pages'
+  alarm stays up until a row by "(handrail-ca)" says how many are missing
+  and since when.
 - At most two passwords are hashed at once (64 MiB each), and a missing
   account costs the same hash as a wrong password.
 - Changed after the security review before the first release (2026-11-13),

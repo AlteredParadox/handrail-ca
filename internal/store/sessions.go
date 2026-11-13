@@ -95,11 +95,16 @@ func (s *Store) TouchSession(ctx context.Context, token TokenHash, now time.Time
 	return err
 }
 
-// DeleteSession ends a session. Ending one that does not exist is not an
-// error: signing out twice is still signed out.
-func (s *Store) DeleteSession(ctx context.Context, token TokenHash) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, token[:])
-	return err
+// DeleteSession ends a session, and reports whether there was one to end.
+// Ending one that does not exist is not an error: signing out twice is
+// still signed out.
+func (s *Store) DeleteSession(ctx context.Context, token TokenHash) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM sessions WHERE token_hash = ?`, token[:])
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // DeleteExpiredSessions removes sessions that expired at or before now, or

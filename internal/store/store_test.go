@@ -359,11 +359,11 @@ func TestSessions(t *testing.T) {
 		t.Errorf("LastSeenAt = %v after touching", sess.LastSeenAt)
 	}
 
-	if err := s.DeleteSession(ctx, token); err != nil {
-		t.Fatal(err)
+	if ended, err := s.DeleteSession(ctx, token); err != nil || !ended {
+		t.Fatalf("deleting: ended %v, %v", ended, err)
 	}
-	if err := s.DeleteSession(ctx, token); err != nil {
-		t.Errorf("deleting twice: %v", err)
+	if ended, err := s.DeleteSession(ctx, token); err != nil || ended {
+		t.Errorf("deleting twice: ended %v, %v; want no error and nothing ended", ended, err)
 	}
 	if _, err := s.Session(ctx, token, t0); !errors.Is(err, ErrNotFound) {
 		t.Errorf("after deleting: %v", err)
@@ -600,7 +600,7 @@ func TestClosedStoreReportsErrors(t *testing.T) {
 		"RemoveUser":   s.RemoveUser(ctx, "alice"),
 		"Create":       s.CreateSession(ctx, 1, "hash", token, t0, t0.Add(time.Hour)),
 		"Touch":        s.TouchSession(ctx, token, t0),
-		"Delete":       s.DeleteSession(ctx, token),
+		"Delete":       second(s.DeleteSession(ctx, token)),
 		"migrate":      s.migrate(ctx),
 		"sql.ErrNoRow": nil,
 	}
@@ -770,3 +770,6 @@ func TestChangePassword(t *testing.T) {
 		t.Errorf("a repeated change: %v, want ErrNotFound", err)
 	}
 }
+
+// second is the error of a call that also returns something else.
+func second[T any](_ T, err error) error { return err }

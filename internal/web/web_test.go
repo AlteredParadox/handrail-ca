@@ -317,6 +317,13 @@ type brokenStore struct {
 	readHistoryErr atomic.Pointer[error]
 	// deviceErr fails looking a device up, rememberErr recording one.
 	deviceErr, rememberErr atomic.Pointer[error]
+	// touchErr fails recording that a session was used.
+	touchErr atomic.Pointer[error]
+	// With limitWrites set, only writesLeft more history writes work.
+	limitWrites atomic.Bool
+	writesLeft  atomic.Int32
+	// beforeDelete runs as a session is about to be ended.
+	beforeDelete func(store.TokenHash)
 	// appendGate, when set, holds every history write until it is closed.
 	appendGate atomic.Pointer[chan struct{}]
 	// beforeCreate runs between the password check and the session being
@@ -374,7 +381,24 @@ func (b *brokenStore) AppendHistory(ctx context.Context, e store.Event) error {
 	if err := b.historyErr.Load(); err != nil {
 		return *err
 	}
+	if b.limitWrites.Load() && b.writesLeft.Add(-1) < 0 {
+		return errors.New("database or disk is full")
+	}
 	return b.Store.AppendHistory(ctx, e)
+}
+
+func (b *brokenStore) DeleteSession(ctx context.Context, h store.TokenHash) (bool, error) {
+	if b.beforeDelete != nil {
+		b.beforeDelete(h)
+	}
+	return b.Store.DeleteSession(ctx, h)
+}
+
+func (b *brokenStore) TouchSession(ctx context.Context, h store.TokenHash, now time.Time) error {
+	if err := b.touchErr.Load(); err != nil {
+		return *err
+	}
+	return b.Store.TouchSession(ctx, h, now)
 }
 
 func (b *brokenStore) Session(ctx context.Context, h store.TokenHash, now time.Time) (store.Session, error) {
