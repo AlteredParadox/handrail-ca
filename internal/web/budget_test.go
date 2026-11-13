@@ -339,3 +339,39 @@ func TestASweepAfterAnOutageLeavesASessionInUse(t *testing.T) {
 		t.Errorf("saving uses on a full store: %v", err)
 	}
 }
+
+// fred's second case: the uses to save are read, a request then records a
+// later use itself, and the save writes the earlier one after it. The
+// record is not moved back, and a sweep then leaves the session alone.
+func TestALateSaveDoesNotMoveASessionsUseBack(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	full := errors.New("database or disk is full")
+	s.store.touchErr.Store(&full)
+	s.clock.advance(sessionIdle - time.Minute)
+	wantStatus(t, b.get("/status"), http.StatusOK) // remembered, not written
+	s.store.touchErr.Store(nil)
+
+	// While the save is writing the remembered use, the session is used
+	// again, an hour on, and that use is written first.
+	later := s.clock.Now().Add(sessionIdle - time.Minute)
+	var once sync.Once
+	s.store.beforeTouch = func(h store.TokenHash, at time.Time) {
+		once.Do(func() {
+			if err := s.store.Store.TouchSession(t.Context(), h, later); err != nil {
+				t.Error(err)
+			}
+		})
+	}
+	if err := (&Site{server: s.server}).SaveSessionUses(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	s.store.beforeTouch = nil
+	s.clock.advance(sessionIdle - time.Minute + 10*time.Minute) // ten minutes after the later use
+	now := s.clock.Now()
+	if _, err := s.store.Store.DeleteExpiredSessions(t.Context(), now, now.Add(-sessionIdle)); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, b.get("/status"), http.StatusOK)
+}

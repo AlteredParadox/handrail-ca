@@ -358,6 +358,13 @@ func TestSessions(t *testing.T) {
 	if sess, _ := s.Session(ctx, token, seen); !sess.LastSeenAt.Equal(seen) {
 		t.Errorf("LastSeenAt = %v after touching", sess.LastSeenAt)
 	}
+	// A use written late does not move the record back.
+	if err := s.TouchSession(ctx, token, seen.Add(-20*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	if sess, _ := s.Session(ctx, token, seen); !sess.LastSeenAt.Equal(seen) {
+		t.Errorf("LastSeenAt = %v after an earlier use was written late, want %v", sess.LastSeenAt, seen)
+	}
 
 	if ended, err := s.DeleteSession(ctx, token); err != nil || !ended {
 		t.Fatalf("deleting: ended %v, %v", ended, err)

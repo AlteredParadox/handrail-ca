@@ -89,9 +89,13 @@ func (s *Store) Session(ctx context.Context, token TokenHash, now time.Time) (Se
 	return sess, nil
 }
 
-// TouchSession records that a session was used at now.
+// TouchSession records that a session was used at now. It never moves
+// the record back: a use written late (web.Site.SaveSessionUses) must not
+// overwrite a later one written meanwhile, or a sweep would take the
+// session for idle.
 func (s *Store) TouchSession(ctx context.Context, token TokenHash, now time.Time) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE token_hash = ?`, now.Unix(), token[:])
+	_, err := s.db.ExecContext(ctx, `UPDATE sessions SET last_seen_at = ? WHERE token_hash = ? AND last_seen_at < ?`,
+		now.Unix(), token[:], now.Unix())
 	return err
 }
 

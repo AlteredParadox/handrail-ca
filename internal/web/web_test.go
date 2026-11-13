@@ -327,6 +327,9 @@ type brokenStore struct {
 	// beforeGap, when set, runs as a row about a gap in the history is
 	// about to be written.
 	beforeGap func()
+	// beforeTouch, when set, runs as a session's use is about to be
+	// written.
+	beforeTouch func(store.TokenHash, time.Time)
 	// appendGate, when set, holds every history write until it is closed.
 	appendGate atomic.Pointer[chan struct{}]
 	// beforeCreate runs between the password check and the session being
@@ -403,6 +406,9 @@ func (b *brokenStore) DeleteSession(ctx context.Context, h store.TokenHash) (boo
 func (b *brokenStore) TouchSession(ctx context.Context, h store.TokenHash, now time.Time) error {
 	if err := b.touchErr.Load(); err != nil {
 		return *err
+	}
+	if b.beforeTouch != nil {
+		b.beforeTouch(h, now)
 	}
 	return b.Store.TouchSession(ctx, h, now)
 }
