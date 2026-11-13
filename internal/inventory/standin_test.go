@@ -303,7 +303,7 @@ func TestARemoteDatabaseMustSignInWithBoundSCRAM(t *testing.T) {
 			if c.ChannelBinding != tt.binding || c.RequireAuth != tt.auth {
 				t.Errorf("channel_binding=%q require_auth=%q, want %q and %q", c.ChannelBinding, c.RequireAuth, tt.binding, tt.auth)
 			}
-			if got := strings.Contains(p.Describe(), note); got != tt.unbound {
+			if strings.Contains(p.Describe(), note) != tt.unbound {
 				t.Errorf("Describe = %q", p.Describe())
 			}
 			if strings.Contains(p.Describe(), testPassword) {
