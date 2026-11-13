@@ -47,7 +47,9 @@ import (
 // the server's word:
 //
 //   - the certificate is authenticated by the operator's fingerprint;
-//   - the request carries nothing secret, and its answer is public;
+//   - the request carries nothing secret, and its answer is public; an
+//     https:// proxy, which would be sent its credentials over TLS that is
+//     not checked either, is refused (rootFetchProxy);
 //   - before the root is accepted, the certificate the server presented on
 //     this very connection must chain to it for the configured host name,
 //     so a server that merely relays the CA's public root is refused.
@@ -59,7 +61,8 @@ func (c *Client) fetchRoot(ctx context.Context) (*x509.Certificate, error) {
 		Timeout:       c.timeout,
 		CheckRedirect: noRedirect,
 		Transport: &http.Transport{
-			Proxy:             http.ProxyFromEnvironment,
+			// No https:// proxy: see rootFetchProxy.
+			Proxy:             rootFetchProxy,
 			DisableKeepAlives: true,
 			TLSClientConfig: &tls.Config{
 				// Verified below, against the fetched root: see above.

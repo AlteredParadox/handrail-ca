@@ -355,7 +355,20 @@ handle than a file.) That one request has a file to itself
 that file, and a test fails if certificate verification is switched off
 anywhere else in the repository. The root is pinned on first use, so handrail-ca
 starts, and reports it, while the CA is down. Redirects are not followed
-and every answer is size-bounded. `github.com/smallstep/certificates/ca` is not
+and every answer is size-bounded.
+
+Changed after the security review before the first release (2026-11-13,
+both passes): "the request carries nothing secret" did not hold with an
+`https://` proxy in `HTTPS_PROXY`. A transport uses one TLS configuration
+for the proxy and for the server behind it, so the proxy's certificate went
+unchecked as well, and the proxy's user name and password were sent to
+whoever answered at its address. The root fetch now refuses an `https://`
+proxy (`rootFetchProxy`, in a file of its own so that `rootfetch.go` still
+holds `fetchRoot` alone); an `http://` proxy, or the CA's host in
+`NO_PROXY`, works as before. The requests after it go through the pinned
+client, whose transport applies the same configuration to an `https://`
+proxy, so that proxy's certificate is checked against the pinned root like
+the CA's (from Go's documentation and the second review; not tried here). `github.com/smallstep/certificates/ca` is not
 imported: it links 491 non-standard-library packages, including two Badger
 versions, gRPC and Google API clients.
 
