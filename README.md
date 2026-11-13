@@ -21,6 +21,14 @@ handrail-ca, by whom and from where. Where a request cannot be made on
 the machine itself, handrail-ca can make the key and show it once. The
 [build plan](docs/PLAN.md) has what comes next.
 
+| | |
+|---|---|
+| [![The list of certificates](docs/screenshots/certificates.png)](docs/screenshots/certificates.png) | [![One certificate's page](docs/screenshots/certificate.png)](docs/screenshots/certificate.png) |
+| [![Issuing a certificate with a key handrail-ca makes](docs/screenshots/issue.png)](docs/screenshots/issue.png) | [![The CA status page](docs/screenshots/status.png)](docs/screenshots/status.png) |
+
+The pictures are of the development CA in `deploy/dev` and its made-up
+certificates.
+
 handrail-ca is an independent project and is not affiliated with or endorsed
 by Smallstep Labs, Inc.
 
@@ -360,8 +368,19 @@ sign-in. Sessions already open are never affected. Plan for those:
 
 ### As a container
 
+Each release publishes an image for linux/amd64 and linux/arm64 at
+`ghcr.io/alteredparadox/handrail-ca`, tagged with the version (`0.1.0`),
+the minor version (`0.1`) and `latest`. To build the image yourself
+instead:
+
 ```sh
 docker build --build-arg VERSION=$(git describe --tags --always) -t handrail-ca .
+```
+
+Then, with either (`handrail-ca` below is the image you built; for a
+released one write `ghcr.io/alteredparadox/handrail-ca:0.1.0`):
+
+```sh
 docker volume create handrail-data
 docker run --rm -it -v handrail-data:/data handrail-ca user add -role operator alice
 docker run -d -p 127.0.0.1:8080:8080 \
@@ -382,6 +401,47 @@ works with a read-only root filesystem. That example is for use on the one
 machine. Behind a reverse proxy, `HANDRAIL_PUBLIC_URL` is the proxy's
 `https://` address and `HANDRAIL_TRUSTED_PROXIES` the address the proxy
 reaches the container from (see above).
+
+### Backing up
+
+handrail-ca's own state is one SQLite file, `handrail.db`, in the data
+directory: the accounts and their password hashes, the sessions, the
+history, and the notes and labels on certificates. The certificates
+themselves are the CA's and are not in it, and neither is the
+provisioner's key or its password.
+
+Copying the file while handrail-ca runs is not a backup. The newest
+changes are in a second file beside it (`handrail.db-wal`) until SQLite
+folds them in, and a copy of the first file alone can lack them: tried
+here, such a copy was missing an account added a moment before. Use
+SQLite's own backup command, which reads both and can be run while
+handrail-ca is serving:
+
+```sh
+(umask 077 && sqlite3 /var/lib/handrail-ca/handrail.db ".backup '/var/backups/handrail-ca/handrail-$(date +%F).db'")
+```
+
+Run it as the user handrail-ca runs as, with the paths your deployment
+uses. For the container, where the store is in a volume and the image has
+no shell, run it from a throwaway container that mounts the same volume:
+
+```sh
+docker run --rm -v handrail-data:/data -v /var/backups/handrail-ca:/backup alpine:3 \
+  sh -c "apk add --no-cache sqlite >/dev/null && umask 077 && sqlite3 /data/handrail.db \".backup '/backup/handrail-$(date +%F).db'\""
+```
+
+The backup holds password hashes and the history, so keep it as you keep
+the store. The `umask 077` is what makes the file readable by its owner
+alone from the moment it is created; without it SQLite makes a file
+anyone on the machine can read. Keep the directory it goes into private
+as well.
+
+To restore, stop handrail-ca, put the backup in the data directory as
+`handrail.db` (owned by the user handrail-ca runs as, mode `600`, with no
+`handrail.db-wal` or `handrail.db-shm` left beside it from before), and
+start it again. Whatever was recorded after the backup is gone: accounts
+added, passwords changed, notes, and entries in the history. A binary
+older than the one that wrote the backup refuses to open it.
 
 ### What it needs to run on
 
