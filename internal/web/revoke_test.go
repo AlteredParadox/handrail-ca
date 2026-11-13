@@ -743,3 +743,134 @@ func TestRevokeConfirmsBySerialWhenTheSubjectCannotBeTyped(t *testing.T) {
 	wantBody(t, b.get("/certificates/31/revoke"), `<span class="mono ink">1f</span>`)
 	wantBody(t, b.get("/certificates/47/revoke"), `<span class="mono ink">2f</span>`)
 }
+
+// A browser shows two spaces in a row as one. A subject with such a run
+// cannot be typed from what the page shows, so it is not what confirms.
+func TestRevokeConfirmsBySerialWhenTheSubjectHasSpacesInARow(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	s.addRows(subjectRow(t, big.NewInt(0x3f), "db  primary"), subjectRow(t, big.NewInt(0x4f), "db primary"))
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+
+	form := b.get("/certificates/63/revoke")
+	wantStatus(t, form, http.StatusOK)
+	wantBody(t, form, `Type the last characters of the serial number to confirm: <span class="mono ink">3f</span>`)
+	token := tokenIn(t, form)
+	// Neither the subject as it is shown nor as it is stored confirms it.
+	for _, typed := range []string{"db primary", "db  primary"} {
+		wantStatus(t, b.do(http.MethodPost, "/certificates/63/revoke", revokeFormValues(token, "0", "", typed)), http.StatusUnprocessableEntity)
+	}
+	if sent := s.ca.sent(); len(sent) != 0 {
+		t.Fatalf("the CA was asked for %+v", sent)
+	}
+	wantRedirect(t, b.do(http.MethodPost, "/certificates/63/revoke", revokeFormValues(token, "0", "", "3f")), "/certificates/63?revoked=now#revocation")
+
+	// One space at a time is typed as it stands.
+	wantBody(t, b.get("/certificates/79/revoke"), `Type the certificate&#39;s subject to confirm: <span class="mono ink">db primary</span>`)
+}
+
+// A certificate's subject is its requester's to choose. One that shows
+// nothing must not leave the list without a link to the certificate.
+func TestACertificateWhoseSubjectShowsNothingCanStillBeOpened(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	s.addRows(subjectRow(t, big.NewInt(0x5f), ""), subjectRow(t, big.NewInt(0x6f), " "), subjectRow(t, big.NewInt(0x7f), "\u200b"))
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	list := b.get("/")
+	wantStatus(t, list, http.StatusOK)
+	for serial, short := range map[string]string{"95": "5f", "111": "6f", "127": "7f"} {
+		// The subject's place holds the serial, as a link, and so does the
+		// serial's own column.
+		wantBody(t, list,
+			`<a class="strong" href="/certificates/`+serial+`">Serial `+short+`</a> <span class="sub">The certificate has no subject that shows.</span>`,
+			`title="`+short+`"><a href="/certificates/`+serial+`">`+short+`</a></td>`)
+		page := b.get("/certificates/" + serial)
+		wantStatus(t, page, http.StatusOK)
+		wantBody(t, page, "<h1>Serial "+short+"</h1>")
+		wantBody(t, b.get("/certificates/"+serial+"/revoke"), "serial "+short+"</a>")
+	}
+}
+
+// A revocation needs a picture of the CA's database that has the
+// certificate. One that was never read, or could not be read again, cannot
+// say that a certificate does not exist: the answer is that it is not
+// known, and how to revoke without handrail-ca.
+func TestRevokeWhenTheListCannotVouch(t *testing.T) {
+	// Started while the database could not be read.
+	s := newSite(t, "http://127.0.0.1:8080")
+	down := &fakeRows{err: errors.New("connection refused")}
+	never := inventory.New(down)
+	never.SetClock(s.clock.Now)
+	_ = never.Refresh(context.Background())
+	s.server.opts.Inventory = never
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	form := b.get("/certificates/101/revoke")
+	wantStatus(t, form, http.StatusServiceUnavailable)
+	wantBody(t, form, "has not been able to read the CA&#39;s database since it started", "step ca revoke")
+	if strings.Contains(form.Body.String(), "has no certificate with that serial number, as far as") {
+		t.Error("an unread list is said to have no such certificate")
+	}
+	wantStatus(t, b.do(http.MethodPost, "/certificates/101/revoke", revokeFormValues(tokenIn(t, b.get("/account")), "1", "", "web1.internal.example")), http.StatusServiceUnavailable)
+
+	// Read once; then a certificate is stored while the database cannot be
+	// read again.
+	s = newSite(t, "http://127.0.0.1:8080")
+	b = s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	s.rows.mu.Lock()
+	s.rows.certs = append(s.rows.certs, subjectRow(t, big.NewInt(900), "later.internal.example"))
+	s.rows.mu.Unlock()
+	s.rows.fail(errors.New("connection refused"))
+	_ = s.inv.Refresh(context.Background())
+	form = b.get("/certificates/900/revoke")
+	wantStatus(t, form, http.StatusServiceUnavailable)
+	wantBody(t, form, "could not be read again since", "step ca revoke")
+	if sent := s.ca.sent(); len(sent) != 0 {
+		t.Errorf("the CA was asked for %+v", sent)
+	}
+
+	// A list that was read and is current does say so.
+	s.rows.fail(nil)
+	if err := s.inv.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, b.get("/certificates/901/revoke"), http.StatusNotFound)
+}
+
+// With the database out of reach a certificate's page cannot be shown,
+// and it is the page that leads to the revoke form, which still works:
+// the error says where the form is.
+func TestTheCertificatePageLeadsToRevokingWhileTheDatabaseIsDown(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	s.server.opts.Inventory = &unreadable{Inventory: s.inv, serial: "101"}
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	page := b.get("/certificates/101")
+	wantStatus(t, page, http.StatusBadGateway)
+	wantBody(t, page, `<a class="button" href="/certificates/101/revoke">Revoke this certificate…</a>`)
+	wantStatus(t, b.get("/certificates/101/revoke"), http.StatusOK)
+
+	// Not offered to someone who may not revoke.
+	viewer := s.browser()
+	wantRedirect(t, viewer.signIn("bob", bobPassword), "/")
+	page = viewer.get("/certificates/101")
+	wantStatus(t, page, http.StatusBadGateway)
+	if strings.Contains(page.Body.String(), "/revoke") {
+		t.Error("a viewer is offered the revoke form")
+	}
+}
+
+// Revoking an expired certificate is not only bookkeeping: where a
+// provisioner allows renewal after expiry, it is what stops the renewal.
+func TestRevokePageForAnExpiredCertificate(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	page := b.get("/certificates/102/revoke")
+	wantStatus(t, page, http.StatusOK)
+	wantBody(t, page, "has already expired", "It also stops the CA renewing the certificate", "allow renewal after expiry")
+	if strings.Contains(page.Body.String(), "only adds the record") {
+		t.Error("revoking an expired certificate is called bookkeeping")
+	}
+}

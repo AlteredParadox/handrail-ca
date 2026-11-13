@@ -164,10 +164,23 @@ func (s *server) canAct(r *http.Request) bool {
 // database is down, which is when a certificate may most need revoking.
 // Only a certificate in the inventory can be revoked from here; the CA
 // itself would accept any serial number.
+//
+// So a revocation needs a picture, read since this process started, that
+// has the certificate. A picture that was never read, or could not be read
+// again lately, cannot say that a certificate does not exist: that is
+// answered as not known, with the way that does not go through here, and
+// not as absent.
 func (s *server) revocable(w http.ResponseWriter, r *http.Request) (*inventory.Snapshot, *inventory.Certificate, bool) {
 	snap := s.opts.Inventory.Snapshot()
 	c := snap.Certificate(r.PathValue("serial"))
+	const onTheHost = " Nothing was sent to the CA. On the CA's host, `step ca revoke` with the serial number revokes it whatever handrail-ca has read."
 	switch {
+	case c == nil && snap.State.LoadedAt.IsZero():
+		s.errorPage(w, r, http.StatusServiceUnavailable, "handrail-ca has not been able to read the CA's database since it started, so it cannot tell whether there is a certificate with that serial number, and revokes only what it has read."+onTheHost)
+		return nil, nil, false
+	case c == nil && snap.State.Problem != "":
+		s.errorPage(w, r, http.StatusServiceUnavailable, "The certificate list as handrail-ca last read it has no certificate with that serial number, but the CA's database could not be read again since: a certificate issued after that is not in it, and handrail-ca revokes only what it has read."+onTheHost)
+		return nil, nil, false
 	case c == nil:
 		s.errorPage(w, r, http.StatusNotFound, "The CA's database has no certificate with that serial number, as far as handrail-ca has read it.")
 		return nil, nil, false
@@ -213,7 +226,7 @@ func (s *server) newRevokeData(r *http.Request, snap *inventory.Snapshot, c *inv
 		Stale: snap.State.Problem,
 		Note:  note, MaxNote: maxRevokeNote,
 	}
-	if data.Title == "" {
+	if !visible(data.Title) {
 		data.Title = "serial " + shortSerial(c.SerialHex)
 	}
 	if !snap.State.LoadedAt.IsZero() {
@@ -243,7 +256,9 @@ func confirmation(c *inventory.Certificate) (what, word string) {
 }
 
 func typeable(s string) bool {
-	if s == "" || len(s) > maxConfirmWord || strings.TrimSpace(s) != s {
+	// A browser shows a run of spaces as one, so a subject with two in a
+	// row cannot be typed from what the page shows.
+	if s == "" || len(s) > maxConfirmWord || strings.TrimSpace(s) != s || strings.Contains(s, "  ") {
 		return false
 	}
 	for _, r := range s {

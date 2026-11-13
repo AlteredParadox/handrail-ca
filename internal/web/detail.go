@@ -101,6 +101,11 @@ type detailData struct {
 	// certificate that a request through this handrail-ca was given in
 	// the last few minutes, and from its own record of that.
 	JustIssued string
+	// IssuedAgain is set with JustIssued when the same request had been
+	// signed a moment earlier and was not signed again. IssuedDiffers says
+	// where the certificate does not carry what was asked for.
+	IssuedAgain   bool
+	IssuedDiffers []string
 
 	// History is what was done to the certificate through handrail-ca.
 	// Nil for a row that is not a certificate.
@@ -181,6 +186,14 @@ func (s *server) certificateFor(w http.ResponseWriter, r *http.Request) (f found
 		return f, true
 	}
 	der, err := s.opts.Inventory.DER(r.Context(), serial)
+	// With the database out of reach this page cannot be shown, and it is
+	// the one that leads to the revoke form, which can: the form works
+	// from the list as it was last read. An outage of the database is when
+	// a certificate may most need revoking.
+	var revokeText, revokeURL string
+	if s.canAct(r) && f.snap.Revocation(serial) == nil {
+		revokeText, revokeURL = "Revoke this certificate…", s.certificateURL(serial)+"/revoke"
+	}
 	switch {
 	case errors.Is(err, inventory.ErrNotFound):
 		s.errorPage(w, r, http.StatusNotFound, "That certificate was in the CA's database a moment ago and is not any more.")
@@ -190,7 +203,7 @@ func (s *server) certificateFor(w http.ResponseWriter, r *http.Request) (f found
 		return f, false
 	case err != nil:
 		s.log.Warn("reading a certificate", "serial", serial, "err", err)
-		s.errorPage(w, r, http.StatusBadGateway, "The certificate could not be read from the CA's database just now. The CA status page says what is wrong.")
+		s.errorPageWith(w, r, http.StatusBadGateway, "The certificate could not be read from the CA's database just now. The CA status page says what is wrong.", revokeText, revokeURL)
 		return f, false
 	}
 	f.cert, err = x509.ParseCertificate(der)
@@ -254,6 +267,9 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 		s.render(w, r, code, "detail.html", data.Title, data)
 		return
 	}
+	if !visible(data.Title) {
+		data.Title = "Serial " + shortSerial(summary.SerialHex)
+	}
 	fillCertificate(&data, cert, now)
 	data.Summary = summarySentence(status, summary, snap.Revocation(summary.Serial), now)
 	data.Note = note
@@ -270,11 +286,9 @@ func (s *server) renderDetail(w http.ResponseWriter, r *http.Request, code int, 
 	// anyone can write an address. The address only asks for it to be
 	// said, and tells a first arrival from a form sent again.
 	if asked := r.URL.Query(); asked.Has("issued") {
-		if how, ok := s.issues.about(summary.Serial, now); ok {
-			data.JustIssued = how
-			if asked.Get("issued") == "again" {
-				data.JustIssued = "before"
-			}
+		if how, differs, ok := s.issues.about(summary.Serial, now); ok {
+			data.JustIssued, data.IssuedDiffers = how, differs
+			data.IssuedAgain = asked.Get("issued") == "again"
 		}
 	}
 	s.render(w, r, code, "detail.html", data.Title, data)

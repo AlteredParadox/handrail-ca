@@ -118,6 +118,10 @@ type requestView struct {
 	// SubjectNotCopied is the request's whole subject, when it holds more
 	// than a common name and the CA's default template will drop the rest.
 	SubjectNotCopied string
+	// SubjectUnsettled is the request's whole subject, when it holds more
+	// than the common name and the provisioner could not be read from the
+	// CA: whether the rest is kept or dropped is then not known.
+	SubjectUnsettled string
 	// RequestSubject is the request's whole subject, shown when the
 	// provisioner has a template of its own that may use it.
 	RequestSubject string
@@ -161,6 +165,8 @@ type unlistedView struct {
 	// Again is set when this is the certificate of a request signed a
 	// moment ago, handed over a second time and not signed a second time.
 	Again bool
+	// Differs says where the certificate does not carry what was asked for.
+	Differs []string
 	// Database is why the CA's database could not be read, empty if it
 	// was read and did not show the certificate.
 	Database string
@@ -186,6 +192,10 @@ type issuedAt struct {
 	// notice on: "now", "differs", "found", and "keyless" for one issued
 	// for a key handrail-ca made and then had to discard.
 	how string
+	// differs says where the certificate does not carry what was asked
+	// for, in the sentences the history has: kept here so that every page
+	// that hands the certificate over can say so itself.
+	differs []string
 	// issued is the certificate and its chain as the CA sent them, kept
 	// for as long as the entry so that they can be handed over again
 	// while the inventory has no page for the certificate. Nil when the
@@ -279,16 +289,16 @@ func (ri *recentIssues) remember(entry issuedAt) {
 
 // about returns how the certificate with this serial came to be, if a
 // request through handrail-ca was given it within the last justIssued.
-func (ri *recentIssues) about(serial string, now time.Time) (how string, ok bool) {
+func (ri *recentIssues) about(serial string, now time.Time) (how string, differs []string, ok bool) {
 	ri.mu.Lock()
 	defer ri.mu.Unlock()
 	ri.forget(now)
 	for _, d := range ri.done {
 		if d.serial == serial {
-			return d.how, true
+			return d.how, d.differs, true
 		}
 	}
-	return "", false
+	return "", nil, false
 }
 
 // mayIssue refuses whoever may not issue, and says why.
@@ -427,7 +437,35 @@ func chosenValidity(r *http.Request, claims ca.Claims) (time.Duration, error) {
 	return 0, errors.New("choose a validity from the list")
 }
 
-func newRequestView(req *ca.Request, hasTemplate bool) *requestView {
+// templateState is what is known of the certificate template of the
+// provisioner handrail-ca acts through. It decides what a page may say
+// about the subject a certificate will have.
+type templateState int
+
+const (
+	// templateDefault: the CA lists the provisioner, with no template of
+	// its own, so the CA's default applies and keeps the common name only.
+	templateDefault templateState = iota
+	// templateOwn: the provisioner has a template, which decides.
+	templateOwn
+	// templateUnknown: the provisioner could not be read from the CA, or
+	// is not listed. Nothing may be said about what a template does.
+	templateUnknown
+)
+
+// templateOf is the template state of the provisioner newIssueData
+// returned, problem being why it could not be read, if it could not.
+func templateOf(p ca.Provisioner, problem string) templateState {
+	switch {
+	case problem != "":
+		return templateUnknown
+	case p.HasTemplate():
+		return templateOwn
+	}
+	return templateDefault
+}
+
+func newRequestView(req *ca.Request, template templateState) *requestView {
 	v := &requestView{
 		CommonName: req.CommonName, CommonNameFromName: req.CommonNameFromName, NameAdded: req.NameAdded,
 		PublicKey: keyWords(req.CSR.PublicKey),
@@ -441,9 +479,12 @@ func newRequestView(req *ca.Request, hasTemplate bool) *requestView {
 		}
 	}
 	v.CommonNameApart = !req.CommonNameFromName && !req.NameAdded && !contains(requestNamesOf(req), req.CommonName)
-	if hasTemplate {
+	switch template {
+	case templateOwn:
 		v.RequestSubject = req.CSR.Subject.String()
-	} else {
+	case templateUnknown:
+		v.SubjectUnsettled = req.SubjectNotCopied
+	default:
 		v.SubjectNotCopied = req.SubjectNotCopied
 	}
 	return v
@@ -505,7 +546,8 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 		refuse(http.StatusUnprocessableEntity, err.Error())
 		return
 	}
-	data.Request, data.Checked = newRequestView(req, provisioner.HasTemplate()), s.shown(req)
+	template := templateOf(provisioner, data.Limits.Problem)
+	data.Request, data.Checked = newRequestView(req, template), s.shown(req)
 	if r.PostForm.Get("step") != "sign" {
 		s.renderIssue(w, r, http.StatusOK, data)
 		return
@@ -574,7 +616,7 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 
 	if sendErr == nil {
 		serial := issued.Certificate.SerialNumber.String()
-		differs := differences(req, issued.Certificate, provisioner.HasTemplate())
+		differs := differences(req, issued.Certificate, template)
 		event.Serial, event.Subject = serial, issued.Certificate.Subject.CommonName
 		event.Outcome, event.Detail = store.OutcomeOK, asked+"; issued, valid until "+issued.Certificate.NotAfter.UTC().Format(stamp)
 		for _, d := range differs {
@@ -583,14 +625,14 @@ func (s *server) issue(w http.ResponseWriter, r *http.Request) {
 		s.record(r, event)
 		// Remembered with the certificate itself, so that it can be handed
 		// over again if this answer does not reach the browser.
-		done.serial, done.how, done.issued = serial, "now", issued
+		done.serial, done.how, done.issued, done.differs = serial, "now", issued, differs
 		if len(differs) > 0 {
 			done.how = "differs"
 		}
 		if after.Certificate(serial) == nil {
 			// Issued, and not in the inventory to be looked at: handed over
 			// here, since this answer is the only place it is.
-			data.Request, data.Unlisted = nil, newUnlistedView(issued, readErr, now)
+			data.Request, data.Unlisted = nil, newUnlistedView(issued, differs, readErr, now)
 			s.renderIssue(w, r, http.StatusOK, data)
 			return
 		}
@@ -657,7 +699,7 @@ func (s *server) issuedAlready(w http.ResponseWriter, r *http.Request, data issu
 		s.errorPage(w, r, http.StatusConflict, "This request was signed a moment ago, and the certificate it was given (serial "+already.serial+") is not in the certificate list as handrail-ca has it now. It was not signed again. Look for it in the list once the CA's database is being read.")
 		return
 	}
-	data.Request, data.Unlisted = nil, newUnlistedView(already.issued, nil, s.opts.Now())
+	data.Request, data.Unlisted = nil, newUnlistedView(already.issued, already.differs, nil, s.opts.Now())
 	data.Unlisted.Again = true
 	s.renderIssue(w, r, http.StatusOK, data)
 }
@@ -704,13 +746,17 @@ func validityWords(d time.Duration) string {
 }
 
 // differences says where a certificate does not carry what was asked for.
-// Its names are compared kind by kind. Its subject is compared with the
-// common name asked for, unless the provisioner has a template of its
-// own: a template may well put more in the subject, and that is then
-// reported as what the subject is, not as a difference.
-func differences(req *ca.Request, cert *x509.Certificate, hasTemplate bool) []string {
+// Its names are compared kind by kind. Its subject has to be the common
+// name asked for and nothing else, unless the provisioner is known to have
+// a template of its own: a template may well put more in the subject, and
+// that is then reported as what the subject is, not as a difference. A
+// provisioner that could not be read is not known to have one, so a
+// subject with more in it than was asked for is a difference then too.
+func differences(req *ca.Request, cert *x509.Certificate, template templateState) []string {
 	out := nameDifferences(req, cert)
-	if !hasTemplate && cert.Subject.String() != "CN="+req.CommonName && cert.Subject.CommonName != req.CommonName {
+	// The parsed subject, not its text: the text of a name is escaped.
+	onlyTheCommonName := len(cert.Subject.Names) == 1 && cert.Subject.CommonName == req.CommonName
+	if template != templateOwn && !onlyTheCommonName {
 		out = append(out, fmt.Sprintf("the certificate's subject is %q, not the common name %q asked for", cert.Subject.String(), req.CommonName))
 	}
 	return out
@@ -760,9 +806,9 @@ func sameSet(a, b []string) bool {
 	return true
 }
 
-func newUnlistedView(issued *ca.Issued, readErr error, now time.Time) *unlistedView {
+func newUnlistedView(issued *ca.Issued, differs []string, readErr error, now time.Time) *unlistedView {
 	cert := issued.Certificate
-	v := &unlistedView{Subject: cert.Subject.String(), Serial: cert.SerialNumber.String(), Expires: expiry(cert.NotAfter, now)}
+	v := &unlistedView{Subject: cert.Subject.String(), Serial: cert.SerialNumber.String(), Expires: expiry(cert.NotAfter, now), Differs: differs}
 	var chain bytes.Buffer
 	for _, c := range append([]*x509.Certificate{cert}, issued.Intermediates...) {
 		_ = pem.Encode(&chain, &pem.Block{Type: "CERTIFICATE", Bytes: c.Raw})

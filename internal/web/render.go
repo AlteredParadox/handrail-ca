@@ -25,6 +25,7 @@ import (
 	"net/url"
 	"strings"
 	"time"
+	"unicode"
 
 	"handrail-ca/internal/store"
 )
@@ -99,13 +100,34 @@ type errorData struct {
 	Status  int
 	Heading string
 	Message string
+	// LinkText and LinkURL are a way on from the error, if there is one.
+	LinkText, LinkURL string
 }
 
 // errorPage writes an error in the site's own shell.
 func (s *server) errorPage(w http.ResponseWriter, r *http.Request, status int, message string) {
+	s.errorPageWith(w, r, status, message, "", "")
+}
+
+// errorPageWith is errorPage with a way on from it: a link, under the
+// message, to a page of handrail-ca's own.
+func (s *server) errorPageWith(w http.ResponseWriter, r *http.Request, status int, message, linkText, linkURL string) {
 	w.Header().Set("Cache-Control", "no-store")
 	heading := http.StatusText(status)
-	s.render(w, r, status, "error.html", heading, errorData{Status: status, Heading: heading, Message: message})
+	s.render(w, r, status, "error.html", heading, errorData{Status: status, Heading: heading, Message: message, LinkText: linkText, LinkURL: linkURL})
+}
+
+// visible reports whether a text shows anything: it has a character that
+// is neither white space nor one of those that draw nothing, such as a
+// zero-width space. A certificate's subject is its requester's choice, and
+// one that shows nothing must not be the only way to the certificate.
+func visible(text string) bool {
+	for _, r := range text {
+		if unicode.IsGraphic(r) && !unicode.IsSpace(r) {
+			return true
+		}
+	}
+	return false
 }
 
 // The helpers below turn times and durations into the words the pages use.

@@ -199,11 +199,19 @@ database shows nothing: the CA may still be working on the request. When the dat
 with an error, it says both, with the CA's words: a CA that fails after
 recording a revocation may not have rebuilt its revocation list. The attempt and the outcome are both written to the history
 and the log, with who asked and from where. It does not depend on the
-CA's database being readable: if the certificate list is stale, the page
-says so and the revocation still goes to the CA.
+CA's database being readable at that moment: if the certificate list is
+stale, the page says so and the revocation still goes to the CA. While the
+database is out of reach a certificate's own page cannot be shown; the
+error it gives in its place has the link to the revoke form.
 
-Only certificates in the list can be revoked from here. Revocation cannot
-be undone, by handrail-ca or by step-ca.
+Only certificates in the list can be revoked from here, and the list is
+kept in memory: handrail-ca has to have read the CA's database at least
+once since it started, and that read has to have had the certificate. If
+handrail-ca is restarted while the database is out of reach, or the
+certificate was issued after the last read that worked, the revoke page
+says that it cannot tell whether the certificate exists, and nothing is
+sent. `step ca revoke` on the CA's host does not need handrail-ca.
+Revocation cannot be undone, by handrail-ca or by step-ca.
 
 Revoking stops the CA renewing that one certificate. It does not stop a
 new certificate being issued for the same names: step-ca does not look at

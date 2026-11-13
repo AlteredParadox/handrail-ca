@@ -25,6 +25,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"html"
 	"net"
 	"net/http"
 	"net/url"
@@ -307,12 +308,150 @@ func TestIssueSaysWhenTheCertificateDiffers(t *testing.T) {
 	_, form := b.readCSR(gitCSR(t))
 	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
 	page := b.get("/certificates/5001?issued=1")
-	wantBody(t, page, "Issued, but the certificate does not carry exactly what was asked for.",
-		"the certificate&#39;s DNS names are [git.internal.example], not the [git.internal.example, git] asked for",
-		"the certificate&#39;s subject is &#34;CN=something else&#34;, not the common name &#34;git.internal.example&#34; asked for")
+	const (
+		notice  = "Issued, but the certificate does not carry exactly what was asked for:"
+		names   = "the certificate&#39;s DNS names are [git.internal.example], not the [git.internal.example, git] asked for"
+		subject = "the certificate&#39;s subject is &#34;CN=something else&#34;, not the common name &#34;git.internal.example&#34; asked for"
+	)
+	wantBody(t, page, notice, names, subject)
 	if strings.Contains(page.Body.String(), "Issued. This is the certificate") {
 		t.Error("the page says the certificate is what was asked for")
 	}
+	// The notice itself says where, not only the history further down.
+	said := regexp.MustCompile(`(?s)<output class="stale">Issued, but.*?</output>`).FindString(page.Body.String())
+	if !strings.Contains(said, names) || !strings.Contains(said, subject) {
+		t.Errorf("the notice does not say where the certificate differs: %s", said)
+	}
+
+	// The same form sent again leads to the same page, which still says it.
+	wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=again")
+	again := b.get("/certificates/5001?issued=again")
+	wantBody(t, again, "This request had already been signed a moment ago", notice, names, subject)
+	if strings.Contains(again.Body.String(), "Issued. This is the certificate") {
+		t.Error("the page reached by sending the form again says the certificate is what was asked for")
+	}
+}
+
+// A certificate that is handed over on the answer page itself, because the
+// certificate list has no page for it yet, is not passed off as what was
+// asked either: not the first time, and not when the form is sent again.
+func TestIssueSaysWhenACertificateWithoutAPageDiffers(t *testing.T) {
+	s := newSite(t, "http://127.0.0.1:8080")
+	b := s.browser()
+	wantRedirect(t, b.signIn("alice", alicePassword), "/")
+	s.ca.sign = func(_ context.Context, r *ca.Request, validity time.Duration) (*ca.Issued, error) {
+		other := *r
+		other.DNSNames = append([]string{"added-by-the-ca.internal.example"}, r.DNSNames...)
+		issued := s.caSigns(&other, validity)
+		s.caStores(issued.Certificate)
+		s.rows.fail(errors.New("connection refused"))
+		return issued, nil
+	}
+	const said = "Not as asked: the certificate&#39;s DNS names are [added-by-the-ca.internal.example, git.internal.example, git], not the [git.internal.example, git] asked for."
+	_, form := b.readCSR(gitCSR(t))
+	first := b.do(http.MethodPost, "/issue", form)
+	wantStatus(t, first, http.StatusOK)
+	wantBody(t, first, "The CA issued the certificate", "Copy it from this page.", said)
+
+	again := b.do(http.MethodPost, "/issue", form)
+	wantStatus(t, again, http.StatusOK)
+	wantBody(t, again, "This request was signed a moment ago", said)
+	if n := len(s.ca.signings()); n != 1 {
+		t.Errorf("the CA was asked to sign %d times", n)
+	}
+}
+
+// When the provisioner cannot be read from the CA, it is not known whether
+// a template of its own keeps more of the request's subject than the
+// common name. The page must not say that the rest is dropped, and a
+// certificate that kept it is not passed off as what was asked for.
+func TestIssueWhenTheTemplateIsNotKnown(t *testing.T) {
+	withOrg := func(t *testing.T) string {
+		return newCSR(t, &x509.CertificateRequest{
+			Subject: pkix.Name{CommonName: "git.internal.example", Organization: []string{"Chosen By The Requester"}}, DNSNames: []string{"git.internal.example"},
+		})
+	}
+	const (
+		dropped   = "Only the common name of the subject is kept."
+		notCopied = "What the request asks for beyond its names is not copied."
+		unsettled = "It is not known what the certificate's subject will be."
+		differs   = "the certificate&#39;s subject is &#34;CN=git.internal.example,O=Chosen By The Requester&#34;, not the common name &#34;git.internal.example&#34; asked for"
+	)
+	// The CA, whatever handrail-ca could read of it, keeps the subject: its
+	// provisioner has a template that does.
+	keeps := func(r *ca.Request) pkix.Name { return r.CSR.Subject }
+
+	t.Run("the provisioner cannot be read", func(t *testing.T) {
+		s := newSite(t, "http://127.0.0.1:8080")
+		s.ca.provsErr = errors.New("the CA answered 503")
+		s.subjectOf = keeps
+		b := s.browser()
+		wantRedirect(t, b.signIn("alice", alicePassword), "/")
+		page, form := b.readCSR(withOrg(t))
+		for _, want := range []string{unsettled, "CN=git.internal.example,O=Chosen By The Requester", "handrail-ca could not read the provisioner from the CA just now, so it cannot say which"} {
+			if !strings.Contains(page, want) {
+				t.Errorf("the page lacks %q", want)
+			}
+		}
+		for _, absent := range []string{dropped, notCopied} {
+			if strings.Contains(page, absent) {
+				t.Errorf("the page states %q about a provisioner it could not read", absent)
+			}
+		}
+		form.Set("validity", "24h0m0s")
+		wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
+		after := b.get("/certificates/5001?issued=1")
+		wantBody(t, after, "Issued, but the certificate does not carry exactly what was asked for:", differs)
+		if events := s.issueEvents(); !strings.Contains(html.EscapeString(events[len(events)-1].Detail), differs) {
+			t.Errorf("the history does not say so: %+v", events[len(events)-1])
+		}
+	})
+
+	// A request with nothing but a common name leaves nothing to warn of.
+	t.Run("the provisioner cannot be read, a plain subject", func(t *testing.T) {
+		s := newSite(t, "http://127.0.0.1:8080")
+		s.ca.provsErr = errors.New("the CA answered 503")
+		b := s.browser()
+		wantRedirect(t, b.signIn("alice", alicePassword), "/")
+		page, form := b.readCSR(gitCSR(t))
+		if strings.Contains(page, unsettled) || strings.Contains(page, notCopied) {
+			t.Error("a warning about the subject for a request whose subject is its common name")
+		}
+		form.Set("validity", "24h0m0s")
+		wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
+		wantBody(t, b.get("/certificates/5001?issued=1"), "Issued. This is the certificate the CA signed for the request.")
+	})
+
+	// Read, and listed without a template: the statement is made, and a
+	// certificate that kept the rest all the same is a difference.
+	t.Run("the provisioner is read and has no template", func(t *testing.T) {
+		s := newSite(t, "http://127.0.0.1:8080")
+		s.subjectOf = keeps
+		b := s.browser()
+		wantRedirect(t, b.signIn("alice", alicePassword), "/")
+		page, form := b.readCSR(withOrg(t))
+		if !strings.Contains(page, dropped) || !strings.Contains(page, notCopied) || strings.Contains(page, unsettled) {
+			t.Error("the page for a provisioner known to have no template")
+		}
+		wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
+		wantBody(t, b.get("/certificates/5001?issued=1"), "does not carry exactly what was asked for:", differs)
+	})
+
+	// Read, with a template of its own: what the template makes of the
+	// subject is the subject, and no difference.
+	t.Run("the provisioner is read and has a template", func(t *testing.T) {
+		s := newSite(t, "http://127.0.0.1:8080")
+		s.ca.provs[0].TemplateFile = "templates/leaf.tpl"
+		s.subjectOf = keeps
+		b := s.browser()
+		wantRedirect(t, b.signIn("alice", alicePassword), "/")
+		page, form := b.readCSR(withOrg(t))
+		if strings.Contains(page, dropped) || strings.Contains(page, unsettled) {
+			t.Error("the page for a provisioner known to have a template")
+		}
+		wantRedirect(t, b.do(http.MethodPost, "/issue", form), "/certificates/5001?issued=1")
+		wantBody(t, b.get("/certificates/5001?issued=1"), "Issued. This is the certificate the CA signed for the request.")
+	})
 }
 
 // Nothing is sent, and nothing recorded as attempted, unless an operator

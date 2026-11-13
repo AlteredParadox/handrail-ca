@@ -183,6 +183,9 @@ type listRow struct {
 	// Serial is the hexadecimal serial shortened for the column; SerialFull
 	// the whole of it.
 	Serial, SerialFull string
+	// NoSubject is set when the certificate's subject shows nothing, and
+	// Subject then holds its serial number instead.
+	NoSubject bool
 	// URL is the certificate's own page. Empty for a row whose key in the
 	// CA's database cannot be put in an address.
 	URL     string
@@ -340,6 +343,12 @@ func newListRow(row inventory.Row, now time.Time) listRow {
 		// All that is known of an unreadable row is its key.
 		out.SerialFull, out.Serial = row.Serial, shortSerial(row.Serial)
 		return out
+	}
+	if !visible(out.Subject) {
+		// The subject is the requester's to choose, and the link to the
+		// certificate's page is made of it: one that shows nothing would
+		// leave nothing to press.
+		out.Subject, out.NoSubject = "Serial "+out.Serial, true
 	}
 	const shown = 3
 	var names []string

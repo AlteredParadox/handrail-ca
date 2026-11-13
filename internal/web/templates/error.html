@@ -20,6 +20,7 @@ along with this program. If not, see <https://www.gnu.org/licenses/>.
 <section class="card narrow">
 <h1>{{.Data.Heading}}</h1>
 <p>{{.Data.Message}}</p>
+{{if .Data.LinkURL}}<p><a class="button" href="{{.Data.LinkURL}}">{{.Data.LinkText}}</a></p>{{end}}
 <p><a href="{{.Base}}/">Back to handrail-ca</a></p>
 </section>
 {{end}}
