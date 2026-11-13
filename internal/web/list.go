@@ -35,6 +35,11 @@ const (
 	maxSearch = 200
 	// refreshTimeout bounds a refresh asked for from the page.
 	refreshTimeout = 20 * time.Second
+	// refreshGap spaces the reads asked for from the page: one begins at
+	// least this long after the last one ended, so that however many
+	// presses of the button, from however many people, the CA's database
+	// is read on request every few seconds at most.
+	refreshGap = 5 * time.Second
 )
 
 // listQuery is the list's query string, parsed: what to show and how.
@@ -406,8 +411,50 @@ func shortSerial(s string) string {
 func (s *server) refreshInventory(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), refreshTimeout)
 	defer cancel()
-	if err := s.opts.Inventory.Refresh(ctx); err != nil {
+	back := parseListQuery(r.PostForm).href(s.base)
+	// Taken on arrival: a read begun after it answers this press, and
+	// every press waiting out the same gap is answered by one read.
+	inv := s.opts.Inventory
+	ticket := inv.Ticket()
+	if err := s.refreshes.read(ctx, s.refreshGap, func() bool { return inv.Answered(ticket) }, func() error {
+		return inv.RefreshSince(ctx, ticket)
+	}); err != nil {
 		s.log.Warn("the certificate inventory could not be read on request", "err", err)
 	}
-	http.Redirect(w, r, parseListQuery(r.PostForm).href(s.base), http.StatusSeeOther)
+	http.Redirect(w, r, back, http.StatusSeeOther)
+}
+
+// pacedReads spaces the reads asked for from the page, in real time
+// whatever clock the server is given: it paces the load on the database.
+// Presses take turns (turn, made by build), and a press waits out the gap
+// after the last read with its turn, so a read still running when a press
+// arrives counts as well as one that has ended.
+type pacedReads struct {
+	turn chan struct{}
+	next time.Time // guarded by holding turn
+}
+
+// read runs refresh in its turn, gap after the last read that ran in a
+// turn, unless answered says a read has answered this press meanwhile.
+// It gives up, with ctx's error, if ctx ends first.
+func (p *pacedReads) read(ctx context.Context, gap time.Duration, answered func() bool, refresh func() error) error {
+	select {
+	case p.turn <- struct{}{}:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	defer func() { <-p.turn }()
+	if answered() {
+		return refresh() // reads nothing; says how that read went
+	}
+	if wait := time.Until(p.next); wait > 0 {
+		select {
+		case <-time.After(wait):
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	err := refresh()
+	p.next = time.Now().Add(gap)
+	return err
 }

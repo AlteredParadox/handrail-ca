@@ -102,6 +102,9 @@ type Store interface {
 type Inventory interface {
 	Snapshot() *inventory.Snapshot
 	Refresh(ctx context.Context) error
+	Ticket() uint64
+	Answered(ticket uint64) bool
+	RefreshSince(ctx context.Context, ticket uint64) error
 	DER(ctx context.Context, serial string) ([]byte, error)
 }
 
@@ -147,6 +150,10 @@ type server struct {
 	secure bool   // the public URL is https
 	pages  pages
 	log    *slog.Logger
+	// refreshes spaces the reads asked for from the page by refreshGap
+	// (see refreshInventory).
+	refreshes  pacedReads
+	refreshGap time.Duration
 
 	limiter   *limiter
 	hashing   *hashGate // bounds concurrent password hashing
@@ -294,6 +301,8 @@ func build(opts Options) (*server, http.Handler, error) {
 	if err != nil {
 		return nil, nil, err
 	}
+	s.refreshGap = refreshGap
+	s.refreshes.turn = make(chan struct{}, 1)
 	mux := http.NewServeMux()
 	// Open to everyone: the probe, the legal pages, the style sheet, and
 	// signing in.

@@ -20,11 +20,13 @@ import (
 	"context"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"fmt"
 	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"handrail-ca/internal/ca"
@@ -241,5 +243,90 @@ func TestIntegrationDatabaseTLSIsReallyVerified(t *testing.T) {
 	// No CA root offered: the system's roots do not know a private CA.
 	if _, err := devTLSDatabase(t, nil, "").Serials(ctx); err == nil || !strings.Contains(err.Error(), "certificate signed by unknown authority") {
 		t.Errorf("with the system's roots: %v, want an unknown-authority failure", err)
+	}
+}
+
+// Keys longer than maxKey are not transferred from a real PostgreSQL, and
+// the largest row handrail-ca takes still fits in the
+// driver's message limit. The rows are written as the database's owner into
+// a schema of the test's own, with step-ca's three tables, which the
+// read-only role is let read for the test; step-ca's own tables are not
+// touched, and the schema is dropped afterwards.
+func TestIntegrationKeysPastTheBoundAreNotTransferred(t *testing.T) {
+	ownerFile := os.Getenv("HANDRAIL_DEV_DB_OWNER_URL_FILE")
+	readerFile := os.Getenv("HANDRAIL_DEV_DB_URL_FILE")
+	if ownerFile == "" || readerFile == "" {
+		t.Skip("no development database: run `make dev-up` and `make dev-test`")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	ownerURL, err := os.ReadFile(ownerFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, err := pgx.Connect(ctx, strings.TrimSpace(string(ownerURL)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A cleanup, not a defer: it has to run after the schema is dropped.
+	t.Cleanup(func() { owner.Close(context.Background()) })
+	schema := fmt.Sprintf("handrail_test_%d", time.Now().UnixNano())
+	exec := func(sql string, args ...any) {
+		t.Helper()
+		if _, err := owner.Exec(ctx, sql, args...); err != nil {
+			t.Fatalf("%s: %v", sql, err)
+		}
+	}
+	exec(`CREATE SCHEMA ` + schema)
+	t.Cleanup(func() {
+		if _, err := owner.Exec(context.Background(), `DROP SCHEMA `+schema+` CASCADE`); err != nil {
+			t.Errorf("dropping the test's schema %s: %v", schema, err)
+		}
+	})
+	for _, table := range []string{"x509_certs", "x509_certs_data", "revoked_x509_certs"} {
+		exec(`CREATE TABLE ` + schema + `.` + table + ` (nkey bytea PRIMARY KEY, nvalue bytea)`)
+	}
+	exec(`GRANT USAGE ON SCHEMA ` + schema + ` TO handrail`)
+	exec(`GRANT SELECT ON ALL TABLES IN SCHEMA ` + schema + ` TO handrail`)
+
+	readerURL, err := os.ReadFile(readerFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p, err := openPostgres(string(readerURL), nil, func(c *pgxpool.Config) {
+		c.ConnConfig.RuntimeParams["search_path"] = schema
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer p.Close()
+	if got := p.pool.Config().ConnConfig.MaxProtocolMessageBodyLen; got != maxMessage {
+		t.Fatalf("the driver's message limit is %d, want %d", got, maxMessage)
+	}
+
+	// The largest row handrail-ca takes: a key of the longest length
+	// allowed, a value of maxDER and an issuance record of maxJSON.
+	edge := strings.Repeat("9", maxKey)
+	exec(`INSERT INTO `+schema+`.x509_certs VALUES ($1, $2)`, []byte(edge), make([]byte, maxDER))
+	exec(`INSERT INTO `+schema+`.x509_certs_data VALUES ($1, $2)`, []byte(edge), make([]byte, maxJSON))
+	serials, err := p.Serials(ctx)
+	if err != nil || len(serials) != 1 || serials[0] != edge {
+		t.Fatalf("Serials with a key of %d bytes: %v, %v", maxKey, serials, err)
+	}
+	rows, err := p.Certificates(ctx, serials)
+	if err != nil || len(rows) != 1 || len(rows[0].DER) != maxDER || len(rows[0].Data) != maxJSON {
+		t.Fatalf("the largest row taken: %d rows, %v", len(rows), err)
+	}
+
+	// One byte more, in either table: the read fails, naming the table,
+	// without the key.
+	long := strings.Repeat("8", maxKey+1)
+	exec(`INSERT INTO `+schema+`.revoked_x509_certs VALUES ($1, $2)`, []byte(long), []byte(`{}`))
+	if _, err := p.Revocations(ctx); err == nil || !strings.Contains(err.Error(), "revoked_x509_certs has a key of more than") || strings.Contains(err.Error(), long) {
+		t.Errorf("a revocation with a key of %d bytes: %v", len(long), err)
+	}
+	exec(`INSERT INTO `+schema+`.x509_certs VALUES ($1, $2)`, []byte(long), []byte("x"))
+	if _, err := p.Serials(ctx); err == nil || !strings.Contains(err.Error(), "x509_certs has a key of more than") || strings.Contains(err.Error(), long) {
+		t.Errorf("a certificate with a key of %d bytes: %v", len(long), err)
 	}
 }

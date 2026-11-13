@@ -20,6 +20,14 @@ db_url_file="$(pwd)/.secrets/handrail_db_url"
 	printf 'postgres://handrail:%s@127.0.0.1:15432/stepca?sslmode=disable\n' "$(cat .secrets/handrail_db_password)" >"$db_url_file"
 )
 
+# The owner's, for the one test that sets up tables of its own in a schema
+# of its own (TestIntegrationKeysPastTheBoundAreNotTransferred).
+owner_url_file="$(pwd)/.secrets/stepca_owner_url"
+(
+	umask 077
+	printf 'postgres://stepca:%s@127.0.0.1:15432/stepca?sslmode=disable\n' "$(cat .secrets/pg_stepca_password)" >"$owner_url_file"
+)
+
 # The same database as it looks from another machine: by the name on its
 # certificate, over TLS that is verified. Nothing on this machine resolves
 # that name, so the tests that use this file map it to the loopback port
@@ -59,5 +67,6 @@ HANDRAIL_DEV_CA_URL=https://localhost:19000 \
 	HANDRAIL_DEV_REVOKE_SERIAL="$revoke_serial" \
 	HANDRAIL_DEV_REVOKE_SERIAL_PAGES="$revoke_serial_pages" \
 	HANDRAIL_DEV_DB_URL_FILE="$db_url_file" \
+	HANDRAIL_DEV_DB_OWNER_URL_FILE="$owner_url_file" \
 	HANDRAIL_DEV_DB_TLS_URL_FILE="$db_tls_url_file" \
 	go test -race -count=1 -v -run '^TestIntegration' ./...
