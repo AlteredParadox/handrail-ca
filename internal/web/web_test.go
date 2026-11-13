@@ -1841,8 +1841,20 @@ func TestThrottlePerVisitorBehindATrustedProxy(t *testing.T) {
 	// Another visitor is not affected, and the history has their address,
 	// not the proxy's.
 	wantRedirect(t, visitor("203.0.113.8").signIn("bob", bobPassword), "/")
-	if last := s.history()[0]; last.Actor != "bob" || last.Remote != "203.0.113.8" {
-		t.Errorf("history = %+v", last)
+	// Found by what it is, not by being newest: the rows of the failed
+	// sign-ins before it are written after their answers, and the last of
+	// them can land after this one.
+	var found bool
+	for _, e := range s.history() {
+		if e.Actor == "bob" && e.Outcome == store.OutcomeOK {
+			found = true
+			if e.Remote != "203.0.113.8" {
+				t.Errorf("bob's sign-in was recorded from %q, want 203.0.113.8", e.Remote)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("bob's sign-in is not in the history: %+v", s.history())
 	}
 }
 
