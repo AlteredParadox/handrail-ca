@@ -11,7 +11,7 @@ name: handrail-dev
 
 services:
   db:
-    image: postgres:17-alpine@sha256:e5d2edd28b1f8d40a0a6c0c9cdc545b19b56a0d5d88f94bc11a97d970d4700d0
+    image: postgres:18-alpine@sha256:b6972e1115a4ff8eba5d7f7d19184926d1e16d7d1136ae1e1a7ebf286da0f015
     environment:
       POSTGRES_USER: stepca
       POSTGRES_PASSWORD_FILE: /run/secrets/pg_stepca_password
@@ -19,7 +19,11 @@ services:
       - pg_stepca_password
       - handrail_db_password
     volumes:
-      - db-data:/var/lib/postgresql/data
+      # From PostgreSQL 18 the image keeps its data under a directory named
+      # for the major version (PGDATA is /var/lib/postgresql/18/docker) and
+      # refuses to start with a volume at the old /var/lib/postgresql/data.
+      # A volume left by PostgreSQL 17 is refused too: `make dev-down` first.
+      - db-data:/var/lib/postgresql
       - ./db-role.sql:/dev-db-role.sql:ro
     ports:
       - "127.0.0.1:15432:5432"
