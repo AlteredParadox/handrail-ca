@@ -340,7 +340,7 @@ the certificate it was shown (libpq's `require_auth=scram-sha-256` and
 asks for the password in clear is refused before anything is sent, and one
 that does not know the role's stored password cannot finish the exchange
 or pass it on to the real database. PostgreSQL does this from version 11,
-over a direct connection; tried here against PostgreSQL 17 with a
+over a direct connection; tried here against PostgreSQL 17 and 18 with a
 certificate from a step-ca. Two limits:
 
 - A peer that offers SCRAM is sent a proof computed from the password

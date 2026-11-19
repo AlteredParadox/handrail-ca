@@ -25,11 +25,12 @@ docker compose exec -T ca bash -c '
 
 # The certificate (with the intermediate after it, as step writes it) and
 # its key go into the data directory, owned by the server's own user, the
-# key readable by nobody else: PostgreSQL refuses a key that is.
+# key readable by nobody else: PostgreSQL refuses a key that is. The image
+# names its data directory in PGDATA, and the path differs by major version.
 docker compose exec -T ca cat /tmp/db.crt |
-	docker compose exec -T -u postgres db sh -c 'cat >/var/lib/postgresql/data/server.crt'
+	docker compose exec -T -u postgres db sh -c 'cat >"$PGDATA/server.crt"'
 docker compose exec -T ca cat /tmp/db.key |
-	docker compose exec -T -u postgres db sh -c 'umask 077; cat >/var/lib/postgresql/data/server.key'
+	docker compose exec -T -u postgres db sh -c 'umask 077; cat >"$PGDATA/server.key"'
 docker compose exec -T ca rm -f /tmp/db.crt /tmp/db.key
 
 # Since PostgreSQL 10 these take effect on a reload; no restart.

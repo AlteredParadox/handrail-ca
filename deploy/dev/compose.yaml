@@ -19,7 +19,11 @@ services:
       - pg_stepca_password
       - handrail_db_password
     volumes:
-      - db-data:/var/lib/postgresql/data
+      # From PostgreSQL 18 the image keeps its data under a directory named
+      # for the major version (PGDATA is /var/lib/postgresql/18/docker) and
+      # refuses to start with a volume at the old /var/lib/postgresql/data.
+      # A volume left by PostgreSQL 17 is refused too: `make dev-down` first.
+      - db-data:/var/lib/postgresql
       - ./db-role.sql:/dev-db-role.sql:ro
     ports:
       - "127.0.0.1:15432:5432"

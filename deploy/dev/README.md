@@ -86,3 +86,15 @@ Change the image tag and digest in `compose.yaml`, then
 step-ca changed something this project depends on: fix
 [docs/PLAN.md](../../docs/PLAN.md) section 3 and the code that relies on it
 in the same change.
+
+## Raising the PostgreSQL version
+
+Change the image tag and digest in `compose.yaml`, then
+`make dev-down && make dev-up && make dev-verify && make dev-test`. A new
+major version does not open the old one's data, and the image refuses to
+start on a volume that holds it (`make dev-up` fails, and
+`docker compose logs db` says why). Nothing here is worth upgrading in
+place: `make dev-down` removes the volumes. From PostgreSQL 18
+the image keeps its data in a directory named for the major version, which
+is why the volume is mounted at `/var/lib/postgresql` and `db-tls.sh`
+writes the certificate to `$PGDATA`.
