@@ -50,7 +50,7 @@ jobs:
         run: |
           git fetch --quiet --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor "$GITHUB_SHA" refs/remotes/origin/main || { echo "the commit tagged $GITHUB_REF_NAME is not on main"; exit 1; }
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
       - name: make vet
@@ -93,7 +93,7 @@ jobs:
       # No cache: what is released is compiled from the modules go.sum
       # names, fetched for this run, and not from build or module caches
       # that other jobs saved, some of which run third-party tooling.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7.1.0
         with:
           go-version-file: go.mod
           cache: false
